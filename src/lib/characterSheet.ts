@@ -6,7 +6,7 @@ import type {
   ForgeResult,
 } from './forge'
 
-export const characterSheetModel = 'gemini-3-pro-image-preview'
+export const defaultCharacterSheetModel = 'gemini-3-pro'
 
 export type CharacterSheetReferenceRole =
   | 'Identity_Reference'
@@ -26,7 +26,7 @@ export type CharacterSheetRequestPayload = {
   candidateCount: 1
   consistencyEnabled: boolean
   generationMode: CharacterSheetGenerationMode
-  model: string
+  modelId: string
   parentId: string | null
   prompt: string
   references: CharacterSheetEncodedReference[]
@@ -80,6 +80,7 @@ export function buildCharacterSheetPrompt(state: CharacterSheetState) {
 
 export async function buildCharacterSheetRequest(
   state: CharacterSheetState,
+  modelId: string,
 ): Promise<CharacterSheetRequestPayload> {
   const references = await Promise.all(
     (['face', 'outfit', 'art-style'] as CharacterSheetReferenceSlot[])
@@ -106,7 +107,7 @@ export async function buildCharacterSheetRequest(
     candidateCount: 1,
     consistencyEnabled: state.consistencyEnabled,
     generationMode: state.generationMode,
-    model: characterSheetModel,
+    modelId,
     parentId: state.consistencyEnabled ? state.parentId : null,
     prompt: buildCharacterSheetPrompt(state),
     references,
@@ -115,8 +116,14 @@ export async function buildCharacterSheetRequest(
   }
 }
 
-export async function generateCharacterSheet(state: CharacterSheetState) {
-  const request = await buildCharacterSheetRequest(state)
+export async function generateCharacterSheet({
+  modelId,
+  state,
+}: {
+  modelId: string
+  state: CharacterSheetState
+}) {
+  const request = await buildCharacterSheetRequest(state, modelId)
   const response = await fetch('/api/character-sheet', {
     method: 'POST',
     headers: {

@@ -67,6 +67,117 @@ type ForgeBriefItem = {
   value: string
 }
 
+type UsageSummary = {
+  activeRpdRatio: number
+  averageDailyUse: number
+  costEstimate: number
+  dailyLimit: number
+  peakHourly: number
+  projectedMonthlyCost: number
+  requestCostEstimate: number
+  scopedModel?: string | null
+  timeZone: string
+  todayTotal: number
+}
+
+type TelemetryWindowState = {
+  sessionMaxByModel: Record<string, number>
+  startedAt: number
+}
+
+const telemetryWindowStorageKey = 'kizer-forge-telemetry-window'
+const telemetryWindowDurationMs = 24 * 60 * 60 * 1000
+const fallbackDailyLimit = 1500
+const LIMITS: Record<string, number> = {
+  'gemini-3-flash': 1500,
+  'gemini-3-pro': 250,
+}
+const MODEL_LABELS = {
+  'gemini-3-flash': 'Gemini 3 Flash',
+  'gemini-3-pro': 'Gemini 3 Pro',
+  'veo-3.1-fast': 'Veo 3.1 Fast',
+}
+type ModelId = keyof typeof MODEL_LABELS
+
+const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
+  armory: 'gemini-3-flash',
+  'character-sheet': 'gemini-3-pro',
+  'texture-lab': 'gemini-3-flash',
+  visualizer: 'gemini-3-flash',
+}
+
+const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
+  armory: ['gemini-3-flash', 'gemini-3-pro'],
+  'character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
+  'texture-lab': ['gemini-3-flash', 'gemini-3-pro'],
+  visualizer: ['gemini-3-flash', 'gemini-3-pro'],
+}
+
+function loadTelemetryWindowState(now = Date.now()): TelemetryWindowState {
+  if (typeof window === 'undefined') {
+    return {
+      sessionMaxByModel: {},
+      startedAt: now,
+    }
+  }
+
+  try {
+    const rawState = window.localStorage.getItem(telemetryWindowStorageKey)
+
+    if (!rawState) {
+      return {
+        sessionMaxByModel: {},
+        startedAt: now,
+      }
+    }
+
+    const parsedState = JSON.parse(rawState) as Partial<TelemetryWindowState>
+    const startedAt =
+      typeof parsedState.startedAt === 'number' && Number.isFinite(parsedState.startedAt)
+        ? parsedState.startedAt
+        : now
+    const sessionMaxByModel =
+      parsedState.sessionMaxByModel &&
+      typeof parsedState.sessionMaxByModel === 'object'
+        ? Object.fromEntries(
+            Object.entries(parsedState.sessionMaxByModel).filter(
+              ([modelName, value]) =>
+                typeof modelName === 'string' &&
+                modelName.trim().length > 0 &&
+                typeof value === 'number' &&
+                Number.isFinite(value) &&
+                value >= 0,
+            ),
+          )
+        : {}
+
+    if (now - startedAt >= telemetryWindowDurationMs) {
+      return {
+        sessionMaxByModel: {},
+        startedAt: now,
+      }
+    }
+
+    return {
+      sessionMaxByModel,
+      startedAt,
+    }
+  } catch {
+    return {
+      sessionMaxByModel: {},
+      startedAt: now,
+    }
+  }
+}
+
+function persistTelemetryWindowState(state: TelemetryWindowState) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(telemetryWindowStorageKey, JSON.stringify(state))
+}
+
 function App() {
   const [state, dispatch] = useReducer(forgeReducer, initialState)
   const [status, setStatus] = useState<ForgeStatus>('idle')
@@ -79,6 +190,19 @@ function App() {
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null)
   const [hasRestoredState, setHasRestoredState] = useState(false)
   const [serviceHealth, setServiceHealth] = useState<ServiceHealth | null>(null)
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
+  const [modelOverridesByMode, setModelOverridesByMode] = useState<
+    Partial<Record<ForgeMode, ModelId>>
+  >({})
+  const [activeModel, setActiveModel] = useState<ModelId>(
+    smartDefaultModelByMode[initialState.activeMode],
+  )
+  const [sessionCountsByModel, setSessionCountsByModel] = useState<
+    Record<string, number>
+  >({})
+  const [sessionMaxByModel, setSessionMaxByModel] = useState(
+    () => loadTelemetryWindowState().sessionMaxByModel,
+  )
   const activeMode = modeDefinitions[state.activeMode]
   const isCharacterSheetMode = state.activeMode === 'character-sheet'
   const characterReferenceCount = Object.values(
@@ -108,11 +232,7 @@ function App() {
     (_, index) => index,
   )
   const activeModelName =
-    serverModel ??
-    (isCharacterSheetMode
-      ? serviceHealth?.models['character-sheet']
-      : serviceHealth?.models.forge) ??
-    null
+    serverModel ?? activeModel
   const briefItems = isCharacterSheetMode
     ? buildCharacterSheetBriefItems(state)
     : [
@@ -125,6 +245,15 @@ function App() {
           value: state.references.subject?.name ?? 'Not attached',
         },
       ]
+  const modeAvailableModels = availableModelsByMode[state.activeMode]
+  const selectedModelSupported = modeAvailableModels.includes(activeModel)
+  const dailyEstimatedUsage = usageSummary?.todayTotal ?? 0
+  const dailyLimit =
+    usageSummary?.dailyLimit ?? LIMITS[activeModel] ?? fallbackDailyLimit
+  const selectedTelemetryModel = activeModel
+  const telemetryModelKey = selectedTelemetryModel ?? 'all-models'
+  const currentSessionCount = sessionCountsByModel[telemetryModelKey] ?? 0
+  const sessionMax = sessionMaxByModel[telemetryModelKey] ?? 0
 
   async function refreshHealth(cancelState?: { cancelled: boolean }) {
     await fetch('/api/health')
@@ -143,6 +272,32 @@ function App() {
       .catch(() => {
         if (!cancelState?.cancelled) {
           setServiceHealth(null)
+        }
+      })
+  }
+
+  async function refreshUsage(
+    modelName?: string | null,
+    cancelState?: { cancelled: boolean },
+  ) {
+    const query = modelName ? `?model=${encodeURIComponent(modelName)}` : ''
+
+    await fetch(`/api/usage${query}`)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error('Usage endpoint failed.')
+        }
+
+        return (await response.json()) as UsageSummary
+      })
+      .then((payload) => {
+        if (!cancelState?.cancelled) {
+          setUsageSummary(payload)
+        }
+      })
+      .catch(() => {
+        if (!cancelState?.cancelled) {
+          setUsageSummary(null)
         }
       })
   }
@@ -195,11 +350,87 @@ function App() {
     const cancelState = { cancelled: false }
 
     void refreshHealth(cancelState)
+    void refreshUsage(selectedTelemetryModel, cancelState)
 
     return () => {
       cancelState.cancelled = true
     }
-  }, [])
+  }, [selectedTelemetryModel])
+
+  useEffect(() => {
+    const modeDefault = smartDefaultModelByMode[state.activeMode]
+    const modeOverride = modelOverridesByMode[state.activeMode]
+    const nextModel =
+      modeOverride && availableModelsByMode[state.activeMode].includes(modeOverride)
+        ? modeOverride
+        : modeDefault
+
+    setActiveModel(nextModel)
+  }, [modelOverridesByMode, state.activeMode])
+
+  function registerSuccessfulApiCall(modelName?: string | null) {
+    const telemetryKey =
+      typeof modelName === 'string' && modelName.trim().length > 0
+        ? modelName
+        : 'all-models'
+
+    setSessionCountsByModel((previousCounts) => {
+      const nextCount = (previousCounts[telemetryKey] ?? 0) + 1
+      const now = Date.now()
+      const previousWindowState = loadTelemetryWindowState(now)
+      const nextWindowState =
+        now - previousWindowState.startedAt >= telemetryWindowDurationMs
+          ? {
+              sessionMaxByModel: {
+                [telemetryKey]: nextCount,
+              },
+              startedAt: now,
+            }
+          : {
+              ...previousWindowState,
+              sessionMaxByModel: {
+                ...previousWindowState.sessionMaxByModel,
+                [telemetryKey]: Math.max(
+                  previousWindowState.sessionMaxByModel[telemetryKey] ?? 0,
+                  nextCount,
+                ),
+              },
+            }
+
+      persistTelemetryWindowState(nextWindowState)
+      setSessionMaxByModel(nextWindowState.sessionMaxByModel)
+
+      return {
+        ...previousCounts,
+        [telemetryKey]: nextCount,
+      }
+    })
+
+    void refreshUsage(modelName)
+  }
+
+  function handleModelSelect(nextModel: ModelId) {
+    if (!availableModelsByMode[state.activeMode].includes(nextModel)) {
+      setError({
+        code: 'model_unsupported',
+        message:
+          `The selected model ${MODEL_LABELS[nextModel]} is not available for ${activeMode.label}.`,
+        title: 'Model Not Supported For This Tab',
+      })
+      return
+    }
+
+    setActiveModel(nextModel)
+    setError(null)
+    setModelOverridesByMode((previousOverrides) => ({
+      ...previousOverrides,
+      [state.activeMode]: nextModel,
+    }))
+    setNotice(
+      `Model override set to ${MODEL_LABELS[nextModel]} for ${activeMode.label}.`,
+    )
+    void refreshUsage(nextModel)
+  }
 
   useEffect(() => {
     if (!hasRestoredState) {
@@ -252,6 +483,7 @@ function App() {
     nextServerModel: string | null,
     nextServerPrompt: string | null,
     nextNotice: string,
+    options?: { telemetryModel?: string | null; trackTelemetry?: boolean },
   ) {
     const savedAt = new Date().toISOString()
     const nextRecentPrompts = buildRecentPrompts(activePromptValue, recentPrompts)
@@ -264,6 +496,10 @@ function App() {
     setNotice(nextNotice)
     setLastSavedAt(savedAt)
     setRecentPrompts(nextRecentPrompts)
+
+    if (options?.trackTelemetry) {
+      registerSuccessfulApiCall(options.telemetryModel ?? nextServerModel)
+    }
 
     if (isCharacterSheetMode && state.characterSheet.consistencyEnabled) {
       dispatch({
@@ -278,21 +514,41 @@ function App() {
       return
     }
 
+    if (!selectedModelSupported) {
+      setStatus('error')
+      setError({
+        code: 'model_unsupported',
+        details: [
+          `Available models for ${activeMode.label}: ${modeAvailableModels
+            .map((model) => MODEL_LABELS[model])
+            .join(', ')}`,
+        ],
+        message:
+          `The selected model ${MODEL_LABELS[activeModel]} does not support this tab's workflow.`,
+        title: 'Model Not Supported For This Tab',
+      })
+      return
+    }
+
     setStatus('loading')
     setError(null)
     setNotice(null)
-    setResults([])
-    setServerPrompt(null)
+      setResults([])
+      setServerPrompt(null)
 
     try {
       if (isCharacterSheetMode) {
-        const payload = await generateCharacterSheet(state.characterSheet)
+        const payload = await generateCharacterSheet({
+          modelId: activeModel,
+          state: state.characterSheet,
+        })
 
         finalizeForgeRun(
           payload.results,
           payload.model,
           payload.prompt,
           'Character sheet generated with palette extraction enabled.',
+          { telemetryModel: payload.model, trackTelemetry: true },
         )
         return
       }
@@ -317,6 +573,7 @@ function App() {
         },
         body: JSON.stringify({
           generationCount: state.generationCount,
+          modelId: activeModel,
           mode: state.activeMode,
           prompt: state.prompt.trim(),
           references,
@@ -359,6 +616,7 @@ function App() {
         payload.model ?? null,
         payload.prompt ?? null,
         `Forge pass completed with ${payload.images.length} candidate outputs.`,
+        { telemetryModel: payload.model, trackTelemetry: true },
       )
     } catch (requestError) {
       setStatus('error')
@@ -475,6 +733,19 @@ function App() {
               </div>
 
               <div className="mt-6 space-y-5">
+                <ModelSelector
+                  activeModel={activeModel}
+                  availableModels={modeAvailableModels}
+                  onSelect={handleModelSelect}
+                />
+
+                {!selectedModelSupported ? (
+                  <div className="rounded-[20px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                    {MODEL_LABELS[activeModel]} is not supported in {activeMode.label}.
+                    Choose one of the available models to continue.
+                  </div>
+                ) : null}
+
                 {isCharacterSheetMode ? (
                   <CharacterSheetPanel
                     generationMode={state.characterSheet.generationMode}
@@ -551,7 +822,7 @@ function App() {
                 <button
                   type="button"
                   onClick={() => void handleForge()}
-                  disabled={!isReadyForApi || isForging}
+                  disabled={!isReadyForApi || isForging || !selectedModelSupported}
                   className="inline-flex w-full items-center justify-between rounded-[24px] border border-sky-300/20 bg-[linear-gradient(135deg,rgba(56,189,248,0.2),rgba(10,14,20,0.92))] px-5 py-4 text-left shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)] transition duration-200 hover:border-sky-200/30 hover:shadow-[0_0_0_1px_rgba(125,211,252,0.12),0_28px_80px_rgba(14,165,233,0.24)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-sky-300/20 disabled:hover:shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)]"
                 >
                   <span className="flex items-center gap-3">
@@ -577,7 +848,9 @@ function App() {
                           ? isCharacterSheetMode
                             ? 'Sending character sheet request to Gemini'
                             : 'Sending prompt and references to Gemini'
-                          : isReadyForApi
+                          : !selectedModelSupported
+                            ? 'Selected model is not supported for this tab'
+                            : isReadyForApi
                             ? 'Request staged for API execution'
                             : isCharacterSheetMode
                               ? 'Attach all required references or write a manifest'
@@ -587,6 +860,16 @@ function App() {
                   </span>
                   <ChevronRight className="size-5 text-sky-100/80" strokeWidth={1.9} />
                 </button>
+
+                <TelemetryBar
+                  currentSessionCount={currentSessionCount}
+                  dailyEstimatedUsage={dailyEstimatedUsage}
+                  dailyLimit={dailyLimit}
+                  modelName={selectedTelemetryModel}
+                  peakHourly={usageSummary?.peakHourly ?? 0}
+                  projectedMonthlyCost={usageSummary?.projectedMonthlyCost ?? 0}
+                  sessionMax={sessionMax}
+                />
               </div>
             </aside>
 
@@ -740,6 +1023,129 @@ function MetricCard({ label, value }: MetricCardProps) {
       </p>
       <p className="mt-2 text-sm font-medium text-white">{value}</p>
     </div>
+  )
+}
+
+type TelemetryBarProps = {
+  currentSessionCount: number
+  dailyEstimatedUsage: number
+  dailyLimit: number
+  modelName: ModelId | null
+  peakHourly: number
+  projectedMonthlyCost: number
+  sessionMax: number
+}
+
+function TelemetryBar({
+  currentSessionCount,
+  dailyEstimatedUsage,
+  dailyLimit,
+  modelName,
+  peakHourly,
+  projectedMonthlyCost,
+  sessionMax,
+}: TelemetryBarProps) {
+  const usageRatio =
+    dailyLimit > 0
+      ? Math.max(0, Math.min(dailyEstimatedUsage / dailyLimit, 1))
+      : 0
+  const usagePercent = Math.round(usageRatio * 100)
+  const progressClassName =
+    usageRatio >= 0.8
+      ? 'bg-amber-300 shadow-[0_0_18px_rgba(252,211,77,0.45)]'
+      : 'bg-emerald-300 shadow-[0_0_18px_rgba(110,231,183,0.4)]'
+
+  return (
+    <section className="sticky bottom-0 z-10 rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(7,9,12,0.94),rgba(7,9,12,0.98))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur">
+      <div className="flex items-center justify-between">
+        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
+          Session Telemetry
+        </p>
+        <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-300">
+          {usagePercent}%
+        </span>
+      </div>
+      <p className="mt-2 truncate text-xs text-zinc-400">
+        Scope: {modelName ? MODEL_LABELS[modelName as ModelId] ?? modelName : 'all models'}
+      </p>
+
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.08]">
+        <div
+          className={`h-full rounded-full transition-all duration-300 ${progressClassName}`}
+          style={{ width: `${usageRatio * 100}%` }}
+        />
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-2.5 py-2">
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Session</p>
+          <p className="mt-1 text-zinc-100">{currentSessionCount} requests</p>
+        </div>
+        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-2.5 py-2">
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Day</p>
+          <p className="mt-1 text-zinc-100">
+            {dailyEstimatedUsage} / {dailyLimit}
+          </p>
+        </div>
+        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-2.5 py-2">
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Session Peak</p>
+          <p className="mt-1 text-zinc-100">{sessionMax} requests</p>
+        </div>
+        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-2.5 py-2">
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Peak Hourly</p>
+          <p className="mt-1 text-zinc-100">{peakHourly} requests</p>
+        </div>
+      </div>
+
+      <p className="mt-3 text-xs text-zinc-400">
+        Projected monthly spend: ${projectedMonthlyCost.toFixed(2)}
+      </p>
+    </section>
+  )
+}
+
+type ModelSelectorProps = {
+  activeModel: ModelId
+  availableModels: ModelId[]
+  onSelect: (model: ModelId) => void
+}
+
+function ModelSelector({
+  activeModel,
+  availableModels,
+  onSelect,
+}: ModelSelectorProps) {
+  return (
+    <section className="rounded-[22px] border border-white/10 bg-black/20 p-4">
+      <div className="flex items-center justify-between">
+        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
+          Model Override
+        </p>
+        <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-400">
+          Smart Default + Manual
+        </span>
+      </div>
+      <div className="mt-3 inline-flex w-full gap-2 rounded-full border border-white/10 bg-white/[0.02] p-1.5">
+        {availableModels.map((model) => {
+          const isActive = activeModel === model
+
+          return (
+            <button
+              key={model}
+              type="button"
+              onClick={() => onSelect(model)}
+              className={`flex-1 rounded-full px-3 py-2 text-xs font-medium transition ${
+                isActive
+                  ? 'border border-sky-300/35 bg-sky-400/14 text-sky-100'
+                  : 'border border-transparent text-zinc-400 hover:border-white/20 hover:bg-white/[0.04] hover:text-zinc-200'
+              }`}
+            >
+              {MODEL_LABELS[model]}
+            </button>
+          )
+        })}
+      </div>
+    </section>
   )
 }
 

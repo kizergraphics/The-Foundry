@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import dotenv from 'dotenv'
 import express from 'express'
 import { GoogleGenAI } from '@google/genai'
+import { getUsageSummary, recordUsageEvent } from './usageStore.js'
 
 dotenv.config()
 
@@ -17,9 +18,23 @@ const apiKey =
   process.env.GEMINI_API_KEY ??
   process.env.VITE_GEMINI_API_KEY ??
   process.env.GOOGLE_API_KEY
-const imageModel = process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image'
-const characterSheetModel =
-  process.env.GEMINI_CHARACTER_MODEL ?? 'gemini-3-pro-image-preview'
+const modelRegistry = {
+  'gemini-2.5-flash-image':
+    process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
+  'gemini-3-flash': process.env.GEMINI_FLASH_MODEL ?? 'gemini-3-flash-preview',
+  'gemini-3-pro':
+    process.env.GEMINI_PRO_MODEL ?? 'gemini-3-pro-image-preview',
+  'veo-3.1-fast':
+    process.env.GEMINI_VEO_MODEL ?? 'veo-3.1-fast-generate-preview',
+}
+const routeModelDefaults = {
+  '/api/character-sheet': 'gemini-3-pro',
+  '/api/forge': 'gemini-3-flash',
+}
+const routeModelAllowlist = {
+  '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
+  '/api/forge': ['gemini-3-flash', 'gemini-3-pro', 'gemini-2.5-flash-image'],
+}
 
 const modeInstructions = {
   armory:
@@ -37,12 +52,37 @@ app.use(express.json({ limit: '25mb' }))
 app.get('/api/health', (_request, response) => {
   response.json({
     ok: true,
+    availableModels: {
+      'character-sheet': routeModelAllowlist['/api/character-sheet'],
+      forge: routeModelAllowlist['/api/forge'],
+    },
     models: {
-      'character-sheet': characterSheetModel,
-      forge: imageModel,
+      'character-sheet': routeModelDefaults['/api/character-sheet'],
+      forge: routeModelDefaults['/api/forge'],
     },
     keyConfigured: Boolean(apiKey),
   })
+})
+
+app.get('/api/usage', async (request, response) => {
+  try {
+    const requestedModel =
+      typeof request.query?.model === 'string' ? request.query.model : undefined
+    const usageSummary = await getUsageSummary({
+      model: requestedModel,
+    })
+    response.json(usageSummary)
+  } catch (error) {
+    response.status(500).json({
+      error: {
+        code: 'usage_unavailable',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Usage telemetry is unavailable right now.',
+      },
+    })
+  }
 })
 
 app.post('/api/forge', async (request, response) => {
@@ -56,6 +96,7 @@ app.post('/api/forge', async (request, response) => {
 
   const {
     mode,
+    modelId,
     prompt,
     generationCount,
     references = [],
@@ -72,6 +113,19 @@ app.post('/api/forge', async (request, response) => {
   }
 
   const candidateCount = Math.min(Math.max(Number(generationCount) || 1, 1), 4)
+  const modelSelection = resolveModelForRoute('/api/forge', modelId)
+
+  if (!modelSelection.ok) {
+    response.status(400).json({
+      error: {
+        code: 'model_unsupported',
+        details: modelSelection.details,
+        message: modelSelection.message,
+        title: 'Model Not Supported For This Tab',
+      },
+    })
+    return
+  }
 
   const validReferences = Array.isArray(references)
     ? references.filter(
@@ -93,7 +147,7 @@ app.post('/api/forge', async (request, response) => {
 
   try {
     const generation = await ai.models.generateContent({
-      model: imageModel,
+      model: modelSelection.providerModel,
       contents: [
         { text: finalPrompt },
         ...validReferences.map((reference) => ({
@@ -119,13 +173,21 @@ app.post('/api/forge', async (request, response) => {
       return
     }
 
+    await recordUsageEvent({
+      model: modelSelection.modelId,
+      route: '/api/forge',
+    }).catch((logError) => {
+      console.warn('Telemetry logging failed for /api/forge:', logError)
+    })
+
     response.json({
       images,
-      model: imageModel,
+      model: modelSelection.modelId,
+      providerModel: modelSelection.providerModel,
       prompt: finalPrompt,
     })
   } catch (error) {
-    const normalizedError = normalizeGeminiError(error)
+    const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
@@ -143,6 +205,7 @@ app.post('/api/character-sheet', async (request, response) => {
   const {
     aspectRatio = '16:9',
     generationMode,
+    modelId,
     parentId,
     prompt,
     references = [],
@@ -157,6 +220,20 @@ app.post('/api/character-sheet', async (request, response) => {
 
   if (typeof prompt !== 'string' || !prompt.trim()) {
     response.status(400).json({ error: 'A non-empty character sheet prompt is required.' })
+    return
+  }
+
+  const modelSelection = resolveModelForRoute('/api/character-sheet', modelId)
+
+  if (!modelSelection.ok) {
+    response.status(400).json({
+      error: {
+        code: 'model_unsupported',
+        details: modelSelection.details,
+        message: modelSelection.message,
+        title: 'Model Not Supported For This Tab',
+      },
+    })
     return
   }
 
@@ -182,7 +259,7 @@ app.post('/api/character-sheet', async (request, response) => {
 
   try {
     const generation = await ai.models.generateContent({
-      model: characterSheetModel,
+      model: modelSelection.providerModel,
       contents: [
         { text: prompt.trim() },
         ...validReferences.map((reference) => ({
@@ -214,14 +291,22 @@ app.post('/api/character-sheet', async (request, response) => {
       return
     }
 
+    await recordUsageEvent({
+      model: modelSelection.modelId,
+      route: '/api/character-sheet',
+    }).catch((logError) => {
+      console.warn('Telemetry logging failed for /api/character-sheet:', logError)
+    })
+
     response.json({
       images,
-      model: characterSheetModel,
+      model: modelSelection.modelId,
+      providerModel: modelSelection.providerModel,
       parentId: typeof parentId === 'string' ? parentId : null,
       prompt: prompt.trim(),
     })
   } catch (error) {
-    const normalizedError = normalizeGeminiError(error, characterSheetModel)
+    const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
@@ -290,7 +375,49 @@ function extractImages(generation) {
   )
 }
 
-function normalizeGeminiError(error, modelName = imageModel) {
+function resolveModelForRoute(routeKey, requestedModelId) {
+  const allowedModels = routeModelAllowlist[routeKey] ?? []
+  const fallbackModel = routeModelDefaults[routeKey]
+  const normalizedRequestedModel =
+    typeof requestedModelId === 'string' && requestedModelId.trim().length > 0
+      ? requestedModelId.trim()
+      : fallbackModel
+
+  if (!allowedModels.includes(normalizedRequestedModel)) {
+    return {
+      ok: false,
+      details: [
+        `Allowed models for this tab: ${allowedModels.join(', ')}`,
+      ],
+      message:
+        `The selected model "${normalizedRequestedModel}" is not available for this tab's generation flow.`,
+    }
+  }
+
+  const providerModel = modelRegistry[normalizedRequestedModel]
+
+  if (!providerModel) {
+    return {
+      ok: false,
+      details: [
+        `Model alias "${normalizedRequestedModel}" is missing a provider mapping in the backend configuration.`,
+      ],
+      message:
+        `The selected model "${normalizedRequestedModel}" is not configured on the server yet.`,
+    }
+  }
+
+  return {
+    modelId: normalizedRequestedModel,
+    ok: true,
+    providerModel,
+  }
+}
+
+function normalizeGeminiError(
+  error,
+  modelName = routeModelDefaults['/api/forge'],
+) {
   const fallbackMessage =
     error instanceof Error ? error.message : 'Gemini request failed unexpectedly.'
   const parsedPayload = tryParseErrorPayload(fallbackMessage)
