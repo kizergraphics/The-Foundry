@@ -36,7 +36,6 @@ import {
   persistStoredState,
 } from './lib/persistence'
 import {
-  composePrompt,
   forgeReducer,
   initialState,
   modeDefinitions,
@@ -196,6 +195,9 @@ function App() {
   const [modelOverridesByMode, setModelOverridesByMode] = useState<
     Partial<Record<ForgeMode, ModelId>>
   >({})
+  const [styleInputByMode, setStyleInputByMode] = useState<
+    Partial<Record<ForgeMode, string>>
+  >({})
   const [activeModel, setActiveModel] = useState<ModelId>(
     smartDefaultModelByMode[initialState.activeMode],
   )
@@ -215,7 +217,7 @@ function App() {
     : Object.values(state.references).filter(Boolean).length
   const promptPreview = isCharacterSheetMode
     ? buildCharacterSheetPrompt(state.characterSheet)
-    : composePrompt(state)
+    : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
   const activePromptValue = isCharacterSheetMode
     ? getCharacterSheetPromptSource(state.characterSheet)
     : state.prompt
@@ -248,6 +250,7 @@ function App() {
         },
       ]
   const modeAvailableModels = availableModelsByMode[state.activeMode]
+  const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
   const selectedModelSupported = modeAvailableModels.includes(activeModel)
   const dailyEstimatedUsage = usageSummary?.todayTotal ?? 0
   const dailyLimit =
@@ -434,6 +437,13 @@ function App() {
     void refreshUsage(nextModel)
   }
 
+  function handleStyleInputChange(nextValue: string) {
+    setStyleInputByMode((previousState) => ({
+      ...previousState,
+      [state.activeMode]: nextValue,
+    }))
+  }
+
   useEffect(() => {
     if (!hasRestoredState) {
       return
@@ -543,12 +553,13 @@ function App() {
         const payload = await generateCharacterSheet({
           modelId: activeModel,
           state: state.characterSheet,
+          styleId: activeStyleInput.trim() || 'studio-default',
         })
 
         finalizeForgeRun(
           payload.results,
           payload.model,
-          payload.prompt,
+          activePromptValue.trim(),
           'Character sheet generated with palette extraction enabled.',
           { telemetryModel: payload.model, trackTelemetry: true },
         )
@@ -579,6 +590,7 @@ function App() {
           mode: state.activeMode,
           prompt: state.prompt.trim(),
           references,
+          styleText: activeStyleInput.trim(),
         }),
       })
 
@@ -616,7 +628,7 @@ function App() {
           text: image.text,
         })),
         payload.model ?? null,
-        payload.prompt ?? null,
+        activePromptValue.trim(),
         `Forge pass completed with ${payload.images.length} candidate outputs.`,
         { telemetryModel: payload.model, trackTelemetry: true },
       )
@@ -741,6 +753,11 @@ function App() {
                   onSelect={handleModelSelect}
                 />
 
+                <StyleInputPanel
+                  value={activeStyleInput}
+                  onChange={handleStyleInputChange}
+                />
+
                 {!selectedModelSupported ? (
                   <div className="rounded-[20px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
                     {MODEL_LABELS[activeModel]} is not supported in {activeMode.label}.
@@ -824,7 +841,11 @@ function App() {
                 <button
                   type="button"
                   onClick={() => void handleForge()}
-                  disabled={!isReadyForApi || isForging || !selectedModelSupported}
+                  disabled={
+                    !isReadyForApi ||
+                    isForging ||
+                    !selectedModelSupported
+                  }
                   className="inline-flex w-full items-center justify-between rounded-[24px] border border-sky-300/20 bg-[linear-gradient(135deg,rgba(56,189,248,0.2),rgba(10,14,20,0.92))] px-5 py-4 text-left shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)] transition duration-200 hover:border-sky-200/30 hover:shadow-[0_0_0_1px_rgba(125,211,252,0.12),0_28px_80px_rgba(14,165,233,0.24)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-sky-300/20 disabled:hover:shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)]"
                 >
                   <span className="flex items-center gap-3">
@@ -880,7 +901,7 @@ function App() {
                 activeMode={activeMode}
                 isForging={isForging}
                 isReadyForApi={isReadyForApi}
-                prompt={serverPrompt ?? promptPreview}
+                prompt={activePromptValue.trim() || promptPreview}
               />
 
               <div className="flex flex-col gap-4 rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-6">
@@ -1146,6 +1167,41 @@ function ModelSelector({
             </button>
           )
         })}
+      </div>
+    </section>
+  )
+}
+
+type StyleInputPanelProps = {
+  onChange: (value: string) => void
+  value: string
+}
+
+function StyleInputPanel({ value, onChange }: StyleInputPanelProps) {
+  return (
+    <section className="rounded-[22px] border border-white/10 bg-black/20 p-4">
+      <div className="flex items-center justify-between">
+        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
+          Style Input
+        </p>
+        <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-400">
+          AI Orchestrated
+        </span>
+      </div>
+      <div className="mt-3 space-y-2 rounded-[14px] border border-white/10 bg-white/[0.03] p-3">
+        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Describe visual style
+        </label>
+        <input
+          type="text"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="Ex: painterly dark fantasy with baroque ornament and heavy brush texture"
+          className="w-full rounded-[12px] border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
+        />
+        <p className="text-xs text-zinc-400">
+          This is injected into an AI-built best-practice prompt at request time.
+        </p>
       </div>
     </section>
   )

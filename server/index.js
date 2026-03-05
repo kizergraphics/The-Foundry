@@ -36,18 +36,15 @@ const routeModelAllowlist = {
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': ['gemini-3-flash', 'gemini-2.5-flash-image'],
 }
-
-const modeInstructions = {
-  armory:
-    '2D game asset, transparent-style background, thick outlines, production-ready presentation.',
-  'texture-lab':
-    'seamless texture, flat lighting, tileable surface, 1024x1024 composition.',
-  visualizer:
-    '8k resolution, cinematic lighting, concept art quality, premium reference composition.',
-}
+const supportedForgeModes = ['armory', 'texture-lab', 'visualizer']
 const forgeBatchMaxAttemptsPerImage = 4
 const forgeBatchInterRequestDelayMs = 250
 const forgeBatchRetryDelayMs = 1200
+const coreSystemRules = [
+  'Always render assets on a neutral gray #808080 background.',
+  'Never include text, logos, or watermarks in the image.',
+  'Ensure all assets are centered and fit entirely within the frame.',
+]
 
 const app = express()
 
@@ -104,6 +101,9 @@ app.post('/api/forge', async (request, response) => {
     prompt,
     generationCount,
     references = [],
+    styleId,
+    styleText,
+    systemInstruction,
   } = request.body ?? {}
 
   if (typeof prompt !== 'string' || !prompt.trim()) {
@@ -111,7 +111,7 @@ app.post('/api/forge', async (request, response) => {
     return
   }
 
-  if (!Object.hasOwn(modeInstructions, mode)) {
+  if (!supportedForgeModes.includes(mode)) {
     response.status(400).json({ error: 'Unsupported forge mode.' })
     return
   }
@@ -140,16 +140,24 @@ app.post('/api/forge', async (request, response) => {
       )
     : []
 
-  const finalPrompt = buildPrompt({
-    mode,
-    prompt,
-    hasStyleReference: validReferences.some((reference) => reference.slot === 'style'),
-    hasSubjectReference: validReferences.some((reference) => reference.slot === 'subject'),
-  })
-
   const ai = new GoogleGenAI({ apiKey })
 
   try {
+    const providedStyleText =
+      typeof styleText === 'string' && styleText.trim()
+        ? styleText.trim()
+        : typeof styleId === 'string' && styleId.trim()
+          ? styleId.trim()
+          : ''
+    const finalPrompt = await buildForgePromptWithBestPractices({
+      ai,
+      mode,
+      prompt: prompt.trim(),
+      styleText: providedStyleText,
+      hasStyleReference: validReferences.some((reference) => reference.slot === 'style'),
+      hasSubjectReference: validReferences.some((reference) => reference.slot === 'subject'),
+    })
+    const resolvedSystemInstruction = resolveSystemInstruction(systemInstruction)
     const baseContents = [
       { text: finalPrompt },
       ...validReferences.map((reference) => ({
@@ -178,9 +186,11 @@ app.post('/api/forge', async (request, response) => {
             ? {
                 candidateCount: 1,
                 responseModalities: ['IMAGE', 'TEXT'],
+                systemInstruction: resolvedSystemInstruction,
               }
             : {
                 candidateCount: 1,
+                systemInstruction: resolvedSystemInstruction,
               },
         })
 
@@ -253,6 +263,7 @@ app.post('/api/forge', async (request, response) => {
       model: modelSelection.modelId,
       providerModel: modelSelection.providerModel,
       prompt: finalPrompt,
+      styleId: providedStyleText || null,
     })
   } catch (error) {
     const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
@@ -278,6 +289,7 @@ app.post('/api/character-sheet', async (request, response) => {
     prompt,
     references = [],
     responseModalities = ['IMAGE', 'TEXT'],
+    styleId,
     systemInstruction,
   } = request.body ?? {}
 
@@ -326,10 +338,19 @@ app.post('/api/character-sheet', async (request, response) => {
   const ai = new GoogleGenAI({ apiKey })
 
   try {
+    const trimmedPrompt = prompt.trim()
+    const styleLabel =
+      typeof styleId === 'string' && styleId.trim() ? styleId.trim() : 'studio-default'
+    const promptForGeneration = await maybeEnhancePrompt({
+      ai,
+      prompt: trimmedPrompt,
+      styleLabel,
+    })
+
     const generation = await ai.models.generateContent({
       model: modelSelection.providerModel,
       contents: [
-        { text: prompt.trim() },
+        { text: promptForGeneration },
         ...validReferences.map((reference) => ({
           inlineData: {
             mimeType: reference.mimeType,
@@ -341,10 +362,11 @@ app.post('/api/character-sheet', async (request, response) => {
         aspectRatio,
         candidateCount: 1,
         responseModalities,
-        systemInstruction:
+        systemInstruction: resolveSystemInstruction(
           typeof systemInstruction === 'string' && systemInstruction.trim()
             ? systemInstruction.trim()
             : 'Provide the 5 dominant hex codes for this character at the end of the response.',
+        ),
       },
     })
 
@@ -375,7 +397,8 @@ app.post('/api/character-sheet', async (request, response) => {
       model: modelSelection.modelId,
       providerModel: modelSelection.providerModel,
       parentId: typeof parentId === 'string' ? parentId : null,
-      prompt: prompt.trim(),
+      prompt: trimmedPrompt,
+      styleId: styleLabel,
     })
   } catch (error) {
     const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
@@ -396,27 +419,179 @@ app.listen(port, () => {
   console.log(`Kizer Forge API listening on http://localhost:${port}`)
 })
 
-function buildPrompt({
+async function buildForgePromptWithBestPractices({
+  ai,
   mode,
   prompt,
+  styleText,
   hasStyleReference,
   hasSubjectReference,
 }) {
-  const promptSections = [prompt.trim(), modeInstructions[mode]]
+  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
+  const normalizedStyleText =
+    typeof styleText === 'string' ? styleText.trim() : ''
 
-  if (hasStyleReference) {
-    promptSections.push(
-      'Use the style reference to guide rendering language, palette, finish, and material treatment.',
-    )
+  if (!normalizedPrompt) {
+    return ''
   }
 
-  if (hasSubjectReference) {
-    promptSections.push(
-      'Use the subject reference to preserve silhouette, structure, and recognizable content.',
-    )
+  const orchestratorModel = modelRegistry['gemini-3-flash']
+
+  if (!orchestratorModel) {
+    return buildForgePromptFallback({
+      mode,
+      prompt: normalizedPrompt,
+      styleText: normalizedStyleText,
+      hasStyleReference,
+      hasSubjectReference,
+    })
   }
 
-  return promptSections.join('\n\n')
+  const modeTask =
+    mode === 'texture-lab'
+      ? 'Build a seamless, tile-safe texture prompt for production use.'
+      : mode === 'visualizer'
+        ? 'Build a cinematic concept-visualization prompt for high-end presentation.'
+        : 'Build a production-ready game asset prompt with strong silhouette clarity.'
+  const modeContext =
+    mode === 'texture-lab'
+      ? 'Top-down material authoring workflow for repeatable texture generation.'
+      : mode === 'visualizer'
+        ? 'Visual development workflow for mood, composition, and scene storytelling.'
+        : 'Armory workflow for props, gear, and usable in-game items.'
+  const referenceContext = [
+    hasStyleReference
+      ? 'A style image reference is attached; preserve its rendering language.'
+      : null,
+    hasSubjectReference
+      ? 'A subject image reference is attached; preserve structure and identity.'
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  try {
+    const promptGeneration = await ai.models.generateContent({
+      model: orchestratorModel,
+      contents: [
+        {
+          text: [
+            `User Prompt: ${normalizedPrompt}`,
+            `User Style Input: ${normalizedStyleText || 'No style input provided.'}`,
+            `Task Context: ${modeTask}`,
+            `Workflow Context: ${modeContext}`,
+            referenceContext ? `Reference Context: ${referenceContext}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        },
+      ],
+      config: {
+        candidateCount: 1,
+        responseModalities: ['TEXT'],
+        systemInstruction:
+          'You are a senior prompt engineer for image generation in game pipelines. ' +
+          'Use PTCF structure (Persona, Task, Context, Format) and best practices. ' +
+          'Return exactly one concise production prompt paragraph with no markdown and no bullets.',
+      },
+    })
+
+    const generatedPrompt =
+      typeof promptGeneration.text === 'string' ? promptGeneration.text.trim() : ''
+
+    if (generatedPrompt) {
+      return generatedPrompt
+    }
+  } catch {
+    // Fall back to deterministic prompt if orchestration fails.
+  }
+
+  return buildForgePromptFallback({
+    mode,
+    prompt: normalizedPrompt,
+    styleText: normalizedStyleText,
+    hasStyleReference,
+    hasSubjectReference,
+  })
+}
+
+function buildForgePromptFallback({
+  mode,
+  prompt,
+  styleText,
+  hasStyleReference,
+  hasSubjectReference,
+}) {
+  const modeBestPractices =
+    mode === 'texture-lab'
+      ? 'seamless tile-safe structure, flat lighting, controlled surface scale'
+      : mode === 'visualizer'
+        ? 'cinematic composition, clear focal hierarchy, premium lighting control'
+        : 'clean silhouette readability, material clarity, game-ready presentation'
+  const referenceGuidance = [
+    hasStyleReference ? 'Honor the attached style reference.' : null,
+    hasSubjectReference ? 'Honor the attached subject reference.' : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  return [
+    'Persona: Senior concept artist for game production.',
+    `Task: Generate one ${mode} image candidate from the request.`,
+    `Context: ${modeBestPractices}. ${referenceGuidance}`.trim(),
+    'Format: One concise technical prompt.',
+    `Style Direction: ${styleText || 'Use a neutral studio-quality style.'}`,
+    `User Request: ${prompt}`,
+  ].join('\n')
+}
+
+function resolveSystemInstruction(customInstruction) {
+  if (typeof customInstruction !== 'string' || !customInstruction.trim()) {
+    return coreSystemRules.join('\n')
+  }
+
+  return `${coreSystemRules.join('\n')}\n${customInstruction.trim()}`
+}
+
+async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
+  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
+
+  if (!normalizedPrompt || countWords(normalizedPrompt) >= 10) {
+    return normalizedPrompt
+  }
+
+  const enhancerModel = modelRegistry['gemini-3-flash']
+
+  if (!enhancerModel) {
+    return normalizedPrompt
+  }
+
+  try {
+    const enhancement = await ai.models.generateContent({
+      model: enhancerModel,
+      contents: [{ text: normalizedPrompt }],
+      config: {
+        candidateCount: 1,
+        responseModalities: ['TEXT'],
+        systemInstruction:
+          `You are an art director. Expand this simple idea into a technical prompt for ${styleLabel}, ` +
+          'adding specific lighting and material details. Return exactly one concise paragraph.',
+      },
+    })
+
+    const enhancedPrompt =
+      typeof enhancement.text === 'string' ? enhancement.text.trim() : ''
+    return enhancedPrompt || normalizedPrompt
+  } catch {
+    return normalizedPrompt
+  }
+}
+
+function countWords(value) {
+  return value
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length
 }
 
 function extractImages(generation) {

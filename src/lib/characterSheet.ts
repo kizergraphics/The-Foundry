@@ -31,6 +31,7 @@ export type CharacterSheetRequestPayload = {
   prompt: string
   references: CharacterSheetEncodedReference[]
   responseModalities: ['IMAGE', 'TEXT']
+  styleId: string
   systemInstruction: string
 }
 
@@ -81,6 +82,7 @@ export function buildCharacterSheetPrompt(state: CharacterSheetState) {
 export async function buildCharacterSheetRequest(
   state: CharacterSheetState,
   modelId: string,
+  styleId: string,
 ): Promise<CharacterSheetRequestPayload> {
   const references = await Promise.all(
     (['face', 'outfit', 'art-style'] as CharacterSheetReferenceSlot[])
@@ -112,6 +114,7 @@ export async function buildCharacterSheetRequest(
     prompt: buildCharacterSheetPrompt(state),
     references,
     responseModalities: ['IMAGE', 'TEXT'],
+    styleId,
     systemInstruction: characterSheetSystemInstruction,
   }
 }
@@ -119,11 +122,13 @@ export async function buildCharacterSheetRequest(
 export async function generateCharacterSheet({
   modelId,
   state,
+  styleId,
 }: {
   modelId: string
   state: CharacterSheetState
+  styleId: string
 }) {
-  const request = await buildCharacterSheetRequest(state, modelId)
+  const request = await buildCharacterSheetRequest(state, modelId, styleId)
   const response = await fetch('/api/character-sheet', {
     method: 'POST',
     headers: {
