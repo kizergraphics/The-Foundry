@@ -89,10 +89,12 @@ const telemetryWindowStorageKey = 'kizer-forge-telemetry-window'
 const telemetryWindowDurationMs = 24 * 60 * 60 * 1000
 const fallbackDailyLimit = 1500
 const LIMITS: Record<string, number> = {
+  'gemini-2.5-flash-image': 1500,
   'gemini-3-flash': 1500,
   'gemini-3-pro': 250,
 }
 const MODEL_LABELS = {
+  'gemini-2.5-flash-image': 'Gemini 2.5 Flash Image',
   'gemini-3-flash': 'Gemini 3 Flash',
   'gemini-3-pro': 'Gemini 3 Pro',
   'veo-3.1-fast': 'Veo 3.1 Fast',
@@ -107,10 +109,10 @@ const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
 }
 
 const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
-  armory: ['gemini-3-flash', 'gemini-3-pro'],
+  armory: ['gemini-3-flash', 'gemini-2.5-flash-image'],
   'character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
-  'texture-lab': ['gemini-3-flash', 'gemini-3-pro'],
-  visualizer: ['gemini-3-flash', 'gemini-3-pro'],
+  'texture-lab': ['gemini-3-flash', 'gemini-2.5-flash-image'],
+  visualizer: ['gemini-3-flash', 'gemini-2.5-flash-image'],
 }
 
 function loadTelemetryWindowState(now = Date.now()): TelemetryWindowState {

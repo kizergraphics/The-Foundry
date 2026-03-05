@@ -123,7 +123,33 @@ export function persistStoredState(state: StoredState) {
     return
   }
 
-  window.localStorage.setItem(storageKey, JSON.stringify(state))
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(state))
+    return
+  } catch {
+    // Large batch outputs can exceed localStorage quota.
+    // Retry with lightweight state so runtime does not crash.
+  }
+
+  const fallbackState: StoredState = {
+    ...state,
+    session: state.session
+      ? {
+          ...state.session,
+          results: [],
+        }
+      : null,
+  }
+
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(fallbackState))
+  } catch {
+    try {
+      window.localStorage.removeItem(storageKey)
+    } catch {
+      // Ignore storage failures: persistence should never break rendering.
+    }
+  }
 }
 
 export function buildRecentPrompts(nextPrompt: string, previousPrompts: string[]) {

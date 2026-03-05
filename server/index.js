@@ -21,7 +21,8 @@ const apiKey =
 const modelRegistry = {
   'gemini-2.5-flash-image':
     process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
-  'gemini-3-flash': process.env.GEMINI_FLASH_MODEL ?? 'gemini-3-flash-preview',
+  'gemini-3-flash':
+    process.env.GEMINI_FLASH_MODEL ?? 'gemini-3.1-flash-image-preview',
   'gemini-3-pro':
     process.env.GEMINI_PRO_MODEL ?? 'gemini-3-pro-image-preview',
   'veo-3.1-fast':
@@ -33,7 +34,7 @@ const routeModelDefaults = {
 }
 const routeModelAllowlist = {
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
-  '/api/forge': ['gemini-3-flash', 'gemini-3-pro', 'gemini-2.5-flash-image'],
+  '/api/forge': ['gemini-3-flash', 'gemini-2.5-flash-image'],
 }
 
 const modeInstructions = {
@@ -44,6 +45,9 @@ const modeInstructions = {
   visualizer:
     '8k resolution, cinematic lighting, concept art quality, premium reference composition.',
 }
+const forgeBatchMaxAttemptsPerImage = 4
+const forgeBatchInterRequestDelayMs = 250
+const forgeBatchRetryDelayMs = 1200
 
 const app = express()
 
@@ -146,42 +150,106 @@ app.post('/api/forge', async (request, response) => {
   const ai = new GoogleGenAI({ apiKey })
 
   try {
-    const generation = await ai.models.generateContent({
-      model: modelSelection.providerModel,
-      contents: [
-        { text: finalPrompt },
-        ...validReferences.map((reference) => ({
-          inlineData: {
-            mimeType: reference.mimeType,
-            data: reference.data,
-          },
-        })),
-      ],
-      config: {
-        candidateCount,
-      },
-    })
+    const baseContents = [
+      { text: finalPrompt },
+      ...validReferences.map((reference) => ({
+        inlineData: {
+          mimeType: reference.mimeType,
+          data: reference.data,
+        },
+      })),
+    ]
+    const maxAttempts = candidateCount * forgeBatchMaxAttemptsPerImage
+    const successfulRuns = []
+    const normalizedErrors = []
+    const noImageTexts = []
+    const images = []
+    let attempts = 0
 
-    const images = extractImages(generation).slice(0, candidateCount)
+    while (images.length < candidateCount && attempts < maxAttempts) {
+      attempts += 1
+
+      try {
+        const useModalities = attempts % 2 === 1
+        const generation = await ai.models.generateContent({
+          model: modelSelection.providerModel,
+          contents: baseContents,
+          config: useModalities
+            ? {
+                candidateCount: 1,
+                responseModalities: ['IMAGE', 'TEXT'],
+              }
+            : {
+                candidateCount: 1,
+              },
+        })
+
+        successfulRuns.push(generation)
+
+        const image = extractImages(generation).at(0)
+
+        if (image) {
+          images.push({
+            ...image,
+            id: `batch-${images.length + 1}-${image.id}`,
+          })
+        } else if (generation.text) {
+          noImageTexts.push(generation.text)
+        }
+
+        if (images.length < candidateCount) {
+          await sleep(forgeBatchInterRequestDelayMs)
+        }
+      } catch (requestError) {
+        const normalizedError = normalizeGeminiError(
+          requestError,
+          modelSelection.modelId,
+        )
+        normalizedErrors.push(normalizedError)
+        const isRetryable =
+          normalizedError.status === 429 || normalizedError.status >= 500
+        if (!isRetryable) {
+          break
+        }
+
+        const retryAfterSeconds = normalizedError.body?.error?.retryAfterSeconds
+        const retryAfterDelay =
+          typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
+            ? retryAfterSeconds * 1000
+            : forgeBatchRetryDelayMs
+        await sleep(retryAfterDelay)
+      }
+    }
 
     if (images.length === 0) {
-      response.status(502).json({
-        error:
-          generation.text ||
-          'Gemini returned no image candidates for this request. Try revising the prompt or references.',
-      })
+      if (successfulRuns.length === 0 && normalizedErrors.length > 0) {
+        const preferredError =
+          normalizedErrors.find((error) => error.status === 429) ??
+          normalizedErrors[0]
+        response.status(preferredError.status).json(preferredError.body)
+        return
+      }
+
+      const fallbackText = noImageTexts[0] ?? successfulRuns[0]?.text
+      response
+        .status(422)
+        .json(buildNoImageResponseError('/api/forge', modelSelection, fallbackText))
       return
     }
 
-    await recordUsageEvent({
-      model: modelSelection.modelId,
-      route: '/api/forge',
-    }).catch((logError) => {
-      console.warn('Telemetry logging failed for /api/forge:', logError)
-    })
+    await Promise.all(
+      successfulRuns.map(() =>
+        recordUsageEvent({
+          model: modelSelection.modelId,
+          route: '/api/forge',
+        }).catch((logError) => {
+          console.warn('Telemetry logging failed for /api/forge:', logError)
+        }),
+      ),
+    )
 
     response.json({
-      images,
+      images: images.slice(0, candidateCount),
       model: modelSelection.modelId,
       providerModel: modelSelection.providerModel,
       prompt: finalPrompt,
@@ -283,11 +351,15 @@ app.post('/api/character-sheet', async (request, response) => {
     const images = extractImages(generation).slice(0, 1)
 
     if (images.length === 0) {
-      response.status(502).json({
-        error:
-          generation.text ||
-          'Gemini returned no character sheet image for this request. Try revising the manifest or references.',
-      })
+      response
+        .status(422)
+        .json(
+          buildNoImageResponseError(
+            '/api/character-sheet',
+            modelSelection,
+            generation.text,
+          ),
+        )
       return
     }
 
@@ -414,6 +486,54 @@ function resolveModelForRoute(routeKey, requestedModelId) {
   }
 }
 
+function buildNoImageResponseError(routeKey, modelSelection, generationText) {
+  const incompatibleSignal = looksLikeToolDelegation(generationText)
+  const recommendedModelIds = routeModelAllowlist[routeKey] ?? []
+  const recommendations = recommendedModelIds
+    .filter((modelId) => modelId !== modelSelection.modelId)
+    .map((modelId) => `"${modelId}"`)
+
+  const details = [
+    `Selected model alias: ${modelSelection.modelId}`,
+    `Provider model: ${modelSelection.providerModel}`,
+  ]
+
+  if (recommendations.length) {
+    details.push(`Try one of: ${recommendations.join(', ')}`)
+  }
+
+  if (incompatibleSignal && generationText) {
+    details.push(
+      'The model returned a tool-style text response instead of inline image data for this request.',
+    )
+  }
+
+  return {
+    error: {
+      code: 'model_output_incompatible',
+      details,
+      message:
+        incompatibleSignal
+          ? 'The selected model did not return image parts for this tab. Switch to a supported image-capable model and try again.'
+          : 'The selected model returned no image candidates for this request. Try a different model or revise the prompt.',
+      title: 'No Image Output Returned',
+    },
+  }
+}
+
+function looksLikeToolDelegation(generationText) {
+  if (typeof generationText !== 'string' || !generationText.trim()) {
+    return false
+  }
+
+  const normalized = generationText.toLowerCase()
+  return (
+    normalized.includes('dalle.text2im') ||
+    normalized.includes('"action"') ||
+    normalized.includes('"action_input"')
+  )
+}
+
 function normalizeGeminiError(
   error,
   modelName = routeModelDefaults['/api/forge'],
@@ -524,4 +644,10 @@ function buildQuotaDetails(payload, retryAfterSeconds) {
   }
 
   return details
+}
+
+function sleep(durationMs) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, durationMs)
+  })
 }
