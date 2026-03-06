@@ -1,11 +1,21 @@
 import type {
+  ActionAnimatorActionType,
   CharacterSheetGenerationMode,
   ForgeMode,
   ForgeResult,
   GenerationCount,
+  LootLevelerRarity,
   TextureExpansionTargetSize,
   TextureLabWorkflow,
 } from './forge'
+import { clampActionAnimatorFps, clampFrameCount } from './forge'
+
+type StoredActionAnimatorSettings = {
+  actionType: ActionAnimatorActionType
+  customActionPrompt: string
+  frameCount: number
+  fps: number
+}
 
 type StoredCharacterSheetSettings = {
   consistencyEnabled: boolean
@@ -15,15 +25,28 @@ type StoredCharacterSheetSettings = {
   referencePrompt: string
 }
 
+type StoredLootLevelerSettings = {
+  rarity: LootLevelerRarity
+}
+
+type StoredPortraitStudioSettings = Record<string, never>
+
 type StoredSettings = {
   activeMode: ForgeMode
+  actionAnimator: StoredActionAnimatorSettings
   characterSheet: StoredCharacterSheetSettings
   generationCount: GenerationCount
+  lootLeveler: StoredLootLevelerSettings
+  portraitStudio: StoredPortraitStudioSettings
   prompt: string
   textureLab: {
     expansionTargetSize: TextureExpansionTargetSize
     seamlessMode: boolean
     workflow: TextureLabWorkflow
+  }
+  vfxForge: {
+    intensity: number
+    projectileType: string
   }
 }
 
@@ -66,12 +89,40 @@ export function loadStoredState(): StoredState | null {
         : [],
       settings: {
         activeMode:
+          parsed.settings?.activeMode === 'action-animator' ||
+          parsed.settings?.activeMode === 'loot-leveler' ||
+          parsed.settings?.activeMode === 'portrait-studio' ||
           parsed.settings?.activeMode === 'texture-lab' ||
+          parsed.settings?.activeMode === 'vfx-forge' ||
           parsed.settings?.activeMode === 'visualizer' ||
           parsed.settings?.activeMode === 'character-sheet' ||
           parsed.settings?.activeMode === 'armory'
             ? parsed.settings.activeMode
             : 'armory',
+        actionAnimator: {
+          actionType:
+            parsed.settings?.actionAnimator?.actionType === 'walk' ||
+            parsed.settings?.actionAnimator?.actionType === 'run' ||
+            parsed.settings?.actionAnimator?.actionType === 'attack' ||
+            parsed.settings?.actionAnimator?.actionType === 'jump' ||
+            parsed.settings?.actionAnimator?.actionType === 'custom'
+              ? parsed.settings.actionAnimator.actionType
+              : 'idle',
+          customActionPrompt:
+            typeof parsed.settings?.actionAnimator?.customActionPrompt === 'string'
+              ? parsed.settings.actionAnimator.customActionPrompt
+              : '',
+          frameCount:
+            typeof parsed.settings?.actionAnimator?.frameCount === 'number' &&
+            Number.isFinite(parsed.settings.actionAnimator.frameCount)
+              ? clampFrameCount(parsed.settings.actionAnimator.frameCount)
+              : 8,
+          fps:
+            typeof parsed.settings?.actionAnimator?.fps === 'number' &&
+            Number.isFinite(parsed.settings.actionAnimator.fps)
+              ? clampActionAnimatorFps(parsed.settings.actionAnimator.fps)
+              : 8,
+        },
         characterSheet: {
           consistencyEnabled: Boolean(
             parsed.settings?.characterSheet?.consistencyEnabled,
@@ -101,6 +152,15 @@ export function loadStoredState(): StoredState | null {
           parsed.settings?.generationCount === 4
             ? parsed.settings.generationCount
             : 3,
+        lootLeveler: {
+          rarity:
+            parsed.settings?.lootLeveler?.rarity === 'rare' ||
+            parsed.settings?.lootLeveler?.rarity === 'epic' ||
+            parsed.settings?.lootLeveler?.rarity === 'legendary'
+              ? parsed.settings.lootLeveler.rarity
+              : 'common',
+        },
+        portraitStudio: {},
         prompt:
           typeof parsed.settings?.prompt === 'string' ? parsed.settings.prompt : '',
         textureLab: {
@@ -111,6 +171,18 @@ export function loadStoredState(): StoredState | null {
             parsed.settings?.textureLab?.workflow === 'expand'
               ? 'expand'
               : 'generate',
+        },
+        vfxForge: {
+          intensity:
+            typeof parsed.settings?.vfxForge?.intensity === 'number' &&
+            Number.isFinite(parsed.settings.vfxForge.intensity)
+              ? Math.max(0, Math.min(100, Math.round(parsed.settings.vfxForge.intensity)))
+              : 60,
+          projectileType:
+            typeof parsed.settings?.vfxForge?.projectileType === 'string' &&
+            parsed.settings.vfxForge.projectileType.trim().length > 0
+              ? parsed.settings.vfxForge.projectileType
+              : 'Fireball',
         },
       },
       session:

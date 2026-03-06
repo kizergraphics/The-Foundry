@@ -15,15 +15,35 @@ const modeAccents: Record<
     accentSoft: '#0c4a6e',
     label: 'Armory',
   },
+  'action-animator': {
+    accent: '#22d3ee',
+    accentSoft: '#164e63',
+    label: 'Action Animator',
+  },
   'texture-lab': {
     accent: '#34d399',
     accentSoft: '#064e3b',
     label: 'Texture Lab',
   },
+  'loot-leveler': {
+    accent: '#f59e0b',
+    accentSoft: '#78350f',
+    label: 'Loot Leveler',
+  },
+  'portrait-studio': {
+    accent: '#f472b6',
+    accentSoft: '#831843',
+    label: 'Portrait Studio',
+  },
   visualizer: {
     accent: '#fbbf24',
     accentSoft: '#78350f',
     label: 'Visualizer',
+  },
+  'vfx-forge': {
+    accent: '#fb923c',
+    accentSoft: '#7c2d12',
+    label: 'VFX Forge',
   },
   'character-sheet': {
     accent: '#fb7185',
@@ -71,8 +91,9 @@ function buildMockSvg({
 }) {
   const accent = modeAccents[mode]
   const promptLines = chunkText(prompt, mode === 'character-sheet' ? 40 : 28).slice(0, 5)
-  const width = mode === 'character-sheet' ? 1600 : 960
-  const height = mode === 'character-sheet' ? 900 : 1200
+  const isWideStrip = mode === 'action-animator' || mode === 'vfx-forge'
+  const width = mode === 'character-sheet' ? 1600 : isWideStrip ? 2048 : 960
+  const height = mode === 'character-sheet' ? 900 : isWideStrip ? 256 : 1200
   const contentWidth = width - 96
   const contentHeight = height - 96
 

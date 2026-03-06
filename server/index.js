@@ -1,9 +1,13 @@
+import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import dotenv from 'dotenv'
 import express from 'express'
-import { GoogleGenAI } from '@google/genai'
+import { GoogleGenAI } from '@google/genai/node'
+import ffmpegPath from 'ffmpeg-static'
 import { getUsageSummary, recordUsageEvent } from './usageStore.js'
 
 dotenv.config()
@@ -29,17 +33,33 @@ const modelRegistry = {
     process.env.GEMINI_VEO_MODEL ?? 'veo-3.1-fast-generate-preview',
 }
 const routeModelDefaults = {
+  '/api/action-animator': 'veo-3.1-fast',
   '/api/character-sheet': 'gemini-3-pro',
   '/api/forge': 'gemini-3-flash',
 }
 const routeModelAllowlist = {
+  '/api/action-animator': ['veo-3.1-fast'],
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
 }
-const supportedForgeModes = ['armory', 'texture-lab', 'visualizer']
+const supportedForgeModes = [
+  'armory',
+  'loot-leveler',
+  'portrait-studio',
+  'texture-lab',
+  'vfx-forge',
+  'visualizer',
+]
 const forgeBatchMaxAttemptsPerImage = 4
 const forgeBatchInterRequestDelayMs = 250
 const forgeBatchRetryDelayMs = 1200
+const actionAnimatorPollingIntervalMs = 10000
+const actionAnimatorTimeoutMs = 5 * 60 * 1000
+const minActionAnimatorDurationSeconds = 4
+const maxActionAnimatorDurationSeconds = 8
+const actionAnimatorDurationSeconds = clampActionAnimatorDurationSeconds(
+  Number(process.env.GEMINI_VEO_DURATION_SECONDS ?? minActionAnimatorDurationSeconds),
+)
 const coreSystemRules = [
   'Always render assets on a neutral gray #808080 background.',
   'Never include text, logos, or watermarks in the image.',
@@ -54,10 +74,12 @@ app.get('/api/health', (_request, response) => {
   response.json({
     ok: true,
     availableModels: {
+      'action-animator': routeModelAllowlist['/api/action-animator'],
       'character-sheet': routeModelAllowlist['/api/character-sheet'],
       forge: routeModelAllowlist['/api/forge'],
     },
     models: {
+      'action-animator': routeModelDefaults['/api/action-animator'],
       'character-sheet': routeModelDefaults['/api/character-sheet'],
       forge: routeModelDefaults['/api/forge'],
     },
@@ -100,6 +122,9 @@ app.post('/api/forge', async (request, response) => {
     modelId,
     prompt,
     generationCount,
+    intensity,
+    projectileType,
+    rarity,
     references = [],
     styleId,
     styleText,
@@ -123,7 +148,13 @@ app.post('/api/forge', async (request, response) => {
         : 'generate'
   const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
 
-  if (requestedWorkflow === 'generate' && !normalizedPrompt) {
+  if (
+    requestedWorkflow === 'generate' &&
+    !normalizedPrompt &&
+    mode !== 'loot-leveler' &&
+    mode !== 'portrait-studio' &&
+    mode !== 'vfx-forge'
+  ) {
     response.status(400).json({ error: 'A non-empty prompt is required.' })
     return
   }
@@ -189,6 +220,21 @@ app.post('/api/forge', async (request, response) => {
               prompt: normalizedPrompt,
               styleText: providedStyleText,
             })
+        : mode === 'loot-leveler'
+          ? buildLootLevelerPrompt({
+              rarity,
+              styleText: providedStyleText,
+            })
+        : mode === 'portrait-studio'
+          ? buildPortraitStudioPrompt({
+              styleText: providedStyleText,
+            })
+        : mode === 'vfx-forge'
+          ? buildVfxForgePrompt({
+              intensity,
+              projectileType,
+              styleText: providedStyleText,
+            })
         : await buildForgePromptWithBestPractices({
             ai,
             mode,
@@ -207,6 +253,12 @@ app.post('/api/forge', async (request, response) => {
         ? resolveTextureExpansionSystemInstruction(systemInstruction)
         : requestedWorkflow === 'repair-seams'
           ? resolveSeamRepairSystemInstruction(systemInstruction)
+        : mode === 'loot-leveler'
+          ? resolveLootLevelerSystemInstruction(systemInstruction, { rarity })
+        : mode === 'portrait-studio'
+          ? resolvePortraitStudioSystemInstruction(systemInstruction)
+        : mode === 'vfx-forge'
+          ? resolveVfxForgeSystemInstruction(systemInstruction)
         : mode === 'texture-lab'
           ? resolveTextureGenerationSystemInstruction(systemInstruction, {
               seamlessMode: Boolean(seamlessMode),
@@ -584,6 +636,84 @@ app.post('/api/character-sheet', async (request, response) => {
   }
 })
 
+app.post('/api/action-animator', async (request, response) => {
+  if (!apiKey) {
+    response.status(500).json({
+      error:
+        'Gemini API key is missing. Set GEMINI_API_KEY in .env. VITE_GEMINI_API_KEY is accepted temporarily, but server-side naming is preferred.',
+    })
+    return
+  }
+
+  const { actionType, fps, frameCount, image, modelId, prompt } = request.body ?? {}
+  const normalizedFps = clampActionAnimatorFps(fps)
+  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
+
+  if (
+    typeof image?.mimeType !== 'string' ||
+    typeof image?.data !== 'string' ||
+    !image.data.length
+  ) {
+    response.status(400).json({
+      error: 'Action Animator requires a source character image.',
+    })
+    return
+  }
+
+  const modelSelection = resolveModelForRoute('/api/action-animator', modelId)
+
+  if (!modelSelection.ok) {
+    response.status(400).json({
+      error: {
+        code: 'model_unsupported',
+        details: modelSelection.details,
+        message: modelSelection.message,
+        title: 'Model Not Supported For This Tab',
+      },
+    })
+    return
+  }
+
+  const ai = new GoogleGenAI({ apiKey })
+
+  try {
+    const animatorResult = await generateAnimatorSpriteSheet({
+      actionType,
+      ai,
+      fps: normalizedFps,
+      frameCount: normalizedFrameCount,
+      image,
+      modelSelection,
+      prompt,
+    })
+
+    await recordUsageEvent({
+      model: modelSelection.modelId,
+      route: '/api/action-animator',
+    }).catch((logError) => {
+      console.warn('Telemetry logging failed for /api/action-animator:', logError)
+    })
+
+    response.json({
+      images: [
+        {
+          data: animatorResult.spriteSheetBase64,
+          id: 'action-animator-sprite-sheet',
+          mimeType: 'image/png',
+          text: animatorResult.note,
+        },
+      ],
+      model: modelSelection.modelId,
+      prompt: animatorResult.prompt,
+      providerModel: modelSelection.providerModel,
+    })
+  } catch (error) {
+    const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
+
+    response.status(normalizedError.status).json(normalizedError.body)
+  }
+})
+
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(distDir))
 
@@ -805,6 +935,61 @@ function buildSeamRepairPrompt({ prompt, styleText }) {
     .join(' ')
 }
 
+function buildLootLevelerPrompt({ rarity, styleText }) {
+  const normalizedRarity = normalizeLootRarity(rarity)
+  const rarityEffects = {
+    common: 'Keep the asset grounded and production clean.',
+    rare: 'Add minor engravings, subtle shine, and restrained rarity cues.',
+    epic: 'Introduce glow accents, premium materials, and a bolder rarity read.',
+    legendary:
+      'Add elemental aura language, floating shards, and dramatic premium VFX accents.',
+  }
+
+  return [
+    'Upgrade the attached base asset into a higher-rarity game item render.',
+    'Preserve the original silhouette, proportions, and core weapon or item type exactly.',
+    `Rarity target: ${normalizedRarity}.`,
+    rarityEffects[normalizedRarity],
+    styleText ? `Style guidance: ${styleText}.` : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function buildPortraitStudioPrompt({ styleText }) {
+  const emotions = ['Neutral', 'Angry', 'Sad', 'Joy', 'Surprised']
+
+  return [
+    'Create a 3 column by 2 row portrait sheet with five close-up hero portraits.',
+    `Expressions required: ${emotions.join(', ')}.`,
+    'Keep the facial structure, hair, skin tone, and eye color identical in every portrait.',
+    'Only the eyebrows, eyelids, and mouth should change to express emotion.',
+    'The sixth panel may remain a clean blank card or subtle title card.',
+    styleText ? `Style guidance: ${styleText}.` : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function buildVfxForgePrompt({ intensity, projectileType, styleText }) {
+  const normalizedProjectileType =
+    typeof projectileType === 'string' && projectileType.trim().length > 0
+      ? projectileType.trim()
+      : 'Fireball'
+  const normalizedIntensity = clampPercentage(intensity, 60)
+
+  return [
+    'Generate a 2D projectile spritesheet.',
+    `Projectile type: ${normalizedProjectileType}.`,
+    'Layout: exactly 8 frames in a single horizontal row.',
+    'Show the effect from birth through peak energy to dissipation.',
+    `Intensity target: ${normalizedIntensity} out of 100.`,
+    styleText ? `Style guidance: ${styleText}.` : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
 function resolveSystemInstruction(customInstruction) {
   if (typeof customInstruction !== 'string' || !customInstruction.trim()) {
     return coreSystemRules.join('\n')
@@ -825,6 +1010,53 @@ function resolveTextureExpansionSystemInstruction(customInstruction) {
   ]
 
   return [coreSystemRules.slice(1).join('\n'), textureExpansionRules.join('\n'), customInstruction]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n')
+}
+
+function resolveLootLevelerSystemInstruction(customInstruction, { rarity }) {
+  const normalizedRarity = normalizeLootRarity(rarity)
+  const strengthGuidance = {
+    common: 'Keep changes minimal and close to the original base asset.',
+    rare: 'Apply a low-strength upgrade pass comparable to a 0.2 variation.',
+    epic: 'Apply a medium-strength upgrade pass comparable to a 0.5 variation.',
+    legendary: 'Apply a high-strength upgrade pass comparable to a 0.8 variation.',
+  }
+
+  return [
+    coreSystemRules.join('\n'),
+    'Maintain the silhouette and core geometry of the input image.',
+    'Keep the weapon or item type identical to the source asset.',
+    `Apply ${normalizedRarity} visual upgrades only.`,
+    strengthGuidance[normalizedRarity],
+    customInstruction,
+  ]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n')
+}
+
+function resolvePortraitStudioSystemInstruction(customInstruction) {
+  const portraitRules = [
+    'This request creates a portrait expression pack.',
+    'Keep the facial structure, hair shape, eye color, and identity 100% identical to the reference image.',
+    'Only modify the eyebrows, eyelids, and mouth to convey each requested emotion.',
+    'Arrange the final output as a clean 3 column by 2 row layout.',
+  ]
+
+  return [coreSystemRules.join('\n'), portraitRules.join('\n'), customInstruction]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n')
+}
+
+function resolveVfxForgeSystemInstruction(customInstruction) {
+  const vfxRules = [
+    'Generate a 2D projectile spritesheet on a pure #000000 black background.',
+    'Layout: 8 frames in a single horizontal row.',
+    'Use soft glowing edges and no outlines for additive blending compatibility.',
+    'Keep the background fully black with no floor, props, or character silhouettes.',
+  ]
+
+  return [coreSystemRules.slice(1).join('\n'), vfxRules.join('\n'), customInstruction]
     .filter((value) => typeof value === 'string' && value.trim())
     .join('\n')
 }
@@ -1178,6 +1410,280 @@ function buildQuotaDetails(payload, retryAfterSeconds) {
   }
 
   return details
+}
+
+async function generateAnimatorSpriteSheet({
+  actionType,
+  ai,
+  fps,
+  frameCount,
+  image,
+  modelSelection,
+  prompt,
+}) {
+  const normalizedPrompt = buildAnimatorPrompt({
+    actionType,
+    fps,
+    frameCount,
+    prompt,
+  })
+  const sourceImage = {
+    imageBytes: image.data,
+    mimeType: image.mimeType,
+  }
+  const operation = await ai.models.generateVideos({
+    model: modelSelection.providerModel,
+    source: {
+      image: sourceImage,
+      prompt: normalizedPrompt,
+    },
+    config: {
+      durationSeconds: actionAnimatorDurationSeconds,
+      numberOfVideos: 1,
+      personGeneration: 'allow_adult',
+    },
+  })
+
+  const settledOperation = await waitForVideoOperation(ai, operation)
+  const video = settledOperation.response?.generatedVideos?.[0]?.video
+  const videoBuffer = await readGeneratedVideo(ai, video)
+  const spriteSheetBase64 = await createSpriteSheetFromVideo({
+    frameCount,
+    videoBuffer,
+  })
+
+  return {
+    note:
+      `Generated ${frameCount} frame sprite sheet from Veo 3.1 Fast with a target playback rate of ${fps} fps. ` +
+      'Feet, lighting, and centering constraints were injected server-side.',
+    prompt: normalizedPrompt,
+    spriteSheetBase64,
+  }
+}
+
+function buildAnimatorPrompt({ actionType, fps, frameCount, prompt }) {
+  const normalizedAction =
+    typeof actionType === 'string' && actionType.trim().length > 0
+      ? actionType.trim().toLowerCase()
+      : 'idle'
+  const normalizedFps = clampActionAnimatorFps(fps)
+  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
+  const baseWalkPrompt =
+    'A 2D game sprite walk cycle of the character in the image, side-profile view, 8 frames of fluid motion, isolated on a solid #00FF00 green screen background.'
+
+  const basePrompt =
+    normalizedAction === 'walk' && normalizedFrameCount === 8
+      ? baseWalkPrompt
+      : typeof prompt === 'string' && prompt.trim().length > 0
+        ? prompt.trim()
+        : [
+            `A 2D game sprite ${normalizedAction} cycle of the character in the image, side-profile view,`,
+            `${normalizedFrameCount} frames of fluid motion,`,
+            'isolated on a solid #00FF00 green screen background.',
+          ].join(' ')
+
+  return [
+    basePrompt,
+    `Target playback rate: ${normalizedFps} fps.`,
+    'Keep the feet on the same horizontal plane with no vertical drifting.',
+    'Keep the lighting constant across all frames.',
+    'Keep the character centered within each frame to prevent jitter.',
+    'Use a solid green background (#00FF00) for easy post-processing removal.',
+  ].join(' ')
+}
+
+async function waitForVideoOperation(ai, operation) {
+  const startedAt = Date.now()
+  let currentOperation = operation
+
+  while (!currentOperation.done) {
+    if (Date.now() - startedAt > actionAnimatorTimeoutMs) {
+      throw new Error('Veo video generation timed out before the operation completed.')
+    }
+
+    await sleep(actionAnimatorPollingIntervalMs)
+    currentOperation = await ai.operations.getVideosOperation({
+      operation: currentOperation,
+    })
+  }
+
+  if (currentOperation.error) {
+    throw new Error(JSON.stringify(currentOperation.error))
+  }
+
+  return currentOperation
+}
+
+async function readGeneratedVideo(ai, video) {
+  if (video?.videoBytes) {
+    return Buffer.from(video.videoBytes, 'base64')
+  }
+
+  if (typeof video?.uri === 'string' && video.uri.length > 0) {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-veo-download-'))
+    const downloadPath = path.join(tempDir, 'generated-video.mp4')
+
+    try {
+      await ai.files.download({
+        file: video,
+        downloadPath,
+      })
+
+      return await fs.readFile(downloadPath)
+    } catch (downloadError) {
+      const videoResponse = await fetch(video.uri, {
+        headers: apiKey
+          ? {
+              'x-goog-api-key': apiKey,
+            }
+          : undefined,
+      })
+
+      if (!videoResponse.ok) {
+        throw new Error(
+          `Generated video could not be downloaded from the returned URI. ` +
+            `SDK download failed first: ${
+              downloadError instanceof Error ? downloadError.message : 'unknown error'
+            }`,
+        )
+      }
+
+      return Buffer.from(await videoResponse.arrayBuffer())
+    } finally {
+      await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
+    }
+  }
+
+  throw new Error('Veo returned no downloadable video bytes for the animation request.')
+}
+
+async function createSpriteSheetFromVideo({ frameCount, videoBuffer }) {
+  if (!ffmpegPath) {
+    throw new Error('ffmpeg-static is unavailable, so sprite sheet extraction cannot run.')
+  }
+
+  const safeFrameCount = clampAnimatorFrameCount(frameCount)
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-action-animator-'))
+  const videoPath = path.join(tempDir, 'source.mp4')
+  const framePattern = path.join(tempDir, 'frame-%02d.png')
+  const spriteSheetPath = path.join(tempDir, 'sprite-sheet.png')
+
+  try {
+    await fs.writeFile(videoPath, videoBuffer)
+    await runFfmpeg([
+      '-y',
+      '-i',
+      videoPath,
+      '-vf',
+      [
+        `fps=${safeFrameCount / 2}`,
+        'scale=256:256:force_original_aspect_ratio=decrease:flags=lanczos',
+        'pad=256:256:(ow-iw)/2:(oh-ih)/2:color=0x00FF00',
+        'chromakey=0x00FF00:0.10:0.08',
+        'format=rgba',
+      ].join(','),
+      '-frames:v',
+      String(safeFrameCount),
+      framePattern,
+    ])
+
+    const frameInputs = Array.from({ length: safeFrameCount }, (_, index) => [
+      '-i',
+      path.join(tempDir, `frame-${String(index + 1).padStart(2, '0')}.png`),
+    ]).flat()
+
+    await runFfmpeg([
+      '-y',
+      ...frameInputs,
+      '-filter_complex',
+      `${Array.from({ length: safeFrameCount }, (_, index) => `[${index}:v]`).join('')}hstack=inputs=${safeFrameCount},format=rgba`,
+      '-frames:v',
+      '1',
+      spriteSheetPath,
+    ])
+
+    const spriteSheetBuffer = await fs.readFile(spriteSheetPath)
+    return spriteSheetBuffer.toString('base64')
+  } finally {
+    await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
+  }
+}
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const process = spawn(ffmpegPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stderr = ''
+
+    process.stderr.on('data', (chunk) => {
+      stderr += chunk.toString()
+    })
+
+    process.on('error', (error) => {
+      reject(error)
+    })
+
+    process.on('close', (code) => {
+      if (code === 0) {
+        resolve()
+        return
+      }
+
+      reject(new Error(stderr || `ffmpeg exited with code ${code}.`))
+    })
+  })
+}
+
+function clampAnimatorFrameCount(frameCount) {
+  const numericValue = Number(frameCount)
+
+  if (!Number.isFinite(numericValue)) {
+    return 8
+  }
+
+  return Math.max(4, Math.min(12, Math.round(numericValue)))
+}
+
+function clampActionAnimatorFps(fps) {
+  const numericValue = Number(fps)
+
+  if (!Number.isFinite(numericValue)) {
+    return 8
+  }
+
+  return Math.max(1, Math.min(30, Math.round(numericValue)))
+}
+
+function clampActionAnimatorDurationSeconds(durationSeconds) {
+  const numericValue = Number(durationSeconds)
+
+  if (!Number.isFinite(numericValue)) {
+    return minActionAnimatorDurationSeconds
+  }
+
+  return Math.max(
+    minActionAnimatorDurationSeconds,
+    Math.min(maxActionAnimatorDurationSeconds, Math.round(numericValue)),
+  )
+}
+
+function normalizeLootRarity(rarity) {
+  if (rarity === 'rare' || rarity === 'epic' || rarity === 'legendary') {
+    return rarity
+  }
+
+  return 'common'
+}
+
+function clampPercentage(value, fallback) {
+  const numericValue = Number(value)
+
+  if (!Number.isFinite(numericValue)) {
+    return fallback
+  }
+
+  return Math.max(0, Math.min(100, Math.round(numericValue)))
 }
 
 function sleep(durationMs) {

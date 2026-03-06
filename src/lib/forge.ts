@@ -1,9 +1,22 @@
 import type { LucideIcon } from 'lucide-react'
-import { Camera, Hammer, IdCard, Palette } from 'lucide-react'
+import {
+  Camera,
+  Clapperboard,
+  Flame,
+  Gem,
+  Hammer,
+  IdCard,
+  Palette,
+  ScanFace,
+} from 'lucide-react'
 
 export type ForgeMode =
   | 'armory'
+  | 'action-animator'
+  | 'loot-leveler'
+  | 'portrait-studio'
   | 'texture-lab'
+  | 'vfx-forge'
   | 'visualizer'
   | 'character-sheet'
 
@@ -14,12 +27,28 @@ export type TextureLabWorkflow = 'generate' | 'expand'
 export type TextureExpansionTargetSize = 1024 | 2048
 export type GenerationCount = 1 | 2 | 3 | 4
 export type ForgeStatus = 'idle' | 'loading' | 'success' | 'error'
+export type ActionAnimatorActionType =
+  | 'idle'
+  | 'walk'
+  | 'run'
+  | 'attack'
+  | 'jump'
+  | 'custom'
+export type LootLevelerRarity = 'common' | 'rare' | 'epic' | 'legendary'
 
 export type ReferenceAsset = {
   file: File
   mimeType: string
   name: string
   sizeLabel: string
+}
+
+export type ActionAnimatorState = {
+  actionType: ActionAnimatorActionType
+  characterImage: ReferenceAsset | null
+  customActionPrompt: string
+  frameCount: number
+  fps: number
 }
 
 export type CharacterSheetState = {
@@ -38,13 +67,31 @@ export type TextureLabState = {
   workflow: TextureLabWorkflow
 }
 
+export type LootLevelerState = {
+  baseAsset: ReferenceAsset | null
+  rarity: LootLevelerRarity
+}
+
+export type PortraitStudioState = {
+  heroImage: ReferenceAsset | null
+}
+
+export type VfxForgeState = {
+  intensity: number
+  projectileType: string
+}
+
 export type ForgeState = {
   activeMode: ForgeMode
+  actionAnimator: ActionAnimatorState
   characterSheet: CharacterSheetState
   generationCount: GenerationCount
+  lootLeveler: LootLevelerState
+  portraitStudio: PortraitStudioState
   prompt: string
   references: Record<ReferenceSlot, ReferenceAsset | null>
   textureLab: TextureLabState
+  vfxForge: VfxForgeState
 }
 
 export type ForgeAction =
@@ -52,6 +99,11 @@ export type ForgeAction =
   | { type: 'set-generation-count'; count: number }
   | { type: 'set-prompt'; prompt: string }
   | { type: 'set-reference'; slot: ReferenceSlot; asset: ReferenceAsset | null }
+  | { type: 'set-action-animator-image'; asset: ReferenceAsset | null }
+  | { type: 'set-action-animator-action'; actionType: ActionAnimatorActionType }
+  | { type: 'set-action-animator-custom-prompt'; prompt: string }
+  | { type: 'set-action-animator-frame-count'; frameCount: number }
+  | { type: 'set-action-animator-fps'; fps: number }
   | { type: 'set-character-sheet-mode'; mode: CharacterSheetGenerationMode }
   | { type: 'set-character-sheet-manifest'; prompt: string }
   | { type: 'set-character-sheet-reference-prompt'; prompt: string }
@@ -69,6 +121,11 @@ export type ForgeAction =
       type: 'set-texture-expansion-target-size'
       size: TextureExpansionTargetSize
     }
+  | { type: 'set-loot-leveler-asset'; asset: ReferenceAsset | null }
+  | { type: 'set-loot-leveler-rarity'; rarity: LootLevelerRarity }
+  | { type: 'set-portrait-studio-image'; asset: ReferenceAsset | null }
+  | { type: 'set-vfx-projectile-type'; projectileType: string }
+  | { type: 'set-vfx-intensity'; intensity: number }
 
 export type ModeDefinition = {
   description: string
@@ -78,6 +135,7 @@ export type ModeDefinition = {
   instruction: string
   label: string
   previewAspectClassName: string
+  previewImageClassName: string
   surfaceClassName: string
 }
 
@@ -107,6 +165,7 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     surfaceClassName:
       'from-sky-500/18 via-slate-950/80 to-slate-950/95 ring-sky-400/20',
     previewAspectClassName: 'aspect-[4/5]',
+    previewImageClassName: 'object-cover',
     icon: Hammer,
     focus: 'Weapons, props, equipables',
   },
@@ -119,6 +178,7 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     surfaceClassName:
       'from-emerald-400/16 via-slate-950/80 to-slate-950/95 ring-emerald-300/20',
     previewAspectClassName: 'aspect-[4/5]',
+    previewImageClassName: 'object-cover',
     icon: Palette,
     focus: 'Stone, cloth, metal, terrain',
   },
@@ -132,8 +192,65 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     surfaceClassName:
       'from-rose-400/14 via-slate-950/80 to-slate-950/95 ring-rose-300/20',
     previewAspectClassName: 'aspect-[16/9]',
+    previewImageClassName: 'object-cover',
     icon: IdCard,
     focus: 'Identity, outfit, turnaround',
+  },
+  'action-animator': {
+    label: 'Action Animator',
+    eyebrow: 'Motion',
+    description:
+      'Turns a locked character image into a spritesheet-ready motion pass with evenly spaced frames.',
+    instruction:
+      '2D sprite animation sheet, side profile, feet locked to the same horizon, consistent lighting',
+    surfaceClassName:
+      'from-cyan-400/18 via-slate-950/80 to-slate-950/95 ring-cyan-300/20',
+    previewAspectClassName: 'aspect-[8/1]',
+    previewImageClassName: 'object-contain',
+    icon: Clapperboard,
+    focus: 'Sprite sheets, motion loops, frame timing',
+  },
+  'loot-leveler': {
+    label: 'Loot Leveler',
+    eyebrow: 'Progression',
+    description:
+      'Applies controlled rarity upgrades while keeping the original asset silhouette and weapon identity intact.',
+    instruction:
+      'Maintain silhouette and core geometry, apply rarity-driven upgrades without changing the weapon type',
+    surfaceClassName:
+      'from-amber-300/18 via-slate-950/80 to-slate-950/95 ring-amber-200/20',
+    previewAspectClassName: 'aspect-[4/5]',
+    previewImageClassName: 'object-cover',
+    icon: Gem,
+    focus: 'Rarity tiers, upgrades, identity-preserving variants',
+  },
+  'portrait-studio': {
+    label: 'Portrait Studio',
+    eyebrow: 'Expressions',
+    description:
+      'Builds expression packs that keep the same face, hair, and eye identity across a production grid.',
+    instruction:
+      'Expression sheet, 3 columns by 2 rows, identical facial structure and styling across all portraits',
+    surfaceClassName:
+      'from-fuchsia-300/16 via-slate-950/80 to-slate-950/95 ring-fuchsia-200/20',
+    previewAspectClassName: 'aspect-[3/2]',
+    previewImageClassName: 'object-cover',
+    icon: ScanFace,
+    focus: 'Expression packs, face consistency, hero portraits',
+  },
+  'vfx-forge': {
+    label: 'VFX Forge',
+    eyebrow: 'Effects',
+    description:
+      'Generates horizontal projectile sheets with additive-friendly black backgrounds and clear effect timing.',
+    instruction:
+      '2D projectile spritesheet, pure black background, 8 horizontal frames, soft glowing particle edges',
+    surfaceClassName:
+      'from-orange-400/16 via-slate-950/80 to-slate-950/95 ring-orange-300/20',
+    previewAspectClassName: 'aspect-[8/1]',
+    previewImageClassName: 'object-contain',
+    icon: Flame,
+    focus: 'Projectile loops, FX timing, engine-ready sheets',
   },
   visualizer: {
     label: 'Visualizer',
@@ -144,6 +261,7 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     surfaceClassName:
       'from-amber-300/14 via-slate-950/80 to-slate-950/95 ring-amber-200/20',
     previewAspectClassName: 'aspect-[4/5]',
+    previewImageClassName: 'object-cover',
     icon: Camera,
     focus: 'Hero shots, callouts, mood frames',
   },
@@ -151,7 +269,21 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
 
 export const initialState: ForgeState = {
   activeMode: 'armory',
+  actionAnimator: {
+    actionType: 'idle',
+    characterImage: null,
+    customActionPrompt: '',
+    frameCount: 8,
+    fps: 8,
+  },
   generationCount: 3,
+  lootLeveler: {
+    baseAsset: null,
+    rarity: 'common',
+  },
+  portraitStudio: {
+    heroImage: null,
+  },
   prompt: '',
   references: {
     style: null,
@@ -174,6 +306,10 @@ export const initialState: ForgeState = {
       outfit: null,
     },
     referencePrompt: '',
+  },
+  vfxForge: {
+    intensity: 60,
+    projectileType: 'Fireball',
   },
 }
 
@@ -200,6 +336,46 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         references: {
           ...state.references,
           [action.slot]: action.asset,
+        },
+      }
+    case 'set-action-animator-image':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          characterImage: action.asset,
+        },
+      }
+    case 'set-action-animator-action':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          actionType: action.actionType,
+        },
+      }
+    case 'set-action-animator-custom-prompt':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          customActionPrompt: action.prompt,
+        },
+      }
+    case 'set-action-animator-frame-count':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          frameCount: clampFrameCount(action.frameCount),
+        },
+      }
+    case 'set-action-animator-fps':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          fps: clampActionAnimatorFps(action.fps),
         },
       }
     case 'set-texture-lab-workflow':
@@ -232,6 +408,46 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         textureLab: {
           ...state.textureLab,
           expansionTargetSize: action.size,
+        },
+      }
+    case 'set-loot-leveler-asset':
+      return {
+        ...state,
+        lootLeveler: {
+          ...state.lootLeveler,
+          baseAsset: action.asset,
+        },
+      }
+    case 'set-loot-leveler-rarity':
+      return {
+        ...state,
+        lootLeveler: {
+          ...state.lootLeveler,
+          rarity: action.rarity,
+        },
+      }
+    case 'set-portrait-studio-image':
+      return {
+        ...state,
+        portraitStudio: {
+          ...state.portraitStudio,
+          heroImage: action.asset,
+        },
+      }
+    case 'set-vfx-projectile-type':
+      return {
+        ...state,
+        vfxForge: {
+          ...state.vfxForge,
+          projectileType: action.projectileType,
+        },
+      }
+    case 'set-vfx-intensity':
+      return {
+        ...state,
+        vfxForge: {
+          ...state.vfxForge,
+          intensity: clampIntensity(action.intensity),
         },
       }
     case 'set-character-sheet-mode':
@@ -300,6 +516,42 @@ export function clampGenerationCount(value: number): GenerationCount {
   }
 
   return value as GenerationCount
+}
+
+export function clampFrameCount(value: number) {
+  if (value <= 4) {
+    return 4
+  }
+
+  if (value >= 12) {
+    return 12
+  }
+
+  return Math.round(value)
+}
+
+export function clampActionAnimatorFps(value: number) {
+  if (value <= 1) {
+    return 1
+  }
+
+  if (value >= 30) {
+    return 30
+  }
+
+  return Math.round(value)
+}
+
+export function clampIntensity(value: number) {
+  if (value <= 0) {
+    return 0
+  }
+
+  if (value >= 100) {
+    return 100
+  }
+
+  return Math.round(value)
 }
 
 export function composePrompt(state: ForgeState): string {

@@ -16,6 +16,27 @@ export async function fileToBase64(file: Blob): Promise<string> {
   return btoa(binary)
 }
 
+export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  const response = await fetch(dataUrl)
+
+  if (!response.ok) {
+    throw new Error('Failed to load the generated image for post-processing.')
+  }
+
+  return response.blob()
+}
+
+export async function dataUrlToFile(
+  dataUrl: string,
+  fileName: string,
+): Promise<File> {
+  const blob = await dataUrlToBlob(dataUrl)
+
+  return new File([blob], fileName, {
+    type: blob.type || 'image/png',
+  })
+}
+
 type TextureExpansionInputOptions = {
   sourceCoverage?: number
   targetSize?: number
@@ -153,6 +174,43 @@ export async function copyResultToClipboard(result: ForgeResult): Promise<void> 
   await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])
 }
 
+export async function sliceSpriteSheetFrames(
+  source: string | Blob,
+  frameCount: number,
+): Promise<string[]> {
+  const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
+  const image = await loadImage(blob)
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  const safeFrameCount = Math.max(1, Math.round(frameCount))
+  const frameWidth = Math.max(1, Math.floor(image.naturalWidth / safeFrameCount))
+  const frameHeight = image.naturalHeight
+  canvas.width = frameWidth
+  canvas.height = frameHeight
+
+  return Array.from({ length: safeFrameCount }, (_, index) => {
+    context.clearRect(0, 0, frameWidth, frameHeight)
+    context.drawImage(
+      image,
+      index * frameWidth,
+      0,
+      frameWidth,
+      frameHeight,
+      0,
+      0,
+      frameWidth,
+      frameHeight,
+    )
+
+    return canvas.toDataURL('image/png')
+  })
+}
+
 export function downloadResult(result: ForgeResult, fileName: string) {
   const link = document.createElement('a')
   link.href = result.dataUrl
@@ -189,14 +247,4 @@ function canvasToBlob(canvas: HTMLCanvasElement, mimeType: string): Promise<Blob
       reject(new Error('Failed to serialize the expansion canvas.'))
     }, mimeType)
   })
-}
-
-async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  const response = await fetch(dataUrl)
-
-  if (!response.ok) {
-    throw new Error('Failed to load the generated texture for post-processing.')
-  }
-
-  return response.blob()
 }

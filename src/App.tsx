@@ -5,10 +5,12 @@ import {
   ChevronRight,
   FileText,
   Fingerprint,
+  Gem,
   Hammer,
   ImagePlus,
   LoaderCircle,
   Palette,
+  Play,
   ScanFace,
   Shirt,
   SlidersHorizontal,
@@ -19,17 +21,24 @@ import {
 import { ImageUploadField } from './components/ImageUploadField'
 import { GeneratedResultCard, PlaceholderCard } from './components/ResultCards'
 import {
+  actionAnimatorActionOptions,
+  buildActionAnimatorPrompt,
+  generateActionAnimator,
+} from './lib/actionAnimator'
+import {
   buildCharacterSheetPrompt,
   generateCharacterSheet,
   getCharacterSheetPromptSource,
 } from './lib/characterSheet'
 import {
+  dataUrlToFile,
   buildTextureSeamRepairInput,
   buildTextureExpansionInput,
   copyResultToClipboard,
   createDataUrl,
   downloadResult,
   fileToBase64,
+  sliceSpriteSheetFrames,
 } from './lib/browser'
 import { buildMockResults } from './lib/mockForge'
 import {
@@ -43,12 +52,14 @@ import {
   modeDefinitions,
 } from './lib/forge'
 import type {
+  ActionAnimatorActionType,
   CharacterSheetGenerationMode,
   CharacterSheetReferenceSlot,
   ForgeErrorInfo,
   ForgeMode,
   ForgeResult,
   ForgeStatus,
+  LootLevelerRarity,
   ModeDefinition,
   ReferenceAsset,
   ReferenceSlot,
@@ -57,11 +68,9 @@ import type {
 } from './lib/forge'
 
 type ServiceHealth = {
+  availableModels?: Record<string, string[]>
   keyConfigured: boolean
-  models: {
-    'character-sheet': string
-    forge: string
-  }
+  models: Record<string, string>
   ok: boolean
 }
 
@@ -122,6 +131,7 @@ const LIMITS: Record<string, number> = {
   'gemini-2.5-flash-image': 1500,
   'gemini-3-flash': 1500,
   'gemini-3-pro': 250,
+  'veo-3.1-fast': 100,
 }
 const MODEL_LABELS = {
   'gemini-2.5-flash-image': 'Gemini 2.5 Flash Image',
@@ -133,15 +143,23 @@ type ModelId = keyof typeof MODEL_LABELS
 
 const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
   armory: 'gemini-3-flash',
+  'action-animator': 'veo-3.1-fast',
   'character-sheet': 'gemini-3-pro',
+  'loot-leveler': 'gemini-3-pro',
+  'portrait-studio': 'gemini-3-pro',
   'texture-lab': 'gemini-3-flash',
+  'vfx-forge': 'gemini-3-flash',
   visualizer: 'gemini-3-flash',
 }
 
 const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
   armory: ['gemini-3-flash', 'gemini-2.5-flash-image'],
+  'action-animator': ['veo-3.1-fast'],
   'character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
+  'loot-leveler': ['gemini-3-pro'],
+  'portrait-studio': ['gemini-3-pro'],
   'texture-lab': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
+  'vfx-forge': ['gemini-3-flash'],
   visualizer: ['gemini-3-flash', 'gemini-2.5-flash-image'],
 }
 
@@ -223,6 +241,9 @@ function App() {
   const [serverModel, setServerModel] = useState<string | null>(null)
   const [recentPrompts, setRecentPrompts] = useState<string[]>([])
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null)
+  const [lastCharacterSheetResult, setLastCharacterSheetResult] =
+    useState<ForgeResult | null>(null)
+  const [lastResultMode, setLastResultMode] = useState<ForgeMode | null>(null)
   const [repairingResultId, setRepairingResultId] = useState<string | null>(null)
   const [hasRestoredState, setHasRestoredState] = useState(false)
   const [lastTextureLabRun, setLastTextureLabRun] =
@@ -245,45 +266,98 @@ function App() {
     () => loadTelemetryWindowState().sessionMaxByModel,
   )
   const activeMode = modeDefinitions[state.activeMode]
+  const isActionAnimatorMode = state.activeMode === 'action-animator'
   const isCharacterSheetMode = state.activeMode === 'character-sheet'
+  const isLootLevelerMode = state.activeMode === 'loot-leveler'
+  const isPortraitStudioMode = state.activeMode === 'portrait-studio'
   const isTextureLabMode = state.activeMode === 'texture-lab'
   const isTextureExpansionMode =
     isTextureLabMode && state.textureLab.workflow === 'expand'
   const isTextureGenerateMode =
     isTextureLabMode && state.textureLab.workflow === 'generate'
+  const isVfxForgeMode = state.activeMode === 'vfx-forge'
   const characterReferenceCount = Object.values(
     state.characterSheet.references,
   ).filter(Boolean).length
   const standardReferenceCount = Object.values(state.references).filter(Boolean).length
   const referenceCount = isCharacterSheetMode
     ? characterReferenceCount
-    : isTextureExpansionMode
-      ? Number(Boolean(state.textureLab.expansionSource))
-      : standardReferenceCount
+    : isActionAnimatorMode
+      ? Number(Boolean(state.actionAnimator.characterImage))
+      : isLootLevelerMode
+        ? Number(Boolean(state.lootLeveler.baseAsset))
+        : isPortraitStudioMode
+          ? Number(Boolean(state.portraitStudio.heroImage))
+          : isTextureExpansionMode
+            ? Number(Boolean(state.textureLab.expansionSource))
+            : isVfxForgeMode
+              ? 0
+              : standardReferenceCount
   const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
   const promptPreview = isCharacterSheetMode
     ? buildCharacterSheetPrompt(state.characterSheet)
-    : isTextureExpansionMode
-      ? state.prompt.trim() || defaultTextureExpansionPrompt
-      : isTextureGenerateMode && state.textureLab.seamlessMode
-        ? buildSeamlessPromptPreview(state.prompt, activeStyleInput)
-      : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
+    : isActionAnimatorMode
+      ? buildActionAnimatorPrompt(state.actionAnimator)
+      : isLootLevelerMode
+        ? buildLootLevelerPromptPreview(state.lootLeveler.rarity)
+        : isPortraitStudioMode
+          ? buildPortraitStudioPromptPreview()
+          : isTextureExpansionMode
+            ? state.prompt.trim() || defaultTextureExpansionPrompt
+            : isTextureGenerateMode && state.textureLab.seamlessMode
+              ? buildSeamlessPromptPreview(state.prompt, activeStyleInput)
+              : isVfxForgeMode
+                ? buildVfxForgePromptPreview(
+                    state.vfxForge.projectileType,
+                    state.vfxForge.intensity,
+                  )
+                : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
   const activePromptValue = isCharacterSheetMode
     ? getCharacterSheetPromptSource(state.characterSheet)
-    : state.prompt
+    : isActionAnimatorMode
+      ? state.actionAnimator.actionType === 'custom'
+        ? state.actionAnimator.customActionPrompt
+        : buildActionAnimatorPrompt(state.actionAnimator)
+      : isLootLevelerMode
+        ? buildLootLevelerPromptPreview(state.lootLeveler.rarity)
+        : isPortraitStudioMode
+          ? buildPortraitStudioPromptPreview()
+          : isVfxForgeMode
+            ? buildVfxForgePromptPreview(
+                state.vfxForge.projectileType,
+                state.vfxForge.intensity,
+              )
+            : state.prompt
   const isCharacterSheetReady =
     state.characterSheet.generationMode === 'manifest'
       ? state.characterSheet.manifestPrompt.trim().length > 0
       : characterReferenceCount === 3
   const isReadyForApi = isCharacterSheetMode
     ? isCharacterSheetReady
-    : isTextureExpansionMode
-      ? Boolean(state.textureLab.expansionSource)
-      : state.prompt.trim().length > 0
+    : isActionAnimatorMode
+      ? Boolean(state.actionAnimator.characterImage) &&
+        (state.actionAnimator.actionType !== 'custom' ||
+          state.actionAnimator.customActionPrompt.trim().length > 0)
+      : isLootLevelerMode
+        ? Boolean(state.lootLeveler.baseAsset)
+        : isPortraitStudioMode
+          ? Boolean(state.portraitStudio.heroImage)
+          : isTextureExpansionMode
+            ? Boolean(state.textureLab.expansionSource)
+            : isVfxForgeMode
+              ? state.vfxForge.projectileType.trim().length > 0
+              : state.prompt.trim().length > 0
   const isForging = status === 'loading'
   const isShowingResults = results.length > 0
+  const isSingleResultMode =
+    isActionAnimatorMode ||
+    isCharacterSheetMode ||
+    isLootLevelerMode ||
+    isPortraitStudioMode ||
+    isTextureExpansionMode ||
+    isVfxForgeMode
   const activeGenerationCount =
-    isCharacterSheetMode || isTextureExpansionMode ? 1 : state.generationCount
+    isSingleResultMode ? 1 : state.generationCount
   const reservedOutputs = Array.from(
     { length: isShowingResults ? results.length : activeGenerationCount },
     (_, index) => index,
@@ -292,26 +366,34 @@ function App() {
   const activeModelName = serverModel ?? effectiveModel
   const briefItems = isCharacterSheetMode
     ? buildCharacterSheetBriefItems(state)
-    : isTextureExpansionMode
-      ? buildTextureExpansionBriefItems(state)
-      : [
-        {
-          label: 'Style Ref',
-          value: state.references.style?.name ?? 'Not attached',
-        },
-        {
-          label: 'Subject Ref',
-          value: state.references.subject?.name ?? 'Not attached',
-        },
-        ...(isTextureGenerateMode
-          ? [
-              {
-                label: 'Seamless',
-                value: state.textureLab.seamlessMode ? 'Enabled' : 'Disabled',
-              },
-            ]
-          : []),
-        ]
+    : isActionAnimatorMode
+      ? buildActionAnimatorBriefItems(state)
+      : isLootLevelerMode
+        ? buildLootLevelerBriefItems(state)
+        : isPortraitStudioMode
+          ? buildPortraitStudioBriefItems(state)
+          : isTextureExpansionMode
+            ? buildTextureExpansionBriefItems(state)
+            : isVfxForgeMode
+              ? buildVfxForgeBriefItems(state)
+              : [
+                  {
+                    label: 'Style Ref',
+                    value: state.references.style?.name ?? 'Not attached',
+                  },
+                  {
+                    label: 'Subject Ref',
+                    value: state.references.subject?.name ?? 'Not attached',
+                  },
+                  ...(isTextureGenerateMode
+                    ? [
+                        {
+                          label: 'Seamless',
+                          value: state.textureLab.seamlessMode ? 'Enabled' : 'Disabled',
+                        },
+                      ]
+                    : []),
+                ]
   const modeAvailableModels = availableModelsByMode[state.activeMode]
   const selectedModelSupported = modeAvailableModels.includes(activeModel)
   const dailyEstimatedUsage = usageSummary?.todayTotal ?? 0
@@ -375,10 +457,38 @@ function App() {
     if (storedState) {
       dispatch({ type: 'set-mode', mode: storedState.settings.activeMode })
       dispatch({
+        type: 'set-action-animator-action',
+        actionType: storedState.settings.actionAnimator.actionType,
+      })
+      dispatch({
+        type: 'set-action-animator-custom-prompt',
+        prompt: storedState.settings.actionAnimator.customActionPrompt,
+      })
+      dispatch({
+        type: 'set-action-animator-frame-count',
+        frameCount: storedState.settings.actionAnimator.frameCount,
+      })
+      dispatch({
+        type: 'set-action-animator-fps',
+        fps: storedState.settings.actionAnimator.fps,
+      })
+      dispatch({
         type: 'set-generation-count',
         count: storedState.settings.generationCount,
       })
+      dispatch({
+        type: 'set-loot-leveler-rarity',
+        rarity: storedState.settings.lootLeveler.rarity,
+      })
       dispatch({ type: 'set-prompt', prompt: storedState.settings.prompt })
+      dispatch({
+        type: 'set-vfx-intensity',
+        intensity: storedState.settings.vfxForge.intensity,
+      })
+      dispatch({
+        type: 'set-vfx-projectile-type',
+        projectileType: storedState.settings.vfxForge.projectileType,
+      })
       dispatch({
         type: 'set-character-sheet-mode',
         mode: storedState.settings.characterSheet.generationMode,
@@ -417,6 +527,10 @@ function App() {
       setServerPrompt(storedState.session?.serverPrompt ?? null)
       setLastSavedAt(storedState.session?.savedAt ?? null)
       if (storedState.session?.results?.length) {
+        setLastResultMode(storedState.settings.activeMode)
+        if (storedState.settings.activeMode === 'character-sheet') {
+          setLastCharacterSheetResult(storedState.session.results[0] ?? null)
+        }
         setStatus('success')
         setNotice('Restored the latest forge session from this browser.')
       }
@@ -527,6 +641,12 @@ function App() {
       recentPrompts,
       settings: {
         activeMode: state.activeMode,
+        actionAnimator: {
+          actionType: state.actionAnimator.actionType,
+          customActionPrompt: state.actionAnimator.customActionPrompt,
+          frameCount: state.actionAnimator.frameCount,
+          fps: state.actionAnimator.fps,
+        },
         characterSheet: {
           consistencyEnabled: state.characterSheet.consistencyEnabled,
           generationMode: state.characterSheet.generationMode,
@@ -535,11 +655,19 @@ function App() {
           referencePrompt: state.characterSheet.referencePrompt,
         },
         generationCount: state.generationCount,
+        lootLeveler: {
+          rarity: state.lootLeveler.rarity,
+        },
+        portraitStudio: {},
         prompt: state.prompt,
         textureLab: {
           expansionTargetSize: state.textureLab.expansionTargetSize,
           seamlessMode: state.textureLab.seamlessMode,
           workflow: state.textureLab.workflow,
+        },
+        vfxForge: {
+          intensity: state.vfxForge.intensity,
+          projectileType: state.vfxForge.projectileType,
         },
       },
       session:
@@ -560,16 +688,23 @@ function App() {
     serverModel,
     serverPrompt,
     state.activeMode,
+    state.actionAnimator.actionType,
+    state.actionAnimator.customActionPrompt,
+    state.actionAnimator.frameCount,
+    state.actionAnimator.fps,
     state.characterSheet.consistencyEnabled,
     state.characterSheet.generationMode,
     state.characterSheet.manifestPrompt,
     state.characterSheet.parentId,
     state.characterSheet.referencePrompt,
     state.generationCount,
+    state.lootLeveler.rarity,
     state.prompt,
     state.textureLab.expansionTargetSize,
     state.textureLab.seamlessMode,
     state.textureLab.workflow,
+    state.vfxForge.intensity,
+    state.vfxForge.projectileType,
   ])
 
   function finalizeForgeRun(
@@ -593,6 +728,7 @@ function App() {
     setError(null)
     setNotice(nextNotice)
     setLastSavedAt(savedAt)
+    setLastResultMode(state.activeMode)
     setRecentPrompts(nextRecentPrompts)
     setRepairingResultId(null)
 
@@ -602,6 +738,10 @@ function App() {
 
     if (options?.trackTelemetry) {
       registerSuccessfulApiCall(options.telemetryModel ?? nextServerModel)
+    }
+
+    if (isCharacterSheetMode) {
+      setLastCharacterSheetResult(nextResults[0] ?? null)
     }
 
     if (isCharacterSheetMode && state.characterSheet.consistencyEnabled) {
@@ -640,6 +780,26 @@ function App() {
     setServerPrompt(null)
 
     try {
+      if (isActionAnimatorMode) {
+        const payload = await generateActionAnimator({
+          modelId: activeModel,
+          state: state.actionAnimator,
+        })
+
+        finalizeForgeRun(
+          payload.results,
+          payload.model,
+          payload.prompt ?? promptPreview,
+          'Action Animator returned a sprite-sheet-ready motion strip.',
+          {
+            runContext: null,
+            telemetryModel: payload.model,
+            trackTelemetry: true,
+          },
+        )
+        return
+      }
+
       if (isCharacterSheetMode) {
         const payload = await generateCharacterSheet({
           modelId: activeModel,
@@ -652,6 +812,115 @@ function App() {
           payload.model,
           activePromptValue.trim(),
           'Character sheet generated with palette extraction enabled.',
+          {
+            runContext: null,
+            telemetryModel: payload.model,
+            trackTelemetry: true,
+          },
+        )
+        return
+      }
+
+      if (isLootLevelerMode) {
+        const baseAsset = state.lootLeveler.baseAsset
+
+        if (!baseAsset) {
+          throw new Error('Attach a base asset before running Loot Leveler.')
+        }
+
+        const response = await fetch('/api/forge', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            generationCount: 1,
+            mode: 'loot-leveler',
+            modelId: activeModel,
+            prompt: '',
+            rarity: state.lootLeveler.rarity,
+            references: [
+              {
+                data: await fileToBase64(baseAsset.file),
+                mimeType: baseAsset.mimeType,
+                name: baseAsset.name,
+                slot: 'subject',
+              },
+            ],
+            styleText: activeStyleInput.trim(),
+          }),
+        })
+
+        const payload = (await response.json()) as ForgeApiResponse | undefined
+
+        if (!response.ok || !payload?.images?.length) {
+          throw toForgeError(payload?.error)
+        }
+
+        finalizeForgeRun(
+          payload.images.map((image) => ({
+            dataUrl: createDataUrl(image.data, image.mimeType),
+            id: image.id,
+            mimeType: image.mimeType,
+            text: image.text,
+          })),
+          payload.model ?? null,
+          payload.prompt ?? promptPreview,
+          `Loot Leveler created a ${formatRarityLabel(state.lootLeveler.rarity)} variant.`,
+          {
+            runContext: null,
+            telemetryModel: payload.model,
+            trackTelemetry: true,
+          },
+        )
+        return
+      }
+
+      if (isPortraitStudioMode) {
+        const heroImage = state.portraitStudio.heroImage
+
+        if (!heroImage) {
+          throw new Error('Attach a hero image before running Portrait Studio.')
+        }
+
+        const response = await fetch('/api/forge', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            generationCount: 1,
+            mode: 'portrait-studio',
+            modelId: activeModel,
+            prompt: '',
+            references: [
+              {
+                data: await fileToBase64(heroImage.file),
+                mimeType: heroImage.mimeType,
+                name: heroImage.name,
+                slot: 'subject',
+              },
+            ],
+            styleText: activeStyleInput.trim(),
+          }),
+        })
+
+        const payload = (await response.json()) as ForgeApiResponse | undefined
+
+        if (!response.ok || !payload?.images?.length) {
+          throw toForgeError(payload?.error)
+        }
+
+        finalizeForgeRun(
+          payload.images.map((image) => ({
+            dataUrl: createDataUrl(image.data, image.mimeType),
+            id: image.id,
+            mimeType: image.mimeType,
+            text: image.text,
+          })),
+          payload.model ?? null,
+          payload.prompt ?? promptPreview,
+          'Portrait Studio generated a five-expression contact sheet.',
           {
             runContext: null,
             telemetryModel: payload.model,
@@ -729,6 +998,48 @@ function App() {
               styleText: activeStyleInput.trim(),
               workflow: 'expand',
             },
+            telemetryModel: payload.model,
+            trackTelemetry: true,
+          },
+        )
+        return
+      }
+
+      if (isVfxForgeMode) {
+        const response = await fetch('/api/forge', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            generationCount: 1,
+            intensity: state.vfxForge.intensity,
+            mode: 'vfx-forge',
+            modelId: activeModel,
+            projectileType: state.vfxForge.projectileType.trim(),
+            prompt: '',
+            styleText: activeStyleInput.trim(),
+          }),
+        })
+
+        const payload = (await response.json()) as ForgeApiResponse | undefined
+
+        if (!response.ok || !payload?.images?.length) {
+          throw toForgeError(payload?.error)
+        }
+
+        finalizeForgeRun(
+          payload.images.map((image) => ({
+            dataUrl: createDataUrl(image.data, image.mimeType),
+            id: image.id,
+            mimeType: image.mimeType,
+            text: image.text,
+          })),
+          payload.model ?? null,
+          payload.prompt ?? promptPreview,
+          'VFX Forge generated an additive-ready projectile strip.',
+          {
+            runContext: null,
             telemetryModel: payload.model,
             trackTelemetry: true,
           },
@@ -819,6 +1130,40 @@ function App() {
     setNotice(`Downloaded candidate ${index + 1}.`)
   }
 
+  async function hydrateLatestCharacterSheetInto(
+    action:
+      | { type: 'set-action-animator-image' }
+      | { type: 'set-portrait-studio-image' },
+  ) {
+    if (!lastCharacterSheetResult) {
+      setError({
+        message: 'Generate a character sheet first or attach an image manually.',
+        title: 'Character Sheet Source Missing',
+      })
+      return
+    }
+
+    try {
+      const file = await dataUrlToFile(
+        lastCharacterSheetResult.dataUrl,
+        'character-sheet-reference.png',
+      )
+
+      dispatch({
+        ...action,
+        asset: {
+          file,
+          mimeType: file.type || lastCharacterSheetResult.mimeType,
+          name: file.name,
+          sizeLabel: `${Math.max(1, Math.round(file.size / 1024))} KB`,
+        },
+      })
+      setNotice('Loaded the latest character sheet result into the active tab.')
+    } catch (assetError) {
+      setError(toForgeError(assetError, 'Failed To Reuse Character Sheet'))
+    }
+  }
+
   async function handleRepairSeams(result: ForgeResult) {
     const repairContext = lastTextureLabRun
 
@@ -885,6 +1230,7 @@ function App() {
       setStatus('success')
       setNotice('Seam repair pass completed for the selected texture.')
       setLastSavedAt(new Date().toISOString())
+      setLastResultMode('texture-lab')
       registerSuccessfulApiCall(payload.model ?? 'gemini-3-pro')
     } catch (repairError) {
       setError(toForgeError(repairError, 'Seam Repair Failed'))
@@ -920,6 +1266,125 @@ function App() {
     )
   }
 
+  const headerInputLabel = isTextureExpansionMode
+    ? 'Source'
+    : isActionAnimatorMode || isLootLevelerMode || isPortraitStudioMode
+      ? 'Image'
+      : isVfxForgeMode
+        ? 'Config'
+        : 'Prompt'
+  const controlPanelTitle = isCharacterSheetMode
+    ? 'Sheet settings'
+    : isActionAnimatorMode
+      ? 'Animator settings'
+      : isLootLevelerMode
+        ? 'Leveler settings'
+        : isPortraitStudioMode
+          ? 'Portrait settings'
+          : isVfxForgeMode
+            ? 'VFX settings'
+            : 'Forge settings'
+  const primaryActionLabel = isForging
+    ? isActionAnimatorMode
+      ? 'ANIMATING'
+      : isCharacterSheetMode
+        ? 'BUILDING SHEET'
+        : isLootLevelerMode
+          ? 'LEVELING LOOT'
+          : isPortraitStudioMode
+            ? 'BUILDING PORTRAITS'
+            : isTextureExpansionMode
+              ? 'EXPANDING TEXTURE'
+              : isVfxForgeMode
+                ? 'FORGING VFX'
+                : 'FORGING'
+    : isActionAnimatorMode
+      ? 'ANIMATE'
+      : isCharacterSheetMode
+        ? 'BUILD SHEET'
+        : isLootLevelerMode
+          ? 'LEVEL LOOT'
+          : isPortraitStudioMode
+            ? 'BUILD PORTRAITS'
+            : isTextureExpansionMode
+              ? 'EXPAND TEXTURE'
+              : isVfxForgeMode
+                ? 'FORGE VFX'
+                : 'FORGE'
+  const primaryActionDescription = isForging
+    ? isActionAnimatorMode
+      ? 'Sending character image to Veo and building a spritesheet'
+      : isCharacterSheetMode
+        ? 'Sending character sheet request to Gemini'
+        : isLootLevelerMode
+          ? 'Applying rarity upgrade pass to the base asset'
+          : isPortraitStudioMode
+            ? 'Generating a locked five-expression portrait sheet'
+            : isTextureExpansionMode
+              ? 'Sending centered outpaint canvas to Gemini 3 Pro'
+              : isVfxForgeMode
+                ? 'Generating an 8-frame projectile spritesheet'
+                : 'Sending prompt and references to Gemini'
+    : !selectedModelSupported
+      ? 'Selected model is not supported for this tab'
+      : isReadyForApi
+        ? isActionAnimatorMode
+          ? 'Character image staged for Veo animation'
+          : isLootLevelerMode
+            ? 'Base asset staged for rarity upgrade'
+            : isPortraitStudioMode
+              ? 'Hero image staged for expression pack generation'
+              : isTextureExpansionMode
+                ? 'Centered source canvas staged for outpaint execution'
+                : isVfxForgeMode
+                  ? 'Projectile sheet request staged for Gemini Flash'
+                  : 'Request staged for API execution'
+        : isCharacterSheetMode
+          ? 'Attach all required references or write a manifest'
+          : isActionAnimatorMode
+            ? 'Attach a character image and choose an action'
+            : isLootLevelerMode
+              ? 'Attach a base asset to begin rarity leveling'
+              : isPortraitStudioMode
+                ? 'Attach a hero portrait or reuse the latest character sheet'
+                : isTextureExpansionMode
+                  ? 'Attach a source texture to prepare the expansion pass'
+                  : isVfxForgeMode
+                    ? 'Enter a projectile type to prepare the spritesheet request'
+                    : 'Add a prompt to prepare the request'
+  const readinessLabel = isForging
+    ? isTextureExpansionMode
+      ? 'Source processing'
+      : isActionAnimatorMode
+        ? 'Animating'
+        : 'Generating'
+    : isReadyForApi
+      ? isTextureExpansionMode
+        ? 'Source ready'
+        : isActionAnimatorMode
+          ? 'Animation ready'
+          : isVfxForgeMode
+            ? 'Config ready'
+            : 'Prompt ready'
+      : isTextureExpansionMode
+        ? 'Source required'
+        : isActionAnimatorMode || isLootLevelerMode || isPortraitStudioMode
+          ? 'Image required'
+          : isVfxForgeMode
+            ? 'Config required'
+            : 'Prompt required'
+  const resultGridTitle = isCharacterSheetMode
+    ? 'Character sheet output slot'
+    : isActionAnimatorMode
+      ? 'Action Animator sprite sheet'
+      : isLootLevelerMode
+        ? 'Loot Leveler output slot'
+        : isPortraitStudioMode
+          ? 'Portrait Studio contact sheet'
+          : isVfxForgeMode
+            ? 'VFX Forge spritesheet output'
+            : 'Output slots for the current forge pass'
+
   return (
     <div className="min-h-screen bg-[var(--surface-0)] text-zinc-100">
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
@@ -934,7 +1399,7 @@ function App() {
               <HeaderSummary
                 activeMode={activeMode}
                 generationCount={activeGenerationCount}
-                inputLabel={isTextureExpansionMode ? 'Source' : 'Prompt'}
+                inputLabel={headerInputLabel}
                 promptLoaded={isReadyForApi}
               />
               <nav className="flex flex-wrap gap-3">
@@ -988,7 +1453,7 @@ function App() {
                     Control Panel
                   </p>
                   <h2 className="mt-1 text-lg font-semibold text-white">
-                    {isCharacterSheetMode ? 'Sheet settings' : 'Forge settings'}
+                    {controlPanelTitle}
                   </h2>
                 </div>
               </div>
@@ -1000,10 +1465,15 @@ function App() {
                   onSelect={handleModelSelect}
                 />
 
-                <StyleInputPanel
-                  value={activeStyleInput}
-                  onChange={handleStyleInputChange}
-                />
+                {!(isActionAnimatorMode ||
+                  isLootLevelerMode ||
+                  isPortraitStudioMode ||
+                  isVfxForgeMode) ? (
+                  <StyleInputPanel
+                    value={activeStyleInput}
+                    onChange={handleStyleInputChange}
+                  />
+                ) : null}
 
                 {!selectedModelSupported ? (
                   <div className="rounded-[20px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
@@ -1045,6 +1515,76 @@ function App() {
                         type: 'set-character-sheet-reference-prompt',
                         prompt,
                       })
+                    }
+                  />
+                ) : isActionAnimatorMode ? (
+                  <ActionAnimatorPanel
+                    actionType={state.actionAnimator.actionType}
+                    asset={state.actionAnimator.characterImage}
+                    canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
+                    customActionPrompt={state.actionAnimator.customActionPrompt}
+                    frameCount={state.actionAnimator.frameCount}
+                    fps={state.actionAnimator.fps}
+                    spriteSheetDataUrl={
+                      lastResultMode === 'action-animator' ? results[0]?.dataUrl ?? null : null
+                    }
+                    onActionTypeChange={(actionType) =>
+                      dispatch({ type: 'set-action-animator-action', actionType })
+                    }
+                    onCustomActionPromptChange={(prompt) =>
+                      dispatch({
+                        type: 'set-action-animator-custom-prompt',
+                        prompt,
+                      })
+                    }
+                    onFileSelect={(asset) =>
+                      dispatch({ type: 'set-action-animator-image', asset })
+                    }
+                    onFrameCountChange={(frameCount) =>
+                      dispatch({ type: 'set-action-animator-frame-count', frameCount })
+                    }
+                    onFpsChange={(fps) =>
+                      dispatch({ type: 'set-action-animator-fps', fps })
+                    }
+                    onUseLatestCharacterSheet={() =>
+                      void hydrateLatestCharacterSheetInto({
+                        type: 'set-action-animator-image',
+                      })
+                    }
+                  />
+                ) : isLootLevelerMode ? (
+                  <LootLevelerPanel
+                    asset={state.lootLeveler.baseAsset}
+                    rarity={state.lootLeveler.rarity}
+                    onFileSelect={(asset) =>
+                      dispatch({ type: 'set-loot-leveler-asset', asset })
+                    }
+                    onRarityChange={(rarity) =>
+                      dispatch({ type: 'set-loot-leveler-rarity', rarity })
+                    }
+                  />
+                ) : isPortraitStudioMode ? (
+                  <PortraitStudioPanel
+                    asset={state.portraitStudio.heroImage}
+                    canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
+                    onFileSelect={(asset) =>
+                      dispatch({ type: 'set-portrait-studio-image', asset })
+                    }
+                    onUseLatestCharacterSheet={() =>
+                      void hydrateLatestCharacterSheetInto({
+                        type: 'set-portrait-studio-image',
+                      })
+                    }
+                  />
+                ) : isVfxForgeMode ? (
+                  <VfxForgePanel
+                    intensity={state.vfxForge.intensity}
+                    projectileType={state.vfxForge.projectileType}
+                    onIntensityChange={(intensity) =>
+                      dispatch({ type: 'set-vfx-intensity', intensity })
+                    }
+                    onProjectileTypeChange={(projectileType) =>
+                      dispatch({ type: 'set-vfx-projectile-type', projectileType })
                     }
                   />
                 ) : (
@@ -1152,37 +1692,10 @@ function App() {
                     </span>
                     <span>
                       <span className="block text-sm font-medium tracking-[0.18em] text-sky-50">
-                        {isForging
-                          ? isCharacterSheetMode
-                            ? 'BUILDING SHEET'
-                            : isTextureExpansionMode
-                              ? 'EXPANDING TEXTURE'
-                            : 'FORGING'
-                          : isCharacterSheetMode
-                            ? 'BUILD SHEET'
-                            : isTextureExpansionMode
-                              ? 'EXPAND TEXTURE'
-                            : 'FORGE'}
+                        {primaryActionLabel}
                       </span>
                       <span className="block text-xs text-sky-100/70">
-                        {isForging
-                          ? isCharacterSheetMode
-                            ? 'Sending character sheet request to Gemini'
-                            : isTextureExpansionMode
-                              ? 'Sending centered outpaint canvas to Gemini 3 Pro'
-                            : 'Sending prompt and references to Gemini'
-                          : !selectedModelSupported
-                            ? 'Selected model is not supported for this tab'
-                            : isReadyForApi
-                              ? isTextureExpansionMode
-                                ? 'Centered source canvas staged for outpaint execution'
-                                : 'Request staged for API execution'
-                              : isCharacterSheetMode
-                                ? 'Attach all required references or write a manifest'
-                                : isTextureExpansionMode
-                                  ? 'Attach a source texture to prepare the expansion pass'
-                                  : 'Add a prompt to prepare the request'
-                        }
+                        {primaryActionDescription}
                       </span>
                     </span>
                   </span>
@@ -1205,19 +1718,7 @@ function App() {
               <TopPanel
                 activeMode={activeMode}
                 prompt={activePromptValue.trim() || promptPreview}
-                readinessLabel={
-                  isForging
-                    ? isTextureExpansionMode
-                      ? 'Source processing'
-                      : 'Generating'
-                    : isReadyForApi
-                      ? isTextureExpansionMode
-                        ? 'Source ready'
-                        : 'Prompt ready'
-                      : isTextureExpansionMode
-                        ? 'Source required'
-                        : 'Prompt required'
-                }
+                readinessLabel={readinessLabel}
               />
 
               <div className="flex flex-col gap-4 rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-6">
@@ -1227,9 +1728,7 @@ function App() {
                       Result Grid
                     </p>
                     <h2 className="mt-1 text-xl font-semibold text-white">
-                      {isCharacterSheetMode
-                        ? 'Character sheet output slot'
-                        : 'Output slots for the current forge pass'}
+                      {resultGridTitle}
                     </h2>
                   </div>
                   <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-sm text-zinc-300">
@@ -1279,7 +1778,7 @@ function App() {
 
                 <div
                   className={
-                    isCharacterSheetMode
+                    isSingleResultMode
                       ? 'grid gap-4'
                       : 'grid gap-4 md:grid-cols-2 2xl:grid-cols-4'
                   }
@@ -1907,6 +2406,422 @@ function CharacterSheetPanel({
   )
 }
 
+type ActionAnimatorPanelProps = {
+  actionType: ActionAnimatorActionType
+  asset: ReferenceAsset | null
+  canUseLatestCharacterSheet: boolean
+  customActionPrompt: string
+  frameCount: number
+  fps: number
+  onActionTypeChange: (actionType: ActionAnimatorActionType) => void
+  onCustomActionPromptChange: (prompt: string) => void
+  onFileSelect: (asset: ReferenceAsset | null) => void
+  onFrameCountChange: (frameCount: number) => void
+  onFpsChange: (fps: number) => void
+  onUseLatestCharacterSheet: () => void
+  spriteSheetDataUrl: string | null
+}
+
+function ActionAnimatorPanel({
+  actionType,
+  asset,
+  canUseLatestCharacterSheet,
+  customActionPrompt,
+  frameCount,
+  fps,
+  onActionTypeChange,
+  onCustomActionPromptChange,
+  onFileSelect,
+  onFrameCountChange,
+  onFpsChange,
+  onUseLatestCharacterSheet,
+  spriteSheetDataUrl,
+}: ActionAnimatorPanelProps) {
+  const [frames, setFrames] = useState<string[]>([])
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [previewIndex, setPreviewIndex] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!spriteSheetDataUrl) {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    void sliceSpriteSheetFrames(spriteSheetDataUrl, frameCount)
+      .then((nextFrames) => {
+        if (!cancelled) {
+          setFrames(nextFrames)
+          setPreviewIndex(0)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFrames([])
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [frameCount, spriteSheetDataUrl])
+
+  useEffect(() => {
+    const activeFrames = spriteSheetDataUrl ? frames : []
+
+    if (!isPlaying || activeFrames.length <= 1) {
+      return undefined
+    }
+
+    const intervalId = window.setInterval(() => {
+      setPreviewIndex((previousIndex) => (previousIndex + 1) % activeFrames.length)
+    }, Math.max(33, Math.round(1000 / Math.max(1, fps))))
+
+    return () => {
+      window.clearInterval(intervalId)
+    }
+  }, [fps, frames, isPlaying, spriteSheetDataUrl])
+
+  const activeFrames = spriteSheetDataUrl ? frames : []
+  const frameSlots = activeFrames.length
+    ? activeFrames.map((frame) => ({ dataUrl: frame, ready: true }))
+    : Array.from({ length: frameCount }, () => ({ dataUrl: null, ready: false }))
+  const currentFrame = activeFrames[previewIndex] ?? null
+
+  return (
+    <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
+            Action Animator
+          </p>
+          <p className="mt-2 text-sm font-medium text-white">
+            Turn a locked character image into a spritesheet-ready motion strip.
+          </p>
+        </div>
+        <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-xs text-zinc-400">
+          {frameCount} frames / {fps} fps
+        </div>
+      </div>
+
+      <ImageUploadField
+        label="Character Image"
+        helper="Upload a character render or sheet. This image is sent to Veo as the animation source."
+        asset={asset}
+        icon={ImagePlus}
+        isRequired
+        onFileSelect={onFileSelect}
+      />
+
+      <button
+        type="button"
+        disabled={!canUseLatestCharacterSheet}
+        onClick={onUseLatestCharacterSheet}
+        className="w-full rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3 text-left text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        Use Latest Character Sheet Result
+      </button>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Action Type
+        </label>
+        <select
+          value={actionType}
+          onChange={(event) =>
+            onActionTypeChange(event.target.value as ActionAnimatorActionType)
+          }
+          className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition focus:border-sky-300/35"
+        >
+          {actionAnimatorActionOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+
+        <textarea
+          value={customActionPrompt}
+          onChange={(event) => onCustomActionPromptChange(event.target.value)}
+          placeholder={
+            actionType === 'custom'
+              ? 'Describe the exact motion cycle to animate.'
+              : 'Optional guidance. Ex: heavier footfalls, stronger anticipation, aggressive lean, slower recovery.'
+          }
+          rows={4}
+          className="mt-4 w-full resize-none rounded-[18px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
+        />
+        <p className="mt-3 text-xs leading-6 text-zinc-500">
+          {actionType === 'custom'
+            ? 'Required for Custom. Describe the motion cycle you want generated.'
+            : 'Optional. Add notes to guide this preset action without replacing it.'}
+        </p>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex items-center justify-between">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Frame Count
+            </p>
+            <span className="text-xs text-zinc-400">{frameCount}</span>
+          </div>
+          <input
+            type="range"
+            min={4}
+            max={12}
+            step={1}
+            value={frameCount}
+            onChange={(event) => onFrameCountChange(Number(event.target.value))}
+            className="mt-4 w-full cursor-pointer accent-sky-400"
+          />
+        </div>
+
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex items-center justify-between">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Playback FPS
+            </p>
+            <span className="text-xs text-zinc-400">{fps}</span>
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={30}
+            step={1}
+            value={fps}
+            onChange={(event) => onFpsChange(Number(event.target.value))}
+            className="mt-4 w-full cursor-pointer accent-sky-400"
+          />
+          <p className="mt-3 text-xs leading-6 text-zinc-500">
+            Controls the target animation timing and live preview speed.
+          </p>
+        </div>
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Frame Strip
+            </p>
+            <p className="mt-2 text-sm text-zinc-400">
+              The returned spritesheet is sliced locally into preview frames.
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={!frames.length}
+            onClick={() => setIsPlaying((currentValue) => !currentValue)}
+            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-4 py-2 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Play className="size-4" strokeWidth={1.7} />
+            {isPlaying ? 'Pause Preview' : 'Play Animation'}
+          </button>
+        </div>
+
+        <div className="mt-4 overflow-x-auto pb-2">
+          <div className="flex min-w-max gap-2">
+            {frameSlots.map((frame, index) => (
+              <div
+                key={`${index}-${frame.dataUrl ?? 'empty'}`}
+                className="flex size-16 items-center justify-center overflow-hidden rounded-[16px] border border-white/10 bg-black/20"
+              >
+                {frame.dataUrl ? (
+                  <img
+                    src={frame.dataUrl}
+                    alt={`Animation frame ${index + 1}`}
+                    className="h-full w-full object-contain"
+                  />
+                ) : (
+                  <span className="text-[11px] text-zinc-500">
+                    {String(index + 1).padStart(2, '0')}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-[20px] border border-white/10 bg-black/25 p-4">
+          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Live Preview
+          </p>
+          <div className="mt-3 flex aspect-square items-center justify-center overflow-hidden rounded-[18px] border border-white/10 bg-black/30">
+            {currentFrame ? (
+              <img
+                src={currentFrame}
+                alt="Current animation frame preview"
+                className="h-full w-full object-contain"
+              />
+            ) : (
+              <span className="text-sm text-zinc-500">No frames generated yet</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+type LootLevelerPanelProps = {
+  asset: ReferenceAsset | null
+  onFileSelect: (asset: ReferenceAsset | null) => void
+  onRarityChange: (rarity: LootLevelerRarity) => void
+  rarity: LootLevelerRarity
+}
+
+function LootLevelerPanel({
+  asset,
+  onFileSelect,
+  onRarityChange,
+  rarity,
+}: LootLevelerPanelProps) {
+  const rarityDescriptions: Record<LootLevelerRarity, string> = {
+    common: 'Preserve the clean baseline asset without adding rarity effects.',
+    rare: 'Minor engravings, subtle shine, and restrained premium detail.',
+    epic: 'Glow treatment, material shift, and bold premium accents.',
+    legendary: 'Elemental aura language, floating shards, and dramatic VFX.',
+  }
+
+  return (
+    <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
+      <ImageUploadField
+        label="Base Asset"
+        helper="Upload the common or baseline item to evolve through rarity tiers."
+        asset={asset}
+        icon={Gem}
+        isRequired
+        onFileSelect={onFileSelect}
+      />
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Rarity Selector
+        </p>
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          {(['common', 'rare', 'epic', 'legendary'] as LootLevelerRarity[]).map(
+            (option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => onRarityChange(option)}
+                className={`rounded-[18px] border px-3 py-3 text-left transition ${
+                  rarity === option
+                    ? 'border-amber-300/35 bg-amber-400/12 text-amber-50'
+                    : 'border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-black/30'
+                }`}
+              >
+                <span className="block text-sm font-medium">
+                  {formatRarityLabel(option)}
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-current/70">
+                  {rarityDescriptions[option]}
+                </span>
+              </button>
+            ),
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+type PortraitStudioPanelProps = {
+  asset: ReferenceAsset | null
+  canUseLatestCharacterSheet: boolean
+  onFileSelect: (asset: ReferenceAsset | null) => void
+  onUseLatestCharacterSheet: () => void
+}
+
+function PortraitStudioPanel({
+  asset,
+  canUseLatestCharacterSheet,
+  onFileSelect,
+  onUseLatestCharacterSheet,
+}: PortraitStudioPanelProps) {
+  return (
+    <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
+      <ImageUploadField
+        label="Hero Image"
+        helper="Use a close-up hero portrait. Portrait Studio locks this identity across all expressions."
+        asset={asset}
+        icon={ScanFace}
+        isRequired
+        onFileSelect={onFileSelect}
+      />
+
+      <button
+        type="button"
+        disabled={!canUseLatestCharacterSheet}
+        onClick={onUseLatestCharacterSheet}
+        className="w-full rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3 text-left text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        Use Latest Character Sheet Result
+      </button>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4 text-sm leading-6 text-zinc-300">
+        Portrait Studio generates a 3x2 contact sheet with five locked expressions:
+        Neutral, Angry, Sad, Joy, and Surprised.
+      </div>
+    </section>
+  )
+}
+
+type VfxForgePanelProps = {
+  intensity: number
+  onIntensityChange: (intensity: number) => void
+  onProjectileTypeChange: (projectileType: string) => void
+  projectileType: string
+}
+
+function VfxForgePanel({
+  intensity,
+  onIntensityChange,
+  onProjectileTypeChange,
+  projectileType,
+}: VfxForgePanelProps) {
+  return (
+    <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Projectile Type
+        </label>
+        <input
+          type="text"
+          value={projectileType}
+          onChange={(event) => onProjectileTypeChange(event.target.value)}
+          placeholder="Ex: Fireball, Plasma Lance, Frost Bolt"
+          className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
+        />
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <div className="flex items-center justify-between">
+          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Intensity
+          </p>
+          <span className="text-xs text-zinc-400">{intensity}</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={intensity}
+          onChange={(event) => onIntensityChange(Number(event.target.value))}
+          className="mt-4 w-full cursor-pointer accent-sky-400"
+        />
+        <p className="mt-3 text-sm leading-6 text-zinc-400">
+          Output is constrained to an 8-frame horizontal strip on a pure black background for additive blending.
+        </p>
+      </div>
+    </section>
+  )
+}
+
 type ModeToggleButtonProps = {
   icon: typeof Sparkles
   isActive: boolean
@@ -2289,6 +3204,62 @@ function buildCharacterSheetBriefItems(
   ]
 }
 
+function buildActionAnimatorBriefItems(
+  state: typeof initialState,
+): ForgeBriefItem[] {
+  return [
+    {
+      label: 'Source',
+      value: state.actionAnimator.characterImage?.name ?? 'Not attached',
+    },
+    {
+      label: 'Action',
+      value:
+        state.actionAnimator.actionType === 'custom'
+          ? state.actionAnimator.customActionPrompt.trim() || 'Custom'
+          : state.actionAnimator.actionType,
+    },
+    {
+      label: 'Frames',
+      value: String(state.actionAnimator.frameCount),
+    },
+    {
+      label: 'FPS',
+      value: String(state.actionAnimator.fps),
+    },
+  ]
+}
+
+function buildLootLevelerBriefItems(
+  state: typeof initialState,
+): ForgeBriefItem[] {
+  return [
+    {
+      label: 'Base Asset',
+      value: state.lootLeveler.baseAsset?.name ?? 'Not attached',
+    },
+    {
+      label: 'Rarity',
+      value: formatRarityLabel(state.lootLeveler.rarity),
+    },
+  ]
+}
+
+function buildPortraitStudioBriefItems(
+  state: typeof initialState,
+): ForgeBriefItem[] {
+  return [
+    {
+      label: 'Hero Image',
+      value: state.portraitStudio.heroImage?.name ?? 'Not attached',
+    },
+    {
+      label: 'Expressions',
+      value: '5 locked portraits',
+    },
+  ]
+}
+
 function buildTextureExpansionBriefItems(
   state: typeof initialState,
 ): ForgeBriefItem[] {
@@ -2308,6 +3279,39 @@ function buildTextureExpansionBriefItems(
   ]
 }
 
+function buildVfxForgeBriefItems(
+  state: typeof initialState,
+): ForgeBriefItem[] {
+  return [
+    {
+      label: 'Projectile',
+      value: state.vfxForge.projectileType.trim() || 'Not set',
+    },
+    {
+      label: 'Intensity',
+      value: `${state.vfxForge.intensity}/100`,
+    },
+    {
+      label: 'Layout',
+      value: '8 x 1 strip',
+    },
+  ]
+}
+
+function buildLootLevelerPromptPreview(rarity: LootLevelerRarity) {
+  return [
+    'Maintain the silhouette and core geometry of the input image.',
+    `Apply ${formatRarityLabel(rarity)} visual upgrades while keeping the weapon type identical.`,
+  ].join(' ')
+}
+
+function buildPortraitStudioPromptPreview() {
+  return [
+    'Generate a 3 column by 2 row portrait sheet.',
+    'Keep the facial structure, hair, and eye color 100% identical while shifting only expression.',
+  ].join(' ')
+}
+
 function buildSeamlessPromptPreview(prompt: string, styleText: string) {
   const subject = prompt.trim() || 'weathered stone floor tile'
   const styleSegment = styleText.trim() ? styleText.trim() : 'neutral production texture'
@@ -2317,6 +3321,21 @@ function buildSeamlessPromptPreview(prompt: string, styleText: string) {
     'Ensure smooth transitions at the edges for flawless tiling. ' +
     `Style: ${styleSegment}, high resolution, perfectly tileable horizontal and vertical edges, balanced composition.`
   )
+}
+
+function buildVfxForgePromptPreview(projectileType: string, intensity: number) {
+  const normalizedProjectileType = projectileType.trim() || 'Fireball'
+
+  return [
+    'Generate a 2D projectile spritesheet.',
+    `Projectile: ${normalizedProjectileType}.`,
+    `Intensity: ${Math.max(0, Math.min(100, Math.round(intensity)))}/100.`,
+    'Background: pure #000000 black. Layout: 8 frames in one horizontal row.',
+  ].join(' ')
+}
+
+function formatRarityLabel(rarity: LootLevelerRarity) {
+  return rarity.charAt(0).toUpperCase() + rarity.slice(1)
 }
 
 function readString(value: unknown): string | undefined {
@@ -2364,8 +3383,12 @@ function remixPrompt(prompt: string, activeMode: ForgeMode) {
 
 const starterPromptByMode: Record<ForgeMode, string> = {
   armory: 'forged steel warhammer with a readable silhouette',
+  'action-animator': 'side-profile walk cycle for a 2D game sprite',
   'texture-lab': 'weathered basalt floor tile with subtle lava seams',
+  'loot-leveler': 'legendary upgrade pass for a sword while keeping the silhouette identical',
+  'portrait-studio': 'hero portrait expression sheet with locked identity',
   visualizer: 'battle-worn ranger portrait with layered leather armor',
+  'vfx-forge': 'fireball projectile spritesheet with soft glowing edges',
   'character-sheet':
     'frontier ranger with layered leather armor and a weathered half-cloak',
 }
@@ -2463,6 +3486,24 @@ const archetypeKeywordMap: Record<
       keywords: ['lava', 'sand', 'dirt', 'mud', 'snow', 'grass', 'ground', 'floor', 'tile'],
     },
   ],
+  'action-animator': [
+    {
+      archetype: 'character',
+      keywords: ['walk', 'run', 'attack', 'jump', 'idle', 'sprite', 'animation'],
+    },
+  ],
+  'loot-leveler': [
+    {
+      archetype: 'blade',
+      keywords: ['sword', 'blade', 'katana', 'dagger', 'axe', 'weapon', 'shield'],
+    },
+  ],
+  'portrait-studio': [
+    {
+      archetype: 'character',
+      keywords: ['portrait', 'expression', 'hero', 'face', 'emotion'],
+    },
+  ],
   visualizer: [
     {
       archetype: 'character',
@@ -2495,6 +3536,12 @@ const archetypeKeywordMap: Record<
     {
       archetype: 'character',
       keywords: ['character', 'hero', 'villain', 'pilot', 'nomad', 'leader'],
+    },
+  ],
+  'vfx-forge': [
+    {
+      archetype: 'prop',
+      keywords: ['fireball', 'plasma', 'bolt', 'projectile', 'magic', 'vfx'],
     },
   ],
 }
@@ -2730,11 +3777,17 @@ function buildPromptVariant({
   const profilesByMode =
     activeMode === 'armory'
       ? armoryProfiles
-      : activeMode === 'texture-lab'
-        ? textureProfiles
-        : activeMode === 'visualizer'
+      : activeMode === 'loot-leveler'
+        ? armoryProfiles
+        : activeMode === 'texture-lab'
+          ? textureProfiles
+        : activeMode === 'action-animator' || activeMode === 'portrait-studio'
           ? visualizerProfiles
-          : characterSheetProfiles
+          : activeMode === 'visualizer'
+            ? visualizerProfiles
+          : activeMode === 'vfx-forge'
+            ? visualizerProfiles
+            : characterSheetProfiles
 
   const profile = profilesByMode[archetype] ?? profilesByMode.general
   const selectedDetails = pickDistinct(profile.detail, 2)
@@ -2760,6 +3813,18 @@ const modeEndings: Record<ForgeMode, Record<PromptVariant, string[]>> = {
       'new forged presentation pass',
     ],
   },
+  'action-animator': {
+    enhance: [
+      'clear side-profile motion read',
+      'feet locked to a stable ground plane',
+      'loop-safe sprite timing',
+    ],
+    remix: [
+      'alternate action timing',
+      'different motion energy',
+      'fresh animation pass',
+    ],
+  },
   'texture-lab': {
     enhance: [
       'seamless top-down texture pass',
@@ -2772,6 +3837,30 @@ const modeEndings: Record<ForgeMode, Record<PromptVariant, string[]>> = {
       'fresh environment texture direction',
     ],
   },
+  'loot-leveler': {
+    enhance: [
+      'rarity upgrade pass',
+      'silhouette-preserving enhancement',
+      'premium material accents',
+    ],
+    remix: [
+      'different rarity treatment',
+      'alternate material finish',
+      'fresh loot pass',
+    ],
+  },
+  'portrait-studio': {
+    enhance: [
+      'expression-sheet consistency',
+      'locked facial structure',
+      'contact-sheet presentation',
+    ],
+    remix: [
+      'different emotional emphasis',
+      'alternate portrait mood',
+      'fresh expression lineup',
+    ],
+  },
   visualizer: {
     enhance: [
       'cinematic concept-art presentation',
@@ -2782,6 +3871,18 @@ const modeEndings: Record<ForgeMode, Record<PromptVariant, string[]>> = {
       'alternate cinematic mood pass',
       'fresh visual-development direction',
       'new atmospheric story beat',
+    ],
+  },
+  'vfx-forge': {
+    enhance: [
+      'additive-friendly black background',
+      'soft glowing particle edges',
+      'clear frame-to-frame effect timing',
+    ],
+    remix: [
+      'alternate projectile evolution',
+      'different energy breakup',
+      'fresh VFX pass',
     ],
   },
   'character-sheet': {

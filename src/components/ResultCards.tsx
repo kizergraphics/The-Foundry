@@ -33,6 +33,7 @@ type GeneratedResultCardProps = {
 export function PlaceholderCard({ index, mode, state }: PlaceholderCardProps) {
   const ModeIcon = mode.icon
   const isLoading = state === 'loading'
+  const isWideStrip = mode.previewAspectClassName === 'aspect-[8/1]'
 
   return (
     <article className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
@@ -49,35 +50,68 @@ export function PlaceholderCard({ index, mode, state }: PlaceholderCardProps) {
       </div>
 
       <div
-        className={`mt-4 ${mode.previewAspectClassName} rounded-[22px] border border-dashed border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.08),transparent_55%),linear-gradient(180deg,rgba(12,14,18,0.98),rgba(7,8,10,0.98))] p-5 ${
+        className={`mt-4 rounded-[22px] border border-dashed border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.08),transparent_55%),linear-gradient(180deg,rgba(12,14,18,0.98),rgba(7,8,10,0.98))] ${
+          isWideStrip ? 'min-h-[12rem] overflow-hidden p-4' : `${mode.previewAspectClassName} p-5`
+        } ${
           isLoading ? 'animate-pulse' : ''
         }`}
       >
-        <div className="flex h-full flex-col justify-between rounded-[18px] border border-white/[0.06] bg-white/[0.025] p-5">
-          <div className="flex items-center justify-between text-zinc-500">
-            {isLoading ? (
-              <LoaderCircle className="size-4 animate-spin" strokeWidth={1.7} />
-            ) : (
-              <Sparkles className="size-4" strokeWidth={1.7} />
-            )}
-            <Clock3 className="size-4" strokeWidth={1.7} />
-          </div>
-          <div className="space-y-4">
-            <div className="flex justify-center">
-              <div className="rounded-full border border-white/10 bg-white/[0.04] p-5 text-zinc-300 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_36px_rgba(0,0,0,0.22)]">
-                <ModeIcon className="size-7" strokeWidth={1.5} />
+        {isWideStrip ? (
+          <div className="flex h-full flex-col justify-between rounded-[18px] border border-white/[0.06] bg-white/[0.025] p-5">
+            <div className="flex items-center justify-between text-zinc-500">
+              <div className="inline-flex items-center gap-2">
+                {isLoading ? (
+                  <LoaderCircle className="size-4 animate-spin" strokeWidth={1.7} />
+                ) : (
+                  <Sparkles className="size-4" strokeWidth={1.7} />
+                )}
+                <span className="font-mono text-[10px] uppercase tracking-[0.28em]">
+                  {isLoading ? 'Generating strip' : 'Wide strip placeholder'}
+                </span>
+              </div>
+              <Clock3 className="size-4" strokeWidth={1.7} />
+            </div>
+            <div className="mt-6 flex items-center gap-5">
+              <div className="rounded-full border border-white/10 bg-white/[0.04] p-4 text-zinc-300 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_36px_rgba(0,0,0,0.22)]">
+                <ModeIcon className="size-6" strokeWidth={1.5} />
+              </div>
+              <div className="flex-1 space-y-3">
+                <div className="h-2 rounded-full bg-white/[0.08]" />
+                <div className="h-2 w-5/6 rounded-full bg-white/[0.06]" />
+                <div className="h-2 w-3/4 rounded-full bg-white/[0.05]" />
               </div>
             </div>
-            <div className="space-y-2">
-              <div className="h-2 rounded-full bg-white/[0.08]" />
-              <div className="h-2 w-4/5 rounded-full bg-white/[0.06]" />
-              <div className="h-2 w-2/3 rounded-full bg-white/[0.05]" />
-            </div>
+            <p className="mt-6 font-mono text-[11px] uppercase tracking-[0.28em] text-zinc-500">
+              {isLoading ? 'Preparing animation pipeline' : 'Ready for forge pass'}
+            </p>
           </div>
-          <p className="text-center font-mono text-[11px] uppercase tracking-[0.28em] text-zinc-500">
-            {isLoading ? 'Generating with Gemini' : 'Ready for forge pass'}
-          </p>
-        </div>
+        ) : (
+          <div className="flex h-full flex-col justify-between rounded-[18px] border border-white/[0.06] bg-white/[0.025] p-5">
+            <div className="flex items-center justify-between text-zinc-500">
+              {isLoading ? (
+                <LoaderCircle className="size-4 animate-spin" strokeWidth={1.7} />
+              ) : (
+                <Sparkles className="size-4" strokeWidth={1.7} />
+              )}
+              <Clock3 className="size-4" strokeWidth={1.7} />
+            </div>
+            <div className="space-y-4">
+              <div className="flex justify-center">
+                <div className="rounded-full border border-white/10 bg-white/[0.04] p-5 text-zinc-300 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_18px_36px_rgba(0,0,0,0.22)]">
+                  <ModeIcon className="size-7" strokeWidth={1.5} />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="h-2 rounded-full bg-white/[0.08]" />
+                <div className="h-2 w-4/5 rounded-full bg-white/[0.06]" />
+                <div className="h-2 w-2/3 rounded-full bg-white/[0.05]" />
+              </div>
+            </div>
+            <p className="text-center font-mono text-[11px] uppercase tracking-[0.28em] text-zinc-500">
+              {isLoading ? 'Generating with Gemini' : 'Ready for forge pass'}
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-2">
@@ -159,7 +193,7 @@ export function GeneratedResultCard({
         <img
           src={result.dataUrl}
           alt={`${mode.label} generated output ${index + 1}`}
-          className={`${mode.previewAspectClassName} w-full object-cover`}
+          className={`${mode.previewAspectClassName} ${mode.previewImageClassName} w-full`}
         />
       </div>
 
