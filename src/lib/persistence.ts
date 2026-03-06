@@ -3,6 +3,8 @@ import type {
   ForgeMode,
   ForgeResult,
   GenerationCount,
+  TextureExpansionTargetSize,
+  TextureLabWorkflow,
 } from './forge'
 
 type StoredCharacterSheetSettings = {
@@ -18,6 +20,10 @@ type StoredSettings = {
   characterSheet: StoredCharacterSheetSettings
   generationCount: GenerationCount
   prompt: string
+  textureLab: {
+    expansionTargetSize: TextureExpansionTargetSize
+    workflow: TextureLabWorkflow
+  }
 }
 
 type StoredSession = {
@@ -96,6 +102,14 @@ export function loadStoredState(): StoredState | null {
             : 3,
         prompt:
           typeof parsed.settings?.prompt === 'string' ? parsed.settings.prompt : '',
+        textureLab: {
+          expansionTargetSize:
+            parsed.settings?.textureLab?.expansionTargetSize === 2048 ? 2048 : 1024,
+          workflow:
+            parsed.settings?.textureLab?.workflow === 'expand'
+              ? 'expand'
+              : 'generate',
+        },
       },
       session:
         parsed.session &&

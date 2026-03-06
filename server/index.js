@@ -34,7 +34,7 @@ const routeModelDefaults = {
 }
 const routeModelAllowlist = {
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
-  '/api/forge': ['gemini-3-flash', 'gemini-2.5-flash-image'],
+  '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
 }
 const supportedForgeModes = ['armory', 'texture-lab', 'visualizer']
 const forgeBatchMaxAttemptsPerImage = 4
@@ -104,20 +104,38 @@ app.post('/api/forge', async (request, response) => {
     styleId,
     styleText,
     systemInstruction,
+    textureExpansion,
+    workflow,
   } = request.body ?? {}
-
-  if (typeof prompt !== 'string' || !prompt.trim()) {
-    response.status(400).json({ error: 'A non-empty prompt is required.' })
-    return
-  }
 
   if (!supportedForgeModes.includes(mode)) {
     response.status(400).json({ error: 'Unsupported forge mode.' })
     return
   }
 
-  const candidateCount = Math.min(Math.max(Number(generationCount) || 1, 1), 4)
-  const modelSelection = resolveModelForRoute('/api/forge', modelId)
+  const requestedWorkflow = workflow === 'expand-texture' ? 'expand-texture' : 'generate'
+  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
+
+  if (requestedWorkflow !== 'expand-texture' && !normalizedPrompt) {
+    response.status(400).json({ error: 'A non-empty prompt is required.' })
+    return
+  }
+
+  if (requestedWorkflow === 'expand-texture' && mode !== 'texture-lab') {
+    response.status(400).json({
+      error: 'Texture expansion is only supported inside Texture Lab.',
+    })
+    return
+  }
+
+  const candidateCount =
+    requestedWorkflow === 'expand-texture'
+      ? 1
+      : Math.min(Math.max(Number(generationCount) || 1, 1), 4)
+  const modelSelection =
+    requestedWorkflow === 'expand-texture'
+      ? resolveModelForRoute('/api/forge', 'gemini-3-pro')
+      : resolveModelForRoute('/api/forge', modelId)
 
   if (!modelSelection.ok) {
     response.status(400).json({
@@ -147,17 +165,93 @@ app.post('/api/forge', async (request, response) => {
       typeof styleText === 'string' && styleText.trim()
         ? styleText.trim()
         : typeof styleId === 'string' && styleId.trim()
-          ? styleId.trim()
+        ? styleId.trim()
           : ''
-    const finalPrompt = await buildForgePromptWithBestPractices({
-      ai,
-      mode,
-      prompt: prompt.trim(),
-      styleText: providedStyleText,
-      hasStyleReference: validReferences.some((reference) => reference.slot === 'style'),
-      hasSubjectReference: validReferences.some((reference) => reference.slot === 'subject'),
-    })
-    const resolvedSystemInstruction = resolveSystemInstruction(systemInstruction)
+    const finalPrompt =
+      requestedWorkflow === 'expand-texture'
+        ? buildTextureExpansionPrompt({
+            prompt: normalizedPrompt,
+            styleText: providedStyleText,
+            textureExpansion,
+          })
+        : await buildForgePromptWithBestPractices({
+            ai,
+            mode,
+            prompt: normalizedPrompt,
+            styleText: providedStyleText,
+            hasStyleReference: validReferences.some(
+              (reference) => reference.slot === 'style',
+            ),
+            hasSubjectReference: validReferences.some(
+              (reference) => reference.slot === 'subject',
+            ),
+          })
+    const resolvedSystemInstruction =
+      requestedWorkflow === 'expand-texture'
+        ? resolveTextureExpansionSystemInstruction(systemInstruction)
+        : resolveSystemInstruction(systemInstruction)
+
+    if (requestedWorkflow === 'expand-texture') {
+      const validExpansion = normalizeTextureExpansion(textureExpansion)
+
+      if (!validExpansion) {
+        response.status(400).json({
+          error:
+            'Texture expansion requires a centered expansion canvas and the original source texture.',
+        })
+        return
+      }
+
+      const generation = await ai.models.generateContent({
+        model: modelSelection.providerModel,
+        contents: [
+          { text: finalPrompt },
+          {
+            inlineData: {
+              mimeType: validExpansion.canvasImage.mimeType,
+              data: validExpansion.canvasImage.data,
+            },
+          },
+          {
+            inlineData: {
+              mimeType: validExpansion.sourceImage.mimeType,
+              data: validExpansion.sourceImage.data,
+            },
+          },
+        ],
+        config: {
+          candidateCount: 1,
+          responseModalities: ['IMAGE', 'TEXT'],
+          systemInstruction: resolvedSystemInstruction,
+        },
+      })
+
+      const images = extractImages(generation).slice(0, 1)
+
+      if (images.length === 0) {
+        response
+          .status(422)
+          .json(buildNoImageResponseError('/api/forge', modelSelection, generation.text))
+        return
+      }
+
+      await recordUsageEvent({
+        model: modelSelection.modelId,
+        route: '/api/forge',
+      }).catch((logError) => {
+        console.warn('Telemetry logging failed for /api/forge texture expansion:', logError)
+      })
+
+      response.json({
+        images,
+        model: modelSelection.modelId,
+        prompt: finalPrompt,
+        providerModel: modelSelection.providerModel,
+        styleId: providedStyleText || null,
+      })
+      return
+    }
+
     const baseContents = [
       { text: finalPrompt },
       ...validReferences.map((reference) => ({
@@ -545,12 +639,62 @@ function buildForgePromptFallback({
   ].join('\n')
 }
 
+function buildTextureExpansionPrompt({ prompt, styleText, textureExpansion }) {
+  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
+  const normalizedStyleText =
+    typeof styleText === 'string' ? styleText.trim() : ''
+  const targetSize =
+    textureExpansion && Number.isFinite(Number(textureExpansion.targetSize))
+      ? Number(textureExpansion.targetSize)
+      : 1024
+  const sourceWidth =
+    textureExpansion && Number.isFinite(Number(textureExpansion.sourceWidth))
+      ? Number(textureExpansion.sourceWidth)
+      : null
+  const sourceHeight =
+    textureExpansion && Number.isFinite(Number(textureExpansion.sourceHeight))
+      ? Number(textureExpansion.sourceHeight)
+      : null
+
+  return [
+    'Texture outpainting task.',
+    `Expand the centered texture into a seamless ${targetSize} x ${targetSize} square material map.`,
+    'Use the central pattern as the authority for material identity, texel density, grain, roughness, lighting, and color.',
+    'Generate fresh surrounding detail instead of copy-pasting the center. Avoid obvious repetition.',
+    'Preserve a clean top-down texture read suitable for game tiling.',
+    'Ensure the new edges match their opposite sides so the final image tiles seamlessly after expansion.',
+    sourceWidth && sourceHeight
+      ? `Original source dimensions: ${sourceWidth} x ${sourceHeight}.`
+      : null,
+    normalizedStyleText ? `Style guidance: ${normalizedStyleText}.` : null,
+    normalizedPrompt ? `Material notes: ${normalizedPrompt}.` : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
 function resolveSystemInstruction(customInstruction) {
   if (typeof customInstruction !== 'string' || !customInstruction.trim()) {
     return coreSystemRules.join('\n')
   }
 
   return `${coreSystemRules.join('\n')}\n${customInstruction.trim()}`
+}
+
+function resolveTextureExpansionSystemInstruction(customInstruction) {
+  const textureExpansionRules = [
+    'This request is a texture outpainting task.',
+    'Do not introduce perspective, camera tilt, or directional shadows.',
+    'Preserve the centered source texture as the visual anchor for the full material.',
+    'Keep texel density stable from center to edge.',
+    'The final full canvas must be tile-safe: top must match bottom and left must match right.',
+  ]
+
+  return resolveSystemInstruction(
+    [textureExpansionRules.join('\n'), customInstruction]
+      .filter((value) => typeof value === 'string' && value.trim())
+      .join('\n'),
+  )
 }
 
 async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
@@ -620,6 +764,33 @@ function extractImages(generation) {
       )
     }) ?? []
   )
+}
+
+function normalizeTextureExpansion(textureExpansion) {
+  const canvasImage = textureExpansion?.canvasImage
+  const sourceImage = textureExpansion?.sourceImage
+
+  if (
+    typeof canvasImage?.mimeType !== 'string' ||
+    typeof canvasImage?.data !== 'string' ||
+    !canvasImage.data.length ||
+    typeof sourceImage?.mimeType !== 'string' ||
+    typeof sourceImage?.data !== 'string' ||
+    !sourceImage.data.length
+  ) {
+    return null
+  }
+
+  return {
+    canvasImage: {
+      data: canvasImage.data,
+      mimeType: canvasImage.mimeType,
+    },
+    sourceImage: {
+      data: sourceImage.data,
+      mimeType: sourceImage.mimeType,
+    },
+  }
 }
 
 function resolveModelForRoute(routeKey, requestedModelId) {

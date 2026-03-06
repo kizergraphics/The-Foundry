@@ -24,6 +24,7 @@ import {
   getCharacterSheetPromptSource,
 } from './lib/characterSheet'
 import {
+  buildTextureExpansionInput,
   copyResultToClipboard,
   createDataUrl,
   downloadResult,
@@ -50,6 +51,8 @@ import type {
   ModeDefinition,
   ReferenceAsset,
   ReferenceSlot,
+  TextureExpansionTargetSize,
+  TextureLabWorkflow,
 } from './lib/forge'
 
 type ServiceHealth = {
@@ -77,6 +80,26 @@ type UsageSummary = {
   scopedModel?: string | null
   timeZone: string
   todayTotal: number
+}
+
+type ForgeApiResponse = {
+  error?:
+    | string
+    | {
+        code?: string
+        details?: string[]
+        message?: string
+        retryAfterSeconds?: number
+        title?: string
+      }
+  images?: Array<{
+    data: string
+    id: string
+    mimeType: string
+    text?: string
+  }>
+  model?: string
+  prompt?: string
 }
 
 type TelemetryWindowState = {
@@ -110,9 +133,12 @@ const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
 const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
   armory: ['gemini-3-flash', 'gemini-2.5-flash-image'],
   'character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
-  'texture-lab': ['gemini-3-flash', 'gemini-2.5-flash-image'],
+  'texture-lab': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
   visualizer: ['gemini-3-flash', 'gemini-2.5-flash-image'],
 }
+
+const defaultTextureExpansionPrompt =
+  'Generatively expand this texture. Use the central pattern as a reference to fill the outer edges with a matching, seamless, high-resolution material. Maintain identical grain, lighting, and color.'
 
 function loadTelemetryWindowState(now = Date.now()): TelemetryWindowState {
   if (typeof window === 'undefined') {
@@ -209,15 +235,23 @@ function App() {
   )
   const activeMode = modeDefinitions[state.activeMode]
   const isCharacterSheetMode = state.activeMode === 'character-sheet'
+  const isTextureLabMode = state.activeMode === 'texture-lab'
+  const isTextureExpansionMode =
+    isTextureLabMode && state.textureLab.workflow === 'expand'
   const characterReferenceCount = Object.values(
     state.characterSheet.references,
   ).filter(Boolean).length
+  const standardReferenceCount = Object.values(state.references).filter(Boolean).length
   const referenceCount = isCharacterSheetMode
     ? characterReferenceCount
-    : Object.values(state.references).filter(Boolean).length
+    : isTextureExpansionMode
+      ? Number(Boolean(state.textureLab.expansionSource))
+      : standardReferenceCount
   const promptPreview = isCharacterSheetMode
     ? buildCharacterSheetPrompt(state.characterSheet)
-    : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
+    : isTextureExpansionMode
+      ? state.prompt.trim() || defaultTextureExpansionPrompt
+      : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
   const activePromptValue = isCharacterSheetMode
     ? getCharacterSheetPromptSource(state.characterSheet)
     : state.prompt
@@ -227,19 +261,24 @@ function App() {
       : characterReferenceCount === 3
   const isReadyForApi = isCharacterSheetMode
     ? isCharacterSheetReady
-    : state.prompt.trim().length > 0
+    : isTextureExpansionMode
+      ? Boolean(state.textureLab.expansionSource)
+      : state.prompt.trim().length > 0
   const isForging = status === 'loading'
   const isShowingResults = results.length > 0
-  const activeGenerationCount = isCharacterSheetMode ? 1 : state.generationCount
+  const activeGenerationCount =
+    isCharacterSheetMode || isTextureExpansionMode ? 1 : state.generationCount
   const reservedOutputs = Array.from(
     { length: isShowingResults ? results.length : activeGenerationCount },
     (_, index) => index,
   )
-  const activeModelName =
-    serverModel ?? activeModel
+  const effectiveModel = isTextureExpansionMode ? 'gemini-3-pro' : activeModel
+  const activeModelName = serverModel ?? effectiveModel
   const briefItems = isCharacterSheetMode
     ? buildCharacterSheetBriefItems(state)
-    : [
+    : isTextureExpansionMode
+      ? buildTextureExpansionBriefItems(state)
+      : [
         {
           label: 'Style Ref',
           value: state.references.style?.name ?? 'Not attached',
@@ -248,14 +287,14 @@ function App() {
           label: 'Subject Ref',
           value: state.references.subject?.name ?? 'Not attached',
         },
-      ]
+        ]
   const modeAvailableModels = availableModelsByMode[state.activeMode]
   const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
   const selectedModelSupported = modeAvailableModels.includes(activeModel)
   const dailyEstimatedUsage = usageSummary?.todayTotal ?? 0
   const dailyLimit =
     usageSummary?.dailyLimit ?? LIMITS[activeModel] ?? fallbackDailyLimit
-  const selectedTelemetryModel = activeModel
+  const selectedTelemetryModel = effectiveModel
   const telemetryModelKey = selectedTelemetryModel ?? 'all-models'
   const currentSessionCount = sessionCountsByModel[telemetryModelKey] ?? 0
   const sessionMax = sessionMaxByModel[telemetryModelKey] ?? 0
@@ -336,6 +375,14 @@ function App() {
       dispatch({
         type: 'set-character-sheet-parent-id',
         parentId: storedState.settings.characterSheet.parentId,
+      })
+      dispatch({
+        type: 'set-texture-lab-workflow',
+        workflow: storedState.settings.textureLab.workflow,
+      })
+      dispatch({
+        type: 'set-texture-expansion-target-size',
+        size: storedState.settings.textureLab.expansionTargetSize,
       })
       setRecentPrompts(storedState.recentPrompts)
       setResults(storedState.session?.results ?? [])
@@ -462,6 +509,10 @@ function App() {
         },
         generationCount: state.generationCount,
         prompt: state.prompt,
+        textureLab: {
+          expansionTargetSize: state.textureLab.expansionTargetSize,
+          workflow: state.textureLab.workflow,
+        },
       },
       session:
         results.length > 0
@@ -488,6 +539,8 @@ function App() {
     state.characterSheet.referencePrompt,
     state.generationCount,
     state.prompt,
+    state.textureLab.expansionTargetSize,
+    state.textureLab.workflow,
   ])
 
   function finalizeForgeRun(
@@ -545,8 +598,8 @@ function App() {
     setStatus('loading')
     setError(null)
     setNotice(null)
-      setResults([])
-      setServerPrompt(null)
+    setResults([])
+    setServerPrompt(null)
 
     try {
       if (isCharacterSheetMode) {
@@ -566,6 +619,72 @@ function App() {
         return
       }
 
+      if (isTextureExpansionMode) {
+        const sourceAsset = state.textureLab.expansionSource
+
+        if (!sourceAsset) {
+          throw new Error('Attach a source texture before starting an expansion pass.')
+        }
+
+        const [expansionCanvas, sourceBase64] = await Promise.all([
+          buildTextureExpansionInput(sourceAsset.file, {
+            targetSize: state.textureLab.expansionTargetSize,
+          }),
+          fileToBase64(sourceAsset.file),
+        ])
+
+        const response = await fetch('/api/forge', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            generationCount: 1,
+            mode: state.activeMode,
+            modelId: activeModel,
+            prompt: state.prompt.trim(),
+            styleText: activeStyleInput.trim(),
+            textureExpansion: {
+              canvasImage: {
+                data: expansionCanvas.base64,
+                mimeType: expansionCanvas.mimeType,
+                name: `expanded-canvas-${sourceAsset.name}`,
+              },
+              sourceCoverage: expansionCanvas.sourceCoverage,
+              sourceHeight: expansionCanvas.sourceHeight,
+              sourceImage: {
+                data: sourceBase64,
+                mimeType: sourceAsset.mimeType,
+                name: sourceAsset.name,
+              },
+              sourceWidth: expansionCanvas.sourceWidth,
+              targetSize: expansionCanvas.targetSize,
+            },
+            workflow: 'expand-texture',
+          }),
+        })
+
+        const payload = (await response.json()) as ForgeApiResponse | undefined
+
+        if (!response.ok || !payload?.images?.length) {
+          throw toForgeError(payload?.error)
+        }
+
+        finalizeForgeRun(
+          payload.images.map((image) => ({
+            dataUrl: createDataUrl(image.data, image.mimeType),
+            id: image.id,
+            mimeType: image.mimeType,
+            text: image.text,
+          })),
+          payload.model ?? null,
+          payload.prompt ?? promptPreview,
+          'Texture expansion completed with a centered outpaint pass.',
+          { telemetryModel: payload.model, trackTelemetry: true },
+        )
+        return
+      }
+
       const references = await Promise.all(
         Object.entries(state.references)
           .filter(
@@ -576,7 +695,7 @@ function App() {
             mimeType: asset.mimeType,
             name: asset.name,
             slot,
-          })),
+        })),
       )
 
       const response = await fetch('/api/forge', {
@@ -594,27 +713,7 @@ function App() {
         }),
       })
 
-      const payload = (await response.json()) as
-        | {
-            error?:
-              | string
-              | {
-                  code?: string
-                  details?: string[]
-                  message?: string
-                  retryAfterSeconds?: number
-                  title?: string
-                }
-            images?: Array<{
-              data: string
-              id: string
-              mimeType: string
-              text?: string
-            }>
-            model?: string
-            prompt?: string
-          }
-        | undefined
+      const payload = (await response.json()) as ForgeApiResponse | undefined
 
       if (!response.ok || !payload?.images?.length) {
         throw toForgeError(payload?.error)
@@ -687,8 +786,9 @@ function App() {
             <div className="flex flex-col gap-6">
               <HeaderSummary
                 activeMode={activeMode}
-                promptLoaded={isReadyForApi}
                 generationCount={activeGenerationCount}
+                inputLabel={isTextureExpansionMode ? 'Source' : 'Prompt'}
+                promptLoaded={isReadyForApi}
               />
               <nav className="flex flex-wrap gap-3">
                 {(Object.entries(modeDefinitions) as [ForgeMode, ModeDefinition][]).map(
@@ -802,39 +902,77 @@ function App() {
                   />
                 ) : (
                   <>
+                    {isTextureLabMode ? (
+                      <TextureLabWorkflowPanel
+                        expansionTargetSize={state.textureLab.expansionTargetSize}
+                        onTargetSizeChange={(size) =>
+                          dispatch({ type: 'set-texture-expansion-target-size', size })
+                        }
+                        onWorkflowChange={(workflow) =>
+                          dispatch({ type: 'set-texture-lab-workflow', workflow })
+                        }
+                        workflow={state.textureLab.workflow}
+                      />
+                    ) : null}
+
                     <PromptPanel
                       activeMode={state.activeMode}
+                      description={
+                        isTextureExpansionMode
+                          ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
+                          : 'Describe the asset or scene you want generated'
+                      }
+                      placeholder={
+                        isTextureExpansionMode
+                          ? 'Ex: weathered brick with subtle mortar variation and dry, neutral lighting.'
+                          : undefined
+                      }
                       prompt={state.prompt}
                       recentPrompts={recentPrompts}
+                      title={
+                        isTextureExpansionMode ? 'Expansion Notes' : 'Forge Prompt'
+                      }
                       onChange={(prompt) => dispatch({ type: 'set-prompt', prompt })}
                     />
 
-                    <ImageUploadField
-                      label="Style Reference"
-                      helper="Controls line weight, finish, palette, and rendering language."
-                      asset={state.references.style}
-                      icon={Palette}
-                      onFileSelect={(asset) =>
-                        dispatch({ type: 'set-reference', slot: 'style', asset })
-                      }
-                    />
+                    {isTextureExpansionMode ? (
+                      <TextureExpansionPanel
+                        asset={state.textureLab.expansionSource}
+                        targetSize={state.textureLab.expansionTargetSize}
+                        onFileSelect={(asset) =>
+                          dispatch({ type: 'set-texture-expansion-source', asset })
+                        }
+                      />
+                    ) : (
+                      <>
+                        <ImageUploadField
+                          label="Style Reference"
+                          helper="Controls line weight, finish, palette, and rendering language."
+                          asset={state.references.style}
+                          icon={Palette}
+                          onFileSelect={(asset) =>
+                            dispatch({ type: 'set-reference', slot: 'style', asset })
+                          }
+                        />
 
-                    <ImageUploadField
-                      label="Subject / Content Reference"
-                      helper="Anchors silhouette, item identity, and the specific form to generate."
-                      asset={state.references.subject}
-                      icon={Box}
-                      onFileSelect={(asset) =>
-                        dispatch({ type: 'set-reference', slot: 'subject', asset })
-                      }
-                    />
+                        <ImageUploadField
+                          label="Subject / Content Reference"
+                          helper="Anchors silhouette, item identity, and the specific form to generate."
+                          asset={state.references.subject}
+                          icon={Box}
+                          onFileSelect={(asset) =>
+                            dispatch({ type: 'set-reference', slot: 'subject', asset })
+                          }
+                        />
 
-                    <BatchPanel
-                      generationCount={state.generationCount}
-                      onSelect={(count) =>
-                        dispatch({ type: 'set-generation-count', count })
-                      }
-                    />
+                        <BatchPanel
+                          generationCount={state.generationCount}
+                          onSelect={(count) =>
+                            dispatch({ type: 'set-generation-count', count })
+                          }
+                        />
+                      </>
+                    )}
                   </>
                 )}
 
@@ -861,23 +999,34 @@ function App() {
                         {isForging
                           ? isCharacterSheetMode
                             ? 'BUILDING SHEET'
+                            : isTextureExpansionMode
+                              ? 'EXPANDING TEXTURE'
                             : 'FORGING'
                           : isCharacterSheetMode
                             ? 'BUILD SHEET'
+                            : isTextureExpansionMode
+                              ? 'EXPAND TEXTURE'
                             : 'FORGE'}
                       </span>
                       <span className="block text-xs text-sky-100/70">
                         {isForging
                           ? isCharacterSheetMode
                             ? 'Sending character sheet request to Gemini'
+                            : isTextureExpansionMode
+                              ? 'Sending centered outpaint canvas to Gemini 3 Pro'
                             : 'Sending prompt and references to Gemini'
                           : !selectedModelSupported
                             ? 'Selected model is not supported for this tab'
                             : isReadyForApi
-                            ? 'Request staged for API execution'
-                            : isCharacterSheetMode
-                              ? 'Attach all required references or write a manifest'
-                              : 'Add a prompt to prepare the request'}
+                              ? isTextureExpansionMode
+                                ? 'Centered source canvas staged for outpaint execution'
+                                : 'Request staged for API execution'
+                              : isCharacterSheetMode
+                                ? 'Attach all required references or write a manifest'
+                                : isTextureExpansionMode
+                                  ? 'Attach a source texture to prepare the expansion pass'
+                                  : 'Add a prompt to prepare the request'
+                        }
                       </span>
                     </span>
                   </span>
@@ -899,9 +1048,20 @@ function App() {
             <section className="flex min-w-0 flex-col gap-5">
               <TopPanel
                 activeMode={activeMode}
-                isForging={isForging}
-                isReadyForApi={isReadyForApi}
                 prompt={activePromptValue.trim() || promptPreview}
+                readinessLabel={
+                  isForging
+                    ? isTextureExpansionMode
+                      ? 'Source processing'
+                      : 'Generating'
+                    : isReadyForApi
+                      ? isTextureExpansionMode
+                        ? 'Source ready'
+                        : 'Prompt ready'
+                      : isTextureExpansionMode
+                        ? 'Source required'
+                        : 'Prompt required'
+                }
               />
 
               <div className="flex flex-col gap-4 rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-6">
@@ -1000,6 +1160,7 @@ function App() {
 type HeaderSummaryProps = {
   activeMode: ModeDefinition
   generationCount: number
+  inputLabel: string
   promptLoaded: boolean
 }
 
@@ -1007,6 +1168,7 @@ function HeaderSummary({
   activeMode,
   promptLoaded,
   generationCount,
+  inputLabel,
 }: HeaderSummaryProps) {
   return (
     <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
@@ -1026,7 +1188,7 @@ function HeaderSummary({
 
       <div className="grid gap-3 sm:grid-cols-3">
         <MetricCard label="Mode" value={activeMode.label} />
-        <MetricCard label="Prompt" value={promptLoaded ? 'Loaded' : 'Missing'} />
+        <MetricCard label={inputLabel} value={promptLoaded ? 'Loaded' : 'Missing'} />
         <MetricCard label="Batch Count" value={`${generationCount} outputs`} />
       </div>
     </div>
@@ -1207,28 +1369,153 @@ function StyleInputPanel({ value, onChange }: StyleInputPanelProps) {
   )
 }
 
+type TextureLabWorkflowPanelProps = {
+  expansionTargetSize: TextureExpansionTargetSize
+  onTargetSizeChange: (size: TextureExpansionTargetSize) => void
+  onWorkflowChange: (workflow: TextureLabWorkflow) => void
+  workflow: TextureLabWorkflow
+}
+
+function TextureLabWorkflowPanel({
+  expansionTargetSize,
+  onTargetSizeChange,
+  onWorkflowChange,
+  workflow,
+}: TextureLabWorkflowPanelProps) {
+  return (
+    <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
+            Texture Workflow
+          </p>
+          <p className="mt-2 text-sm font-medium text-white">
+            Switch between fresh texture generation and outpaint expansion.
+          </p>
+        </div>
+        <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-xs text-zinc-400">
+          Texture Lab
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <ModeToggleButton
+          icon={Sparkles}
+          isActive={workflow === 'generate'}
+          label="Generate"
+          onClick={() => onWorkflowChange('generate')}
+        />
+        <ModeToggleButton
+          icon={ImagePlus}
+          isActive={workflow === 'expand'}
+          label="Expand"
+          onClick={() => onWorkflowChange('expand')}
+        />
+      </div>
+
+      {workflow === 'expand' ? (
+        <div className="mt-4 rounded-[22px] border border-emerald-300/20 bg-emerald-500/10 p-4">
+          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-emerald-100/70">
+            Expansion Strategy
+          </p>
+          <p className="mt-2 text-sm leading-6 text-emerald-50">
+            The source texture is centered on a larger transparent canvas, then Gemini
+            fills the outer space while keeping the final map tile-safe. This workflow
+            routes through Gemini 3 Pro for the edit pass.
+          </p>
+
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {[1024, 2048].map((size) => (
+              <button
+                key={size}
+                type="button"
+                onClick={() =>
+                  onTargetSizeChange(size as TextureExpansionTargetSize)
+                }
+                className={`rounded-[18px] border px-3 py-3 text-left transition ${
+                  expansionTargetSize === size
+                    ? 'border-emerald-300/35 bg-emerald-400/12 text-emerald-50'
+                    : 'border-white/10 bg-white/[0.03] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]'
+                }`}
+              >
+                <span className="block text-sm font-medium">{size} px canvas</span>
+                <span className="mt-1 block text-xs leading-5 text-current/70">
+                  Center the source in the inner 50% and outpaint the remaining area.
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+type TextureExpansionPanelProps = {
+  asset: ReferenceAsset | null
+  onFileSelect: (asset: ReferenceAsset | null) => void
+  targetSize: TextureExpansionTargetSize
+}
+
+function TextureExpansionPanel({
+  asset,
+  onFileSelect,
+  targetSize,
+}: TextureExpansionPanelProps) {
+  return (
+    <section className="space-y-4 rounded-[24px] border border-white/10 bg-black/20 p-4">
+      <ImageUploadField
+        label="Source Texture"
+        helper="Required. This image is centered on a larger transparent canvas before Gemini expands the surrounding material."
+        asset={asset}
+        icon={ImagePlus}
+        isRequired
+        onFileSelect={onFileSelect}
+      />
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Outpaint Notes
+        </p>
+        <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-300">
+          <li>The source is shrunk into the center 25% of the canvas area.</li>
+          <li>Gemini receives both the centered canvas and the original texture as reference.</li>
+          <li>New edges are instructed to match opposite sides so the expanded result still tiles cleanly.</li>
+          <li>Target canvas: {targetSize} x {targetSize}.</li>
+        </ul>
+      </div>
+    </section>
+  )
+}
+
 type PromptPanelProps = {
   activeMode: ForgeMode
+  description?: string
   onChange: (prompt: string) => void
+  placeholder?: string
   prompt: string
   recentPrompts: string[]
+  title?: string
 }
 
 function PromptPanel({
   activeMode,
+  description = 'Describe the asset or scene you want generated',
+  placeholder = 'Ex: Ornate steel longsword with obsidian inlay, readable silhouette, game-ready presentation.',
   prompt,
   onChange,
   recentPrompts,
+  title = 'Forge Prompt',
 }: PromptPanelProps) {
   return (
     <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
       <div className="flex items-center justify-between">
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-            Forge Prompt
+            {title}
           </p>
           <p className="mt-2 text-sm font-medium text-white">
-            Describe the asset or scene you want generated
+            {description}
           </p>
         </div>
         <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-xs text-zinc-400">
@@ -1240,7 +1527,7 @@ function PromptPanel({
         <textarea
           value={prompt}
           onChange={(event) => onChange(event.target.value)}
-          placeholder="Ex: Ornate steel longsword with obsidian inlay, readable silhouette, game-ready presentation."
+          placeholder={placeholder}
           rows={6}
           className="w-full resize-none rounded-[22px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35 focus:bg-white/[0.05]"
         />
@@ -1592,16 +1879,14 @@ function BatchPanel({ generationCount, onSelect }: BatchPanelProps) {
 
 type TopPanelProps = {
   activeMode: ModeDefinition
-  isForging: boolean
-  isReadyForApi: boolean
   prompt: string
+  readinessLabel: string
 }
 
 function TopPanel({
   activeMode,
-  isForging,
-  isReadyForApi,
   prompt,
+  readinessLabel,
 }: TopPanelProps) {
   const ModeIcon = activeMode.icon
 
@@ -1625,10 +1910,7 @@ function TopPanel({
 
         <div className="grid gap-3 sm:grid-cols-2">
           <MetricCard label="Focus" value={activeMode.focus} />
-          <MetricCard
-            label="Readiness"
-            value={isForging ? 'Generating' : isReadyForApi ? 'Prompt ready' : 'Prompt required'}
-          />
+          <MetricCard label="Readiness" value={readinessLabel} />
         </div>
       </div>
 
@@ -1812,6 +2094,25 @@ function buildCharacterSheetBriefItems(
         state.characterSheet.generationMode === 'manifest'
           ? 'Manifest'
           : 'Reference',
+    },
+  ]
+}
+
+function buildTextureExpansionBriefItems(
+  state: typeof initialState,
+): ForgeBriefItem[] {
+  return [
+    {
+      label: 'Workflow',
+      value: 'Expand Texture',
+    },
+    {
+      label: 'Source',
+      value: state.textureLab.expansionSource?.name ?? 'Not attached',
+    },
+    {
+      label: 'Canvas',
+      value: `${state.textureLab.expansionTargetSize} px`,
     },
   ]
 }

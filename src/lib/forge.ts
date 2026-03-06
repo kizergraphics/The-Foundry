@@ -10,6 +10,8 @@ export type ForgeMode =
 export type ReferenceSlot = 'style' | 'subject'
 export type CharacterSheetReferenceSlot = 'face' | 'outfit' | 'art-style'
 export type CharacterSheetGenerationMode = 'reference' | 'manifest'
+export type TextureLabWorkflow = 'generate' | 'expand'
+export type TextureExpansionTargetSize = 1024 | 2048
 export type GenerationCount = 1 | 2 | 3 | 4
 export type ForgeStatus = 'idle' | 'loading' | 'success' | 'error'
 
@@ -29,12 +31,19 @@ export type CharacterSheetState = {
   referencePrompt: string
 }
 
+export type TextureLabState = {
+  expansionSource: ReferenceAsset | null
+  expansionTargetSize: TextureExpansionTargetSize
+  workflow: TextureLabWorkflow
+}
+
 export type ForgeState = {
   activeMode: ForgeMode
   characterSheet: CharacterSheetState
   generationCount: GenerationCount
   prompt: string
   references: Record<ReferenceSlot, ReferenceAsset | null>
+  textureLab: TextureLabState
 }
 
 export type ForgeAction =
@@ -52,6 +61,12 @@ export type ForgeAction =
     }
   | { type: 'set-character-sheet-consistency'; enabled: boolean }
   | { type: 'set-character-sheet-parent-id'; parentId: string | null }
+  | { type: 'set-texture-lab-workflow'; workflow: TextureLabWorkflow }
+  | { type: 'set-texture-expansion-source'; asset: ReferenceAsset | null }
+  | {
+      type: 'set-texture-expansion-target-size'
+      size: TextureExpansionTargetSize
+    }
 
 export type ModeDefinition = {
   description: string
@@ -140,6 +155,11 @@ export const initialState: ForgeState = {
     style: null,
     subject: null,
   },
+  textureLab: {
+    expansionSource: null,
+    expansionTargetSize: 1024,
+    workflow: 'generate',
+  },
   characterSheet: {
     consistencyEnabled: false,
     generationMode: 'reference',
@@ -177,6 +197,30 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         references: {
           ...state.references,
           [action.slot]: action.asset,
+        },
+      }
+    case 'set-texture-lab-workflow':
+      return {
+        ...state,
+        textureLab: {
+          ...state.textureLab,
+          workflow: action.workflow,
+        },
+      }
+    case 'set-texture-expansion-source':
+      return {
+        ...state,
+        textureLab: {
+          ...state.textureLab,
+          expansionSource: action.asset,
+        },
+      }
+    case 'set-texture-expansion-target-size':
+      return {
+        ...state,
+        textureLab: {
+          ...state.textureLab,
+          expansionTargetSize: action.size,
         },
       }
     case 'set-character-sheet-mode':
