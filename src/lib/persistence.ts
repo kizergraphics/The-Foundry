@@ -22,6 +22,7 @@ type StoredSettings = {
   prompt: string
   textureLab: {
     expansionTargetSize: TextureExpansionTargetSize
+    seamlessMode: boolean
     workflow: TextureLabWorkflow
   }
 }
@@ -105,6 +106,7 @@ export function loadStoredState(): StoredState | null {
         textureLab: {
           expansionTargetSize:
             parsed.settings?.textureLab?.expansionTargetSize === 2048 ? 2048 : 1024,
+          seamlessMode: Boolean(parsed.settings?.textureLab?.seamlessMode),
           workflow:
             parsed.settings?.textureLab?.workflow === 'expand'
               ? 'expand'

@@ -34,6 +34,7 @@ export type CharacterSheetState = {
 export type TextureLabState = {
   expansionSource: ReferenceAsset | null
   expansionTargetSize: TextureExpansionTargetSize
+  seamlessMode: boolean
   workflow: TextureLabWorkflow
 }
 
@@ -63,6 +64,7 @@ export type ForgeAction =
   | { type: 'set-character-sheet-parent-id'; parentId: string | null }
   | { type: 'set-texture-lab-workflow'; workflow: TextureLabWorkflow }
   | { type: 'set-texture-expansion-source'; asset: ReferenceAsset | null }
+  | { type: 'set-texture-lab-seamless-mode'; enabled: boolean }
   | {
       type: 'set-texture-expansion-target-size'
       size: TextureExpansionTargetSize
@@ -158,6 +160,7 @@ export const initialState: ForgeState = {
   textureLab: {
     expansionSource: null,
     expansionTargetSize: 1024,
+    seamlessMode: false,
     workflow: 'generate',
   },
   characterSheet: {
@@ -213,6 +216,14 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         textureLab: {
           ...state.textureLab,
           expansionSource: action.asset,
+        },
+      }
+    case 'set-texture-lab-seamless-mode':
+      return {
+        ...state,
+        textureLab: {
+          ...state.textureLab,
+          seamlessMode: action.enabled,
         },
       }
     case 'set-texture-expansion-target-size':

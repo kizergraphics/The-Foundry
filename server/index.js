@@ -104,6 +104,8 @@ app.post('/api/forge', async (request, response) => {
     styleId,
     styleText,
     systemInstruction,
+    seamRepair,
+    seamlessMode,
     textureExpansion,
     workflow,
   } = request.body ?? {}
@@ -113,27 +115,35 @@ app.post('/api/forge', async (request, response) => {
     return
   }
 
-  const requestedWorkflow = workflow === 'expand-texture' ? 'expand-texture' : 'generate'
+  const requestedWorkflow =
+    workflow === 'expand-texture'
+      ? 'expand-texture'
+      : workflow === 'repair-seams'
+        ? 'repair-seams'
+        : 'generate'
   const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
 
-  if (requestedWorkflow !== 'expand-texture' && !normalizedPrompt) {
+  if (requestedWorkflow === 'generate' && !normalizedPrompt) {
     response.status(400).json({ error: 'A non-empty prompt is required.' })
     return
   }
 
-  if (requestedWorkflow === 'expand-texture' && mode !== 'texture-lab') {
+  if (
+    (requestedWorkflow === 'expand-texture' || requestedWorkflow === 'repair-seams') &&
+    mode !== 'texture-lab'
+  ) {
     response.status(400).json({
-      error: 'Texture expansion is only supported inside Texture Lab.',
+      error: 'Texture edit workflows are only supported inside Texture Lab.',
     })
     return
   }
 
   const candidateCount =
-    requestedWorkflow === 'expand-texture'
+    requestedWorkflow === 'expand-texture' || requestedWorkflow === 'repair-seams'
       ? 1
       : Math.min(Math.max(Number(generationCount) || 1, 1), 4)
   const modelSelection =
-    requestedWorkflow === 'expand-texture'
+    requestedWorkflow === 'expand-texture' || requestedWorkflow === 'repair-seams'
       ? resolveModelForRoute('/api/forge', 'gemini-3-pro')
       : resolveModelForRoute('/api/forge', modelId)
 
@@ -174,10 +184,16 @@ app.post('/api/forge', async (request, response) => {
             styleText: providedStyleText,
             textureExpansion,
           })
+        : requestedWorkflow === 'repair-seams'
+          ? buildSeamRepairPrompt({
+              prompt: normalizedPrompt,
+              styleText: providedStyleText,
+            })
         : await buildForgePromptWithBestPractices({
             ai,
             mode,
             prompt: normalizedPrompt,
+            seamlessMode: Boolean(seamlessMode),
             styleText: providedStyleText,
             hasStyleReference: validReferences.some(
               (reference) => reference.slot === 'style',
@@ -189,6 +205,12 @@ app.post('/api/forge', async (request, response) => {
     const resolvedSystemInstruction =
       requestedWorkflow === 'expand-texture'
         ? resolveTextureExpansionSystemInstruction(systemInstruction)
+        : requestedWorkflow === 'repair-seams'
+          ? resolveSeamRepairSystemInstruction(systemInstruction)
+        : mode === 'texture-lab'
+          ? resolveTextureGenerationSystemInstruction(systemInstruction, {
+              seamlessMode: Boolean(seamlessMode),
+            })
         : resolveSystemInstruction(systemInstruction)
 
     if (requestedWorkflow === 'expand-texture') {
@@ -240,6 +262,67 @@ app.post('/api/forge', async (request, response) => {
         route: '/api/forge',
       }).catch((logError) => {
         console.warn('Telemetry logging failed for /api/forge texture expansion:', logError)
+      })
+
+      response.json({
+        images,
+        model: modelSelection.modelId,
+        prompt: finalPrompt,
+        providerModel: modelSelection.providerModel,
+        styleId: providedStyleText || null,
+      })
+      return
+    }
+
+    if (requestedWorkflow === 'repair-seams') {
+      const validRepair = normalizeSeamRepair(seamRepair)
+
+      if (!validRepair) {
+        response.status(400).json({
+          error:
+            'Seam repair requires the offset texture image and the original texture image.',
+        })
+        return
+      }
+
+      const generation = await ai.models.generateContent({
+        model: modelSelection.providerModel,
+        contents: [
+          { text: finalPrompt },
+          {
+            inlineData: {
+              mimeType: validRepair.offsetImage.mimeType,
+              data: validRepair.offsetImage.data,
+            },
+          },
+          {
+            inlineData: {
+              mimeType: validRepair.originalImage.mimeType,
+              data: validRepair.originalImage.data,
+            },
+          },
+        ],
+        config: {
+          candidateCount: 1,
+          responseModalities: ['IMAGE', 'TEXT'],
+          systemInstruction: resolvedSystemInstruction,
+        },
+      })
+
+      const images = extractImages(generation).slice(0, 1)
+
+      if (images.length === 0) {
+        response
+          .status(422)
+          .json(buildNoImageResponseError('/api/forge', modelSelection, generation.text))
+        return
+      }
+
+      await recordUsageEvent({
+        model: modelSelection.modelId,
+        route: '/api/forge',
+      }).catch((logError) => {
+        console.warn('Telemetry logging failed for /api/forge seam repair:', logError)
       })
 
       response.json({
@@ -517,6 +600,7 @@ async function buildForgePromptWithBestPractices({
   ai,
   mode,
   prompt,
+  seamlessMode,
   styleText,
   hasStyleReference,
   hasSubjectReference,
@@ -529,12 +613,20 @@ async function buildForgePromptWithBestPractices({
     return ''
   }
 
+  if (mode === 'texture-lab' && seamlessMode) {
+    return buildSemanticTilingPrompt({
+      prompt: normalizedPrompt,
+      styleText: normalizedStyleText,
+    })
+  }
+
   const orchestratorModel = modelRegistry['gemini-3-flash']
 
   if (!orchestratorModel) {
     return buildForgePromptFallback({
       mode,
       prompt: normalizedPrompt,
+      seamlessMode,
       styleText: normalizedStyleText,
       hasStyleReference,
       hasSubjectReference,
@@ -603,6 +695,7 @@ async function buildForgePromptWithBestPractices({
   return buildForgePromptFallback({
     mode,
     prompt: normalizedPrompt,
+    seamlessMode,
     styleText: normalizedStyleText,
     hasStyleReference,
     hasSubjectReference,
@@ -612,10 +705,15 @@ async function buildForgePromptWithBestPractices({
 function buildForgePromptFallback({
   mode,
   prompt,
+  seamlessMode,
   styleText,
   hasStyleReference,
   hasSubjectReference,
 }) {
+  if (mode === 'texture-lab' && seamlessMode) {
+    return buildSemanticTilingPrompt({ prompt, styleText })
+  }
+
   const modeBestPractices =
     mode === 'texture-lab'
       ? 'seamless tile-safe structure, flat lighting, controlled surface scale'
@@ -639,6 +737,21 @@ function buildForgePromptFallback({
   ].join('\n')
 }
 
+function buildSemanticTilingPrompt({ prompt, styleText }) {
+  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
+  const normalizedStyleText =
+    typeof styleText === 'string' && styleText.trim()
+      ? styleText.trim()
+      : 'neutral production texture'
+
+  return (
+    `Create a seamless repeating pattern of ${normalizedPrompt}. ` +
+    'Ensure smooth transitions at the edges for flawless tiling. ' +
+    `Style: ${normalizedStyleText}, high resolution, perfectly tileable horizontal and vertical edges, balanced composition. ` +
+    'Seamless repeating texture, tileable edges.'
+  )
+}
+
 function buildTextureExpansionPrompt({ prompt, styleText, textureExpansion }) {
   const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
   const normalizedStyleText =
@@ -659,6 +772,7 @@ function buildTextureExpansionPrompt({ prompt, styleText, textureExpansion }) {
   return [
     'Texture outpainting task.',
     `Expand the centered texture into a seamless ${targetSize} x ${targetSize} square material map.`,
+    'Fill the entire canvas with texture detail. Do not leave any flat backdrop, blank border, or studio background visible.',
     'Use the central pattern as the authority for material identity, texel density, grain, roughness, lighting, and color.',
     'Generate fresh surrounding detail instead of copy-pasting the center. Avoid obvious repetition.',
     'Preserve a clean top-down texture read suitable for game tiling.',
@@ -668,6 +782,24 @@ function buildTextureExpansionPrompt({ prompt, styleText, textureExpansion }) {
       : null,
     normalizedStyleText ? `Style guidance: ${normalizedStyleText}.` : null,
     normalizedPrompt ? `Material notes: ${normalizedPrompt}.` : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function buildSeamRepairPrompt({ prompt, styleText }) {
+  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
+  const normalizedStyleText =
+    typeof styleText === 'string' && styleText.trim()
+      ? styleText.trim()
+      : 'neutral production texture'
+
+  return [
+    'Seamlessly blend the seams in the center of this image to create a perfect continuous texture.',
+    'Keep the style, scale, material breakup, and colors identical to the reference.',
+    'Preserve the original top-down material behavior and generate no new composition shift.',
+    normalizedPrompt ? `Original material request: ${normalizedPrompt}.` : null,
+    `Style guidance: ${normalizedStyleText}.`,
   ]
     .filter(Boolean)
     .join(' ')
@@ -684,17 +816,46 @@ function resolveSystemInstruction(customInstruction) {
 function resolveTextureExpansionSystemInstruction(customInstruction) {
   const textureExpansionRules = [
     'This request is a texture outpainting task.',
+    'The full output must be covered by texture detail from edge to edge.',
+    'Do not leave any flat background color, blank border, transparent area, or studio backdrop visible.',
     'Do not introduce perspective, camera tilt, or directional shadows.',
     'Preserve the centered source texture as the visual anchor for the full material.',
     'Keep texel density stable from center to edge.',
     'The final full canvas must be tile-safe: top must match bottom and left must match right.',
   ]
 
-  return resolveSystemInstruction(
-    [textureExpansionRules.join('\n'), customInstruction]
-      .filter((value) => typeof value === 'string' && value.trim())
-      .join('\n'),
-  )
+  return [coreSystemRules.slice(1).join('\n'), textureExpansionRules.join('\n'), customInstruction]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n')
+}
+
+function resolveSeamRepairSystemInstruction(customInstruction) {
+  const seamRepairRules = [
+    'This request is a texture seam repair task.',
+    'The offset seam crossing the center must be blended until the texture tiles cleanly.',
+    'Keep the material identical to the original texture reference.',
+    'Do not introduce perspective, lighting changes, flat background areas, or compositional motifs.',
+    'The final full canvas must remain perfectly tile-safe on both axes.',
+  ]
+
+  return [coreSystemRules.slice(1).join('\n'), seamRepairRules.join('\n'), customInstruction]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n')
+}
+
+function resolveTextureGenerationSystemInstruction(customInstruction, { seamlessMode }) {
+  const textureRules = [
+    'This request is a full-frame material texture generation task.',
+    'Fill the image edge to edge with texture detail. Do not create a backdrop or empty border.',
+    'Keep the view top-down and lighting flat and production-safe.',
+    seamlessMode
+      ? 'The result must tile seamlessly on both the horizontal and vertical edges.'
+      : null,
+  ]
+
+  return [coreSystemRules.slice(1).join('\n'), textureRules.join('\n'), customInstruction]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n')
 }
 
 async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
@@ -789,6 +950,33 @@ function normalizeTextureExpansion(textureExpansion) {
     sourceImage: {
       data: sourceImage.data,
       mimeType: sourceImage.mimeType,
+    },
+  }
+}
+
+function normalizeSeamRepair(seamRepair) {
+  const offsetImage = seamRepair?.offsetImage
+  const originalImage = seamRepair?.originalImage
+
+  if (
+    typeof offsetImage?.mimeType !== 'string' ||
+    typeof offsetImage?.data !== 'string' ||
+    !offsetImage.data.length ||
+    typeof originalImage?.mimeType !== 'string' ||
+    typeof originalImage?.data !== 'string' ||
+    !originalImage.data.length
+  ) {
+    return null
+  }
+
+  return {
+    offsetImage: {
+      data: offsetImage.data,
+      mimeType: offsetImage.mimeType,
+    },
+    originalImage: {
+      data: originalImage.data,
+      mimeType: originalImage.mimeType,
     },
   }
 }

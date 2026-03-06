@@ -24,6 +24,7 @@ import {
   getCharacterSheetPromptSource,
 } from './lib/characterSheet'
 import {
+  buildTextureSeamRepairInput,
   buildTextureExpansionInput,
   copyResultToClipboard,
   createDataUrl,
@@ -100,6 +101,13 @@ type ForgeApiResponse = {
   }>
   model?: string
   prompt?: string
+}
+
+type TextureLabRunContext = {
+  prompt: string
+  seamlessMode: boolean
+  styleText: string
+  workflow: 'expand' | 'generate'
 }
 
 type TelemetryWindowState = {
@@ -215,7 +223,10 @@ function App() {
   const [serverModel, setServerModel] = useState<string | null>(null)
   const [recentPrompts, setRecentPrompts] = useState<string[]>([])
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null)
+  const [repairingResultId, setRepairingResultId] = useState<string | null>(null)
   const [hasRestoredState, setHasRestoredState] = useState(false)
+  const [lastTextureLabRun, setLastTextureLabRun] =
+    useState<TextureLabRunContext | null>(null)
   const [serviceHealth, setServiceHealth] = useState<ServiceHealth | null>(null)
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
   const [modelOverridesByMode, setModelOverridesByMode] = useState<
@@ -238,6 +249,8 @@ function App() {
   const isTextureLabMode = state.activeMode === 'texture-lab'
   const isTextureExpansionMode =
     isTextureLabMode && state.textureLab.workflow === 'expand'
+  const isTextureGenerateMode =
+    isTextureLabMode && state.textureLab.workflow === 'generate'
   const characterReferenceCount = Object.values(
     state.characterSheet.references,
   ).filter(Boolean).length
@@ -247,10 +260,13 @@ function App() {
     : isTextureExpansionMode
       ? Number(Boolean(state.textureLab.expansionSource))
       : standardReferenceCount
+  const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
   const promptPreview = isCharacterSheetMode
     ? buildCharacterSheetPrompt(state.characterSheet)
     : isTextureExpansionMode
       ? state.prompt.trim() || defaultTextureExpansionPrompt
+      : isTextureGenerateMode && state.textureLab.seamlessMode
+        ? buildSeamlessPromptPreview(state.prompt, activeStyleInput)
       : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
   const activePromptValue = isCharacterSheetMode
     ? getCharacterSheetPromptSource(state.characterSheet)
@@ -287,9 +303,16 @@ function App() {
           label: 'Subject Ref',
           value: state.references.subject?.name ?? 'Not attached',
         },
+        ...(isTextureGenerateMode
+          ? [
+              {
+                label: 'Seamless',
+                value: state.textureLab.seamlessMode ? 'Enabled' : 'Disabled',
+              },
+            ]
+          : []),
         ]
   const modeAvailableModels = availableModelsByMode[state.activeMode]
-  const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
   const selectedModelSupported = modeAvailableModels.includes(activeModel)
   const dailyEstimatedUsage = usageSummary?.todayTotal ?? 0
   const dailyLimit =
@@ -383,6 +406,10 @@ function App() {
       dispatch({
         type: 'set-texture-expansion-target-size',
         size: storedState.settings.textureLab.expansionTargetSize,
+      })
+      dispatch({
+        type: 'set-texture-lab-seamless-mode',
+        enabled: storedState.settings.textureLab.seamlessMode,
       })
       setRecentPrompts(storedState.recentPrompts)
       setResults(storedState.session?.results ?? [])
@@ -511,6 +538,7 @@ function App() {
         prompt: state.prompt,
         textureLab: {
           expansionTargetSize: state.textureLab.expansionTargetSize,
+          seamlessMode: state.textureLab.seamlessMode,
           workflow: state.textureLab.workflow,
         },
       },
@@ -540,6 +568,7 @@ function App() {
     state.generationCount,
     state.prompt,
     state.textureLab.expansionTargetSize,
+    state.textureLab.seamlessMode,
     state.textureLab.workflow,
   ])
 
@@ -548,7 +577,11 @@ function App() {
     nextServerModel: string | null,
     nextServerPrompt: string | null,
     nextNotice: string,
-    options?: { telemetryModel?: string | null; trackTelemetry?: boolean },
+    options?: {
+      runContext?: TextureLabRunContext | null
+      telemetryModel?: string | null
+      trackTelemetry?: boolean
+    },
   ) {
     const savedAt = new Date().toISOString()
     const nextRecentPrompts = buildRecentPrompts(activePromptValue, recentPrompts)
@@ -561,6 +594,11 @@ function App() {
     setNotice(nextNotice)
     setLastSavedAt(savedAt)
     setRecentPrompts(nextRecentPrompts)
+    setRepairingResultId(null)
+
+    if (options?.runContext !== undefined) {
+      setLastTextureLabRun(options.runContext)
+    }
 
     if (options?.trackTelemetry) {
       registerSuccessfulApiCall(options.telemetryModel ?? nextServerModel)
@@ -614,7 +652,11 @@ function App() {
           payload.model,
           activePromptValue.trim(),
           'Character sheet generated with palette extraction enabled.',
-          { telemetryModel: payload.model, trackTelemetry: true },
+          {
+            runContext: null,
+            telemetryModel: payload.model,
+            trackTelemetry: true,
+          },
         )
         return
       }
@@ -680,7 +722,16 @@ function App() {
           payload.model ?? null,
           payload.prompt ?? promptPreview,
           'Texture expansion completed with a centered outpaint pass.',
-          { telemetryModel: payload.model, trackTelemetry: true },
+          {
+            runContext: {
+              prompt: state.prompt.trim(),
+              seamlessMode: state.textureLab.seamlessMode,
+              styleText: activeStyleInput.trim(),
+              workflow: 'expand',
+            },
+            telemetryModel: payload.model,
+            trackTelemetry: true,
+          },
         )
         return
       }
@@ -709,6 +760,7 @@ function App() {
           mode: state.activeMode,
           prompt: state.prompt.trim(),
           references,
+          seamlessMode: isTextureGenerateMode && state.textureLab.seamlessMode,
           styleText: activeStyleInput.trim(),
         }),
       })
@@ -729,7 +781,18 @@ function App() {
         payload.model ?? null,
         activePromptValue.trim(),
         `Forge pass completed with ${payload.images.length} candidate outputs.`,
-        { telemetryModel: payload.model, trackTelemetry: true },
+        {
+          runContext: isTextureLabMode
+            ? {
+                prompt: state.prompt.trim(),
+                seamlessMode: state.textureLab.seamlessMode,
+                styleText: activeStyleInput.trim(),
+                workflow: 'generate',
+              }
+            : null,
+          telemetryModel: payload.model,
+          trackTelemetry: true,
+        },
       )
     } catch (requestError) {
       setStatus('error')
@@ -756,6 +819,80 @@ function App() {
     setNotice(`Downloaded candidate ${index + 1}.`)
   }
 
+  async function handleRepairSeams(result: ForgeResult) {
+    const repairContext = lastTextureLabRun
+
+    if (!repairContext || repairContext.workflow !== 'generate' || !repairContext.seamlessMode) {
+      setError({
+        message: 'Seam repair is only available for seamless Texture Lab generation results.',
+        title: 'Seam Repair Unavailable',
+      })
+      return
+    }
+
+    setRepairingResultId(result.id)
+    setError(null)
+    setNotice('Preparing offset seam repair pass.')
+
+    try {
+      const sourceBlob = await fetch(result.dataUrl).then((response) => response.blob())
+      const repairInput = await buildTextureSeamRepairInput(sourceBlob)
+      const response = await fetch('/api/forge', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mode: 'texture-lab',
+          modelId: 'gemini-3-pro',
+          prompt: repairContext.prompt,
+          seamRepair: {
+            offsetImage: {
+              data: repairInput.offsetBase64,
+              mimeType: repairInput.mimeType,
+            },
+            originalImage: {
+              data: repairInput.originalBase64,
+              mimeType: repairInput.mimeType,
+            },
+            sourceHeight: repairInput.sourceHeight,
+            sourceWidth: repairInput.sourceWidth,
+          },
+          styleText: repairContext.styleText,
+          workflow: 'repair-seams',
+        }),
+      })
+
+      const payload = (await response.json()) as ForgeApiResponse | undefined
+
+      if (!response.ok || !payload?.images?.length) {
+        throw toForgeError(payload?.error)
+      }
+
+      const repairedImage = payload.images[0]
+      const nextResult: ForgeResult = {
+        dataUrl: createDataUrl(repairedImage.data, repairedImage.mimeType),
+        id: `${result.id}-repaired`,
+        mimeType: repairedImage.mimeType,
+        text: repairedImage.text,
+      }
+
+      setResults((previousResults) =>
+        previousResults.map((entry) => (entry.id === result.id ? nextResult : entry)),
+      )
+      setServerModel(payload.model ?? serverModel)
+      setServerPrompt(payload.prompt ?? serverPrompt)
+      setStatus('success')
+      setNotice('Seam repair pass completed for the selected texture.')
+      setLastSavedAt(new Date().toISOString())
+      registerSuccessfulApiCall(payload.model ?? 'gemini-3-pro')
+    } catch (repairError) {
+      setError(toForgeError(repairError, 'Seam Repair Failed'))
+    } finally {
+      setRepairingResultId(null)
+    }
+  }
+
   function handleMockForge() {
     const mockResults = buildMockResults({
       count: activeGenerationCount,
@@ -770,6 +907,16 @@ function App() {
       isCharacterSheetMode
         ? 'Showing local mock character-sheet results so you can keep iterating on layout, palette, and review flow.'
         : 'Showing local mock results so you can continue product work without live Gemini quota.',
+      {
+        runContext: isTextureLabMode
+          ? {
+              prompt: state.prompt.trim(),
+              seamlessMode: state.textureLab.seamlessMode,
+              styleText: activeStyleInput.trim(),
+              workflow: isTextureExpansionMode ? 'expand' : 'generate',
+            }
+          : null,
+      },
     )
   }
 
@@ -905,12 +1052,19 @@ function App() {
                     {isTextureLabMode ? (
                       <TextureLabWorkflowPanel
                         expansionTargetSize={state.textureLab.expansionTargetSize}
+                        onSeamlessModeChange={(enabled) =>
+                          dispatch({
+                            type: 'set-texture-lab-seamless-mode',
+                            enabled,
+                          })
+                        }
                         onTargetSizeChange={(size) =>
                           dispatch({ type: 'set-texture-expansion-target-size', size })
                         }
                         onWorkflowChange={(workflow) =>
                           dispatch({ type: 'set-texture-lab-workflow', workflow })
                         }
+                        seamlessMode={state.textureLab.seamlessMode}
                         workflow={state.textureLab.workflow}
                       />
                     ) : null}
@@ -920,6 +1074,8 @@ function App() {
                       description={
                         isTextureExpansionMode
                           ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
+                          : isTextureGenerateMode && state.textureLab.seamlessMode
+                            ? 'Describe the material. Seamless Mode converts this into a tile-safe semantic tiling prompt.'
                           : 'Describe the asset or scene you want generated'
                       }
                       placeholder={
@@ -1132,11 +1288,22 @@ function App() {
                     ? results.map((result, index) => (
                         <GeneratedResultCard
                           key={result.id}
+                          canRepairSeams={
+                            isTextureLabMode &&
+                            lastTextureLabRun?.seamlessMode === true &&
+                            lastTextureLabRun.workflow === 'generate'
+                          }
                           index={index}
+                          isRepairing={repairingResultId === result.id}
                           mode={activeMode}
                           result={result}
                           onCopy={handleCopy}
                           onDownload={handleDownload}
+                          onRepairSeams={handleRepairSeams}
+                          showTilePreview={
+                            isTextureLabMode &&
+                            lastTextureLabRun?.seamlessMode === true
+                          }
                         />
                       ))
                     : reservedOutputs.map((index) => (
@@ -1371,15 +1538,19 @@ function StyleInputPanel({ value, onChange }: StyleInputPanelProps) {
 
 type TextureLabWorkflowPanelProps = {
   expansionTargetSize: TextureExpansionTargetSize
+  onSeamlessModeChange: (enabled: boolean) => void
   onTargetSizeChange: (size: TextureExpansionTargetSize) => void
   onWorkflowChange: (workflow: TextureLabWorkflow) => void
+  seamlessMode: boolean
   workflow: TextureLabWorkflow
 }
 
 function TextureLabWorkflowPanel({
   expansionTargetSize,
+  onSeamlessModeChange,
   onTargetSizeChange,
   onWorkflowChange,
+  seamlessMode,
   workflow,
 }: TextureLabWorkflowPanelProps) {
   return (
@@ -1412,6 +1583,26 @@ function TextureLabWorkflowPanel({
           onClick={() => onWorkflowChange('expand')}
         />
       </div>
+
+      <button
+        type="button"
+        onClick={() => onSeamlessModeChange(!seamlessMode)}
+        className={`mt-4 flex w-full items-center justify-between rounded-[20px] border px-4 py-3 text-left transition ${
+          seamlessMode
+            ? 'border-emerald-300/30 bg-emerald-400/10 text-emerald-50'
+            : 'border-white/10 bg-white/[0.03] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]'
+        }`}
+      >
+        <span>
+          <span className="block text-sm font-medium">Seamless Mode</span>
+          <span className="mt-1 block text-xs leading-5 text-current/70">
+            Adds tile-safe texture tags, shows a 3x3 repeat preview, and enables seam repair.
+          </span>
+        </span>
+        <span className="rounded-full border border-current/20 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.28em]">
+          {seamlessMode ? 'On' : 'Off'}
+        </span>
+      </button>
 
       {workflow === 'expand' ? (
         <div className="mt-4 rounded-[22px] border border-emerald-300/20 bg-emerald-500/10 p-4">
@@ -2115,6 +2306,17 @@ function buildTextureExpansionBriefItems(
       value: `${state.textureLab.expansionTargetSize} px`,
     },
   ]
+}
+
+function buildSeamlessPromptPreview(prompt: string, styleText: string) {
+  const subject = prompt.trim() || 'weathered stone floor tile'
+  const styleSegment = styleText.trim() ? styleText.trim() : 'neutral production texture'
+
+  return (
+    `Create a seamless repeating pattern of ${subject}. ` +
+    'Ensure smooth transitions at the edges for flawless tiling. ' +
+    `Style: ${styleSegment}, high resolution, perfectly tileable horizontal and vertical edges, balanced composition.`
+  )
 }
 
 function readString(value: unknown): string | undefined {

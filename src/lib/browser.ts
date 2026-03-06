@@ -73,6 +73,77 @@ export async function buildTextureExpansionInput(
   }
 }
 
+type TextureSeamRepairInput = {
+  mimeType: string
+  offsetBase64: string
+  originalBase64: string
+  sourceHeight: number
+  sourceWidth: number
+}
+
+export async function buildTextureSeamRepairInput(
+  source: Blob,
+): Promise<TextureSeamRepairInput> {
+  const image = await loadImage(source)
+  const canvas = document.createElement('canvas')
+  const width = image.naturalWidth
+  const height = image.naturalHeight
+  canvas.width = width
+  canvas.height = height
+
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  const offsetX = -Math.round(width / 2)
+  const offsetY = -Math.round(height / 2)
+
+  for (const x of [offsetX, offsetX + width]) {
+    for (const y of [offsetY, offsetY + height]) {
+      context.drawImage(image, x, y, width, height)
+    }
+  }
+
+  const offsetBlob = await canvasToBlob(canvas, 'image/png')
+
+  return {
+    mimeType: 'image/png',
+    offsetBase64: await fileToBase64(offsetBlob),
+    originalBase64: await fileToBase64(source),
+    sourceHeight: height,
+    sourceWidth: width,
+  }
+}
+
+export async function buildTiledPreviewDataUrl(
+  source: string | Blob,
+  repeats = 3,
+): Promise<string> {
+  const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
+  const image = await loadImage(blob)
+  const canvas = document.createElement('canvas')
+  const width = image.naturalWidth
+  const height = image.naturalHeight
+  canvas.width = width * repeats
+  canvas.height = height * repeats
+
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  for (let x = 0; x < repeats; x += 1) {
+    for (let y = 0; y < repeats; y += 1) {
+      context.drawImage(image, x * width, y * height, width, height)
+    }
+  }
+
+  return canvas.toDataURL('image/png')
+}
+
 export async function copyResultToClipboard(result: ForgeResult): Promise<void> {
   if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
     throw new Error('Image clipboard copy is not supported in this browser.')
@@ -118,4 +189,14 @@ function canvasToBlob(canvas: HTMLCanvasElement, mimeType: string): Promise<Blob
       reject(new Error('Failed to serialize the expansion canvas.'))
     }, mimeType)
   })
+}
+
+async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  const response = await fetch(dataUrl)
+
+  if (!response.ok) {
+    throw new Error('Failed to load the generated texture for post-processing.')
+  }
+
+  return response.blob()
 }
