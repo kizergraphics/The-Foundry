@@ -126,6 +126,7 @@ app.post('/api/forge', async (request, response) => {
     generationCount,
     intensity,
     projectileType,
+    frameCount,
     rarity,
     references = [],
     styleId,
@@ -229,11 +230,14 @@ app.post('/api/forge', async (request, response) => {
             })
         : mode === 'portrait-studio'
           ? buildPortraitStudioPrompt({
+              prompt: normalizedPrompt,
               styleText: providedStyleText,
             })
         : mode === 'vfx-forge'
           ? buildVfxForgePrompt({
+              frameCount,
               intensity,
+              prompt: normalizedPrompt,
               projectileType,
               styleText: providedStyleText,
             })
@@ -260,8 +264,8 @@ app.post('/api/forge', async (request, response) => {
         : mode === 'portrait-studio'
           ? resolvePortraitStudioSystemInstruction(systemInstruction)
         : mode === 'vfx-forge'
-          ? resolveVfxForgeSystemInstruction(systemInstruction)
-        : mode === 'texture-lab'
+          ? resolveVfxForgeSystemInstruction(systemInstruction, { frameCount })
+          : mode === 'texture-lab'
           ? resolveTextureGenerationSystemInstruction(systemInstruction, {
               seamlessMode: Boolean(seamlessMode),
             })
@@ -958,8 +962,9 @@ function buildLootLevelerPrompt({ rarity, styleText }) {
     .join(' ')
 }
 
-function buildPortraitStudioPrompt({ styleText }) {
+function buildPortraitStudioPrompt({ prompt, styleText }) {
   const emotions = ['Neutral', 'Angry', 'Sad', 'Joy', 'Surprised']
+  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
 
   return [
     'Create a 3 column by 2 row portrait sheet with five close-up hero portraits.',
@@ -967,25 +972,29 @@ function buildPortraitStudioPrompt({ styleText }) {
     'Keep the facial structure, hair, skin tone, and eye color identical in every portrait.',
     'Only the eyebrows, eyelids, and mouth should change to express emotion.',
     'The sixth panel may remain a clean blank card or subtle title card.',
+    normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
     styleText ? `Style guidance: ${styleText}.` : null,
   ]
     .filter(Boolean)
     .join(' ')
 }
 
-function buildVfxForgePrompt({ intensity, projectileType, styleText }) {
+function buildVfxForgePrompt({ frameCount, intensity, prompt, projectileType, styleText }) {
   const normalizedProjectileType =
     typeof projectileType === 'string' && projectileType.trim().length > 0
       ? projectileType.trim()
       : 'Fireball'
+  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
+  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
   const normalizedIntensity = clampPercentage(intensity, 60)
 
   return [
     'Generate a 2D projectile spritesheet.',
     `Projectile type: ${normalizedProjectileType}.`,
-    'Layout: exactly 8 frames in a single horizontal row.',
+    `Layout: exactly ${normalizedFrameCount} frames in a single horizontal row.`,
     'Show the effect from birth through peak energy to dissipation.',
     `Intensity target: ${normalizedIntensity} out of 100.`,
+    normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
     styleText ? `Style guidance: ${styleText}.` : null,
   ]
     .filter(Boolean)
@@ -1050,10 +1059,11 @@ function resolvePortraitStudioSystemInstruction(customInstruction) {
     .join('\n')
 }
 
-function resolveVfxForgeSystemInstruction(customInstruction) {
+function resolveVfxForgeSystemInstruction(customInstruction, { frameCount }) {
+  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
   const vfxRules = [
     'Generate a 2D projectile spritesheet on a pure #000000 black background.',
-    'Layout: 8 frames in a single horizontal row.',
+    `Layout: ${normalizedFrameCount} frames in a single horizontal row.`,
     'Use soft glowing edges and no outlines for additive blending compatibility.',
     'Keep the background fully black with no floor, props, or character silhouettes.',
   ]

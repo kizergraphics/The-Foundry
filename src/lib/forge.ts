@@ -74,10 +74,13 @@ export type LootLevelerState = {
 
 export type PortraitStudioState = {
   heroImage: ReferenceAsset | null
+  prompt: string
 }
 
 export type VfxForgeState = {
+  frameCount: number
   intensity: number
+  prompt: string
   projectileType: string
 }
 
@@ -124,8 +127,11 @@ export type ForgeAction =
   | { type: 'set-loot-leveler-asset'; asset: ReferenceAsset | null }
   | { type: 'set-loot-leveler-rarity'; rarity: LootLevelerRarity }
   | { type: 'set-portrait-studio-image'; asset: ReferenceAsset | null }
+  | { type: 'set-portrait-studio-prompt'; prompt: string }
+  | { type: 'set-vfx-frame-count'; frameCount: number }
   | { type: 'set-vfx-projectile-type'; projectileType: string }
   | { type: 'set-vfx-intensity'; intensity: number }
+  | { type: 'set-vfx-prompt'; prompt: string }
 
 export type ModeDefinition = {
   description: string
@@ -283,6 +289,7 @@ export const initialState: ForgeState = {
   },
   portraitStudio: {
     heroImage: null,
+    prompt: '',
   },
   prompt: '',
   references: {
@@ -308,7 +315,9 @@ export const initialState: ForgeState = {
     referencePrompt: '',
   },
   vfxForge: {
+    frameCount: 8,
     intensity: 60,
+    prompt: '',
     projectileType: 'Fireball',
   },
 }
@@ -434,6 +443,14 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           heroImage: action.asset,
         },
       }
+    case 'set-portrait-studio-prompt':
+      return {
+        ...state,
+        portraitStudio: {
+          ...state.portraitStudio,
+          prompt: action.prompt,
+        },
+      }
     case 'set-vfx-projectile-type':
       return {
         ...state,
@@ -442,12 +459,28 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           projectileType: action.projectileType,
         },
       }
+    case 'set-vfx-frame-count':
+      return {
+        ...state,
+        vfxForge: {
+          ...state.vfxForge,
+          frameCount: clampFrameCount(action.frameCount),
+        },
+      }
     case 'set-vfx-intensity':
       return {
         ...state,
         vfxForge: {
           ...state.vfxForge,
           intensity: clampIntensity(action.intensity),
+        },
+      }
+    case 'set-vfx-prompt':
+      return {
+        ...state,
+        vfxForge: {
+          ...state.vfxForge,
+          prompt: action.prompt,
         },
       }
     case 'set-character-sheet-mode':

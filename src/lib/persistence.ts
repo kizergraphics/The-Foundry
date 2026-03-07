@@ -29,7 +29,9 @@ type StoredLootLevelerSettings = {
   rarity: LootLevelerRarity
 }
 
-type StoredPortraitStudioSettings = Record<string, never>
+type StoredPortraitStudioSettings = {
+  prompt: string
+}
 
 type StoredSettings = {
   activeMode: ForgeMode
@@ -45,7 +47,9 @@ type StoredSettings = {
     workflow: TextureLabWorkflow
   }
   vfxForge: {
+    frameCount: number
     intensity: number
+    prompt: string
     projectileType: string
   }
 }
@@ -160,7 +164,12 @@ export function loadStoredState(): StoredState | null {
               ? parsed.settings.lootLeveler.rarity
               : 'common',
         },
-        portraitStudio: {},
+        portraitStudio: {
+          prompt:
+            typeof parsed.settings?.portraitStudio?.prompt === 'string'
+              ? parsed.settings.portraitStudio.prompt
+              : '',
+        },
         prompt:
           typeof parsed.settings?.prompt === 'string' ? parsed.settings.prompt : '',
         textureLab: {
@@ -173,11 +182,20 @@ export function loadStoredState(): StoredState | null {
               : 'generate',
         },
         vfxForge: {
+          frameCount:
+            typeof parsed.settings?.vfxForge?.frameCount === 'number' &&
+            Number.isFinite(parsed.settings.vfxForge.frameCount)
+              ? clampFrameCount(parsed.settings.vfxForge.frameCount)
+              : 8,
           intensity:
             typeof parsed.settings?.vfxForge?.intensity === 'number' &&
             Number.isFinite(parsed.settings.vfxForge.intensity)
               ? Math.max(0, Math.min(100, Math.round(parsed.settings.vfxForge.intensity)))
               : 60,
+          prompt:
+            typeof parsed.settings?.vfxForge?.prompt === 'string'
+              ? parsed.settings.vfxForge.prompt
+              : '',
           projectileType:
             typeof parsed.settings?.vfxForge?.projectileType === 'string' &&
             parsed.settings.vfxForge.projectileType.trim().length > 0

@@ -32,14 +32,16 @@ import {
   getCharacterSheetPromptSource,
 } from './lib/characterSheet'
 import {
-  dataUrlToFile,
   buildTextureSeamRepairInput,
   buildTextureExpansionInput,
   copyResultToClipboard,
   createDataUrl,
+  dataUrlToFile,
   downloadDataUrl,
   downloadResult,
   fileToBase64,
+  sliceSpriteSheetFramesByContent,
+  slicePortraitStudioFaces,
   sliceSpriteSheetFrames,
 } from './lib/browser'
 import { buildMockResults } from './lib/mockForge'
@@ -120,6 +122,14 @@ type TextureLabRunContext = {
   styleText: string
   workflow: 'expand' | 'generate'
 }
+
+const portraitStudioExpressionLabels = [
+  'neutral',
+  'angry',
+  'sad',
+  'joy',
+  'surprised',
+] as const
 
 type TelemetryWindowState = {
   sessionMaxByModel: Record<string, number>
@@ -303,7 +313,7 @@ function App() {
       : isLootLevelerMode
         ? buildLootLevelerPromptPreview(state.lootLeveler.rarity)
         : isPortraitStudioMode
-          ? buildPortraitStudioPromptPreview()
+          ? buildPortraitStudioPromptPreview(state.portraitStudio.prompt)
           : isTextureExpansionMode
             ? state.prompt.trim() || defaultTextureExpansionPrompt
             : isTextureGenerateMode && state.textureLab.seamlessMode
@@ -312,6 +322,8 @@ function App() {
                 ? buildVfxForgePromptPreview(
                     state.vfxForge.projectileType,
                     state.vfxForge.intensity,
+                    state.vfxForge.frameCount,
+                    state.vfxForge.prompt,
                   )
                 : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
   const activePromptValue = isCharacterSheetMode
@@ -323,11 +335,13 @@ function App() {
       : isLootLevelerMode
         ? buildLootLevelerPromptPreview(state.lootLeveler.rarity)
         : isPortraitStudioMode
-          ? buildPortraitStudioPromptPreview()
+          ? state.portraitStudio.prompt
           : isVfxForgeMode
             ? buildVfxForgePromptPreview(
                 state.vfxForge.projectileType,
                 state.vfxForge.intensity,
+                state.vfxForge.frameCount,
+                state.vfxForge.prompt,
               )
             : state.prompt
   const isCharacterSheetReady =
@@ -482,10 +496,22 @@ function App() {
         type: 'set-loot-leveler-rarity',
         rarity: storedState.settings.lootLeveler.rarity,
       })
+      dispatch({
+        type: 'set-portrait-studio-prompt',
+        prompt: storedState.settings.portraitStudio.prompt,
+      })
       dispatch({ type: 'set-prompt', prompt: storedState.settings.prompt })
       dispatch({
         type: 'set-vfx-intensity',
         intensity: storedState.settings.vfxForge.intensity,
+      })
+      dispatch({
+        type: 'set-vfx-frame-count',
+        frameCount: storedState.settings.vfxForge.frameCount,
+      })
+      dispatch({
+        type: 'set-vfx-prompt',
+        prompt: storedState.settings.vfxForge.prompt,
       })
       dispatch({
         type: 'set-vfx-projectile-type',
@@ -660,7 +686,9 @@ function App() {
         lootLeveler: {
           rarity: state.lootLeveler.rarity,
         },
-        portraitStudio: {},
+        portraitStudio: {
+          prompt: state.portraitStudio.prompt,
+        },
         prompt: state.prompt,
         textureLab: {
           expansionTargetSize: state.textureLab.expansionTargetSize,
@@ -668,7 +696,9 @@ function App() {
           workflow: state.textureLab.workflow,
         },
         vfxForge: {
+          frameCount: state.vfxForge.frameCount,
           intensity: state.vfxForge.intensity,
+          prompt: state.vfxForge.prompt,
           projectileType: state.vfxForge.projectileType,
         },
       },
@@ -701,11 +731,14 @@ function App() {
     state.characterSheet.referencePrompt,
     state.generationCount,
     state.lootLeveler.rarity,
+    state.portraitStudio.prompt,
     state.prompt,
     state.textureLab.expansionTargetSize,
     state.textureLab.seamlessMode,
     state.textureLab.workflow,
+    state.vfxForge.frameCount,
     state.vfxForge.intensity,
+    state.vfxForge.prompt,
     state.vfxForge.projectileType,
   ])
 
@@ -894,7 +927,7 @@ function App() {
             generationCount: 1,
             mode: 'portrait-studio',
             modelId: activeModel,
-            prompt: '',
+            prompt: state.portraitStudio.prompt.trim(),
             references: [
               {
                 data: await fileToBase64(heroImage.file),
@@ -1015,11 +1048,12 @@ function App() {
           },
           body: JSON.stringify({
             generationCount: 1,
+            frameCount: state.vfxForge.frameCount,
             intensity: state.vfxForge.intensity,
             mode: 'vfx-forge',
             modelId: activeModel,
             projectileType: state.vfxForge.projectileType.trim(),
-            prompt: '',
+            prompt: state.vfxForge.prompt.trim(),
             styleText: activeStyleInput.trim(),
           }),
         })
@@ -1130,6 +1164,56 @@ function App() {
         : 'jpg'
     downloadResult(result, `kizer-forge-${state.activeMode}-${index + 1}.${extension}`)
     setNotice(`Downloaded candidate ${index + 1}.`)
+  }
+
+  async function handleDownloadPortraitFaces(result: ForgeResult, index: number) {
+    try {
+      const faceDataUrls = await slicePortraitStudioFaces(result.dataUrl)
+
+      faceDataUrls.forEach((dataUrl, faceIndex) => {
+        const expressionLabel =
+          portraitStudioExpressionLabels[faceIndex] ?? `face-${faceIndex + 1}`
+
+        window.setTimeout(() => {
+          downloadDataUrl(
+            dataUrl,
+            `kizer-forge-portrait-studio-${index + 1}-${expressionLabel}.png`,
+          )
+        }, faceIndex * 120)
+      })
+
+      setNotice(`Queued ${faceDataUrls.length} portrait face downloads.`)
+    } catch (downloadError) {
+      setError(toForgeError(downloadError, 'Portrait Face Download Failed'))
+    }
+  }
+
+  async function handleDownloadVfxFrames(result: ForgeResult, index: number) {
+    try {
+      const frameDataUrls = await sliceSpriteSheetFramesByContent(
+        result.dataUrl,
+        {
+          expectedCount: state.vfxForge.frameCount,
+        },
+      )
+      const projectileSlug = slugifyFileSegment(
+        state.vfxForge.projectileType,
+        'projectile',
+      )
+
+      frameDataUrls.forEach((dataUrl, frameIndex) => {
+        window.setTimeout(() => {
+          downloadDataUrl(
+            dataUrl,
+            `kizer-forge-vfx-forge-${index + 1}-${projectileSlug}-frame-${String(frameIndex + 1).padStart(2, '0')}.png`,
+          )
+        }, frameIndex * 120)
+      })
+
+      setNotice(`Queued ${frameDataUrls.length} VFX frame downloads.`)
+    } catch (downloadError) {
+      setError(toForgeError(downloadError, 'VFX Frame Download Failed'))
+    }
   }
 
   async function hydrateLatestCharacterSheetInto(
@@ -1325,7 +1409,7 @@ function App() {
             : isTextureExpansionMode
               ? 'Sending centered outpaint canvas to Gemini 3 Pro'
               : isVfxForgeMode
-                ? 'Generating an 8-frame projectile spritesheet'
+                ? `Generating a ${state.vfxForge.frameCount}-frame projectile spritesheet`
                 : 'Sending prompt and references to Gemini'
     : !selectedModelSupported
       ? 'Selected model is not supported for this tab'
@@ -1334,13 +1418,13 @@ function App() {
           ? 'Character image staged for Veo animation'
           : isLootLevelerMode
             ? 'Base asset staged for rarity upgrade'
-            : isPortraitStudioMode
-              ? 'Hero image staged for expression pack generation'
-              : isTextureExpansionMode
-                ? 'Centered source canvas staged for outpaint execution'
-                : isVfxForgeMode
-                  ? 'Projectile sheet request staged for Gemini Flash'
-                  : 'Request staged for API execution'
+              : isPortraitStudioMode
+                ? 'Hero image staged for expression pack generation'
+                : isTextureExpansionMode
+                  ? 'Centered source canvas staged for outpaint execution'
+                  : isVfxForgeMode
+                    ? `Projectile sheet request staged for ${state.vfxForge.frameCount} frames`
+                    : 'Request staged for API execution'
         : isCharacterSheetMode
           ? 'Attach all required references or write a manifest'
           : isActionAnimatorMode
@@ -1352,7 +1436,7 @@ function App() {
                 : isTextureExpansionMode
                   ? 'Attach a source texture to prepare the expansion pass'
                   : isVfxForgeMode
-                    ? 'Enter a projectile type to prepare the spritesheet request'
+                    ? 'Enter a projectile type to prepare the VFX spritesheet request'
                     : 'Add a prompt to prepare the request'
   const readinessLabel = isForging
     ? isTextureExpansionMode
@@ -1573,28 +1657,49 @@ function App() {
                     }
                   />
                 ) : isPortraitStudioMode ? (
-                  <PortraitStudioPanel
-                    asset={state.portraitStudio.heroImage}
-                    canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
-                    onFileSelect={(asset) =>
-                      dispatch({ type: 'set-portrait-studio-image', asset })
-                    }
-                    onUseLatestCharacterSheet={() =>
-                      void hydrateLatestCharacterSheetInto({
-                        type: 'set-portrait-studio-image',
-                      })
-                    }
-                  />
+                  <>
+                    <PortraitStudioPanel
+                      asset={state.portraitStudio.heroImage}
+                      canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
+                      onFileSelect={(asset) =>
+                        dispatch({ type: 'set-portrait-studio-image', asset })
+                      }
+                      onUseLatestCharacterSheet={() =>
+                        void hydrateLatestCharacterSheetInto({
+                          type: 'set-portrait-studio-image',
+                        })
+                      }
+                    />
+                    <PromptPanel
+                      activeMode={state.activeMode}
+                      description="Optional. Describe the portrait pack you want while keeping the uploaded identity locked."
+                      placeholder="Ex: scarred veteran ranger, leather mantle, stern heroic mood, semi-real painted game portrait."
+                      prompt={state.portraitStudio.prompt}
+                      recentPrompts={recentPrompts}
+                      title="Portrait Direction"
+                      onChange={(prompt) =>
+                        dispatch({ type: 'set-portrait-studio-prompt', prompt })
+                      }
+                    />
+                  </>
                 ) : isVfxForgeMode ? (
                   <VfxForgePanel
+                    frameCount={state.vfxForge.frameCount}
                     intensity={state.vfxForge.intensity}
+                    onFrameCountChange={(frameCount) =>
+                      dispatch({ type: 'set-vfx-frame-count', frameCount })
+                    }
                     projectileType={state.vfxForge.projectileType}
                     onIntensityChange={(intensity) =>
                       dispatch({ type: 'set-vfx-intensity', intensity })
                     }
+                    onPromptChange={(prompt) =>
+                      dispatch({ type: 'set-vfx-prompt', prompt })
+                    }
                     onProjectileTypeChange={(projectileType) =>
                       dispatch({ type: 'set-vfx-projectile-type', projectileType })
                     }
+                    prompt={state.vfxForge.prompt}
                   />
                 ) : (
                   <>
@@ -1791,12 +1896,26 @@ function App() {
                             lastTextureLabRun?.seamlessMode === true &&
                             lastTextureLabRun.workflow === 'generate'
                           }
+                          extraActionLabel={
+                            isPortraitStudioMode
+                              ? 'Download Faces'
+                              : isVfxForgeMode
+                                ? 'Download Frames'
+                                : undefined
+                          }
                           index={index}
                           isRepairing={repairingResultId === result.id}
                           mode={activeMode}
                           result={result}
                           onCopy={handleCopy}
                           onDownload={handleDownload}
+                          onExtraAction={
+                            isPortraitStudioMode
+                              ? handleDownloadPortraitFaces
+                              : isVfxForgeMode
+                                ? handleDownloadVfxFrames
+                              : undefined
+                          }
                           onRepairSeams={handleRepairSeams}
                           showTilePreview={
                             isTextureLabMode &&
@@ -2837,16 +2956,24 @@ function PortraitStudioPanel({
 }
 
 type VfxForgePanelProps = {
+  frameCount: number
   intensity: number
+  onFrameCountChange: (frameCount: number) => void
   onIntensityChange: (intensity: number) => void
+  onPromptChange: (prompt: string) => void
   onProjectileTypeChange: (projectileType: string) => void
+  prompt: string
   projectileType: string
 }
 
 function VfxForgePanel({
+  frameCount,
   intensity,
+  onFrameCountChange,
   onIntensityChange,
+  onPromptChange,
   onProjectileTypeChange,
+  prompt,
   projectileType,
 }: VfxForgePanelProps) {
   return (
@@ -2862,6 +2989,43 @@ function VfxForgePanel({
           placeholder="Ex: Fireball, Plasma Lance, Frost Bolt"
           className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
         />
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Behavior Steering
+        </label>
+        <p className="mt-2 text-sm text-zinc-400">
+          Optional guidance for timing, arc shape, bursts, trail behavior, charge-up, or dissipation.
+        </p>
+        <textarea
+          value={prompt}
+          onChange={(event) => onPromptChange(event.target.value)}
+          placeholder="Ex: slow charge-up, tight corkscrew trail, bright core at frame 5, then embers breaking apart by the final frame."
+          rows={5}
+          className="mt-4 w-full resize-none rounded-[20px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35 focus:bg-black/30"
+        />
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <div className="flex items-center justify-between">
+          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Frames
+          </p>
+          <span className="text-xs text-zinc-400">{frameCount}</span>
+        </div>
+        <input
+          type="range"
+          min={4}
+          max={30}
+          step={1}
+          value={frameCount}
+          onChange={(event) => onFrameCountChange(Number(event.target.value))}
+          className="mt-4 w-full cursor-pointer accent-sky-400"
+        />
+        <p className="mt-3 text-sm leading-6 text-zinc-400">
+          Controls the width of the returned horizontal strip. Higher counts give smoother timing but wider sheets.
+        </p>
       </div>
 
       <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
@@ -2881,7 +3045,7 @@ function VfxForgePanel({
           className="mt-4 w-full cursor-pointer accent-sky-400"
         />
         <p className="mt-3 text-sm leading-6 text-zinc-400">
-          Output is constrained to an 8-frame horizontal strip on a pure black background for additive blending.
+          Output is constrained to a {frameCount}-frame horizontal strip on a pure black background for additive blending.
         </p>
       </div>
     </section>
@@ -3320,6 +3484,10 @@ function buildPortraitStudioBriefItems(
       value: state.portraitStudio.heroImage?.name ?? 'Not attached',
     },
     {
+      label: 'Direction',
+      value: state.portraitStudio.prompt.trim() || 'Default expression pack',
+    },
+    {
       label: 'Expressions',
       value: '5 locked portraits',
     },
@@ -3354,12 +3522,16 @@ function buildVfxForgeBriefItems(
       value: state.vfxForge.projectileType.trim() || 'Not set',
     },
     {
+      label: 'Direction',
+      value: state.vfxForge.prompt.trim() || 'Default timing',
+    },
+    {
       label: 'Intensity',
       value: `${state.vfxForge.intensity}/100`,
     },
     {
       label: 'Layout',
-      value: '8 x 1 strip',
+      value: `${state.vfxForge.frameCount} x 1 strip`,
     },
   ]
 }
@@ -3371,11 +3543,16 @@ function buildLootLevelerPromptPreview(rarity: LootLevelerRarity) {
   ].join(' ')
 }
 
-function buildPortraitStudioPromptPreview() {
+function buildPortraitStudioPromptPreview(prompt: string) {
+  const normalizedPrompt = prompt.trim()
+
   return [
     'Generate a 3 column by 2 row portrait sheet.',
     'Keep the facial structure, hair, and eye color 100% identical while shifting only expression.',
-  ].join(' ')
+    normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
 }
 
 function buildSeamlessPromptPreview(prompt: string, styleText: string) {
@@ -3389,19 +3566,38 @@ function buildSeamlessPromptPreview(prompt: string, styleText: string) {
   )
 }
 
-function buildVfxForgePromptPreview(projectileType: string, intensity: number) {
+function buildVfxForgePromptPreview(
+  projectileType: string,
+  intensity: number,
+  frameCount: number,
+  prompt: string,
+) {
   const normalizedProjectileType = projectileType.trim() || 'Fireball'
+  const normalizedPrompt = prompt.trim()
 
   return [
     'Generate a 2D projectile spritesheet.',
     `Projectile: ${normalizedProjectileType}.`,
     `Intensity: ${Math.max(0, Math.min(100, Math.round(intensity)))}/100.`,
-    'Background: pure #000000 black. Layout: 8 frames in one horizontal row.',
-  ].join(' ')
+    normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
+    `Background: pure #000000 black. Layout: ${Math.max(4, Math.min(30, Math.round(frameCount)))} frames in one horizontal row.`,
+  ]
+    .filter(Boolean)
+    .join(' ')
 }
 
 function formatRarityLabel(rarity: LootLevelerRarity) {
   return rarity.charAt(0).toUpperCase() + rarity.slice(1)
+}
+
+function slugifyFileSegment(value: string, fallback: string) {
+  const normalizedValue = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return normalizedValue || fallback
 }
 
 function readString(value: unknown): string | undefined {

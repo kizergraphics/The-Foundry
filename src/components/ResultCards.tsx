@@ -20,11 +20,14 @@ type PlaceholderCardProps = {
 
 type GeneratedResultCardProps = {
   canRepairSeams?: boolean
+  extraActionLabel?: string
   index: number
+  isExtraActionPending?: boolean
   isRepairing?: boolean
   mode: ModeDefinition
   onCopy: (result: ForgeResult) => Promise<void>
   onDownload: (result: ForgeResult, index: number) => void
+  onExtraAction?: (result: ForgeResult, index: number) => void | Promise<void>
   onRepairSeams?: (result: ForgeResult) => void | Promise<void>
   result: ForgeResult
   showTilePreview?: boolean
@@ -138,16 +141,25 @@ export function PlaceholderCard({ index, mode, state }: PlaceholderCardProps) {
 
 export function GeneratedResultCard({
   canRepairSeams = false,
+  extraActionLabel,
   index,
+  isExtraActionPending = false,
   isRepairing = false,
   mode,
   result,
   onCopy,
   onDownload,
+  onExtraAction,
   onRepairSeams,
   showTilePreview = false,
 }: GeneratedResultCardProps) {
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null)
+  const actionColumnClass =
+    canRepairSeams && onExtraAction
+      ? 'grid-cols-4'
+      : canRepairSeams || onExtraAction
+        ? 'grid-cols-3'
+        : 'grid-cols-2'
 
   useEffect(() => {
     let cancelled = false
@@ -227,7 +239,7 @@ export function GeneratedResultCard({
 
       <PaletteDisplay colors={result.paletteHexes ?? []} />
 
-      <div className={`mt-4 grid gap-2 ${canRepairSeams ? 'grid-cols-3' : 'grid-cols-2'}`}>
+      <div className={`mt-4 grid gap-2 ${actionColumnClass}`}>
         <button
           type="button"
           onClick={() => onDownload(result, index)}
@@ -244,6 +256,20 @@ export function GeneratedResultCard({
           <Copy className="size-4" strokeWidth={1.7} />
           Copy
         </button>
+        {onExtraAction && extraActionLabel ? (
+          <button
+            type="button"
+            disabled={isExtraActionPending}
+            onClick={() => void onExtraAction(result, index)}
+            className="inline-flex items-center justify-center gap-2 rounded-full border border-sky-300/20 bg-sky-400/10 px-4 py-2.5 text-sm text-sky-50 transition hover:border-sky-300/35 hover:bg-sky-400/16 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Download
+              className={`size-4 ${isExtraActionPending ? 'animate-pulse' : ''}`}
+              strokeWidth={1.7}
+            />
+            {isExtraActionPending ? 'Preparing' : extraActionLabel}
+          </button>
+        ) : null}
         {canRepairSeams ? (
           <button
             type="button"

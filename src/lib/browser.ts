@@ -211,6 +211,183 @@ export async function sliceSpriteSheetFrames(
   })
 }
 
+type SpriteSheetBounds = {
+  bottom: number
+  left: number
+  right: number
+  top: number
+}
+
+type SliceSpriteSheetByContentOptions = {
+  expectedCount?: number
+  padding?: number
+}
+
+export async function sliceSpriteSheetFramesByContent(
+  source: string | Blob,
+  options: SliceSpriteSheetByContentOptions = {},
+): Promise<string[]> {
+  const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
+  const image = await loadImage(blob)
+  const analysisCanvas = document.createElement('canvas')
+  analysisCanvas.width = image.naturalWidth
+  analysisCanvas.height = image.naturalHeight
+  const analysisContext = analysisCanvas.getContext('2d', {
+    willReadFrequently: true,
+  })
+
+  if (!analysisContext) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  analysisContext.drawImage(image, 0, 0)
+
+  const { data, height, width } = analysisContext.getImageData(0, 0, image.naturalWidth, image.naturalHeight)
+  const rowThreshold = Math.max(3, Math.round(width * 0.002))
+  const rowRanges = collectActiveRanges(
+    Array.from({ length: height }, (_, y) =>
+      countActivePixelsInRow(data, width, y),
+    ),
+    {
+      maxGap: 6,
+      minimumSpan: 4,
+      threshold: rowThreshold,
+    },
+  )
+
+  const detectedBounds = rowRanges.flatMap((rowRange) => {
+    const rowHeight = rowRange.end - rowRange.start + 1
+    const columnThreshold = Math.max(3, Math.round(rowHeight * 0.015))
+    const columnRanges = collectActiveRanges(
+      Array.from({ length: width }, (_, x) =>
+        countActivePixelsInColumn(data, width, height, x, rowRange.start, rowRange.end),
+      ),
+      {
+        maxGap: 8,
+        minimumSpan: 4,
+        threshold: columnThreshold,
+      },
+    )
+
+    return columnRanges
+      .map((columnRange) =>
+        tightenSpriteBounds(
+          data,
+          width,
+          height,
+          columnRange.start,
+          columnRange.end,
+          rowRange.start,
+          rowRange.end,
+        ),
+      )
+      .filter((bounds): bounds is SpriteSheetBounds => bounds !== null)
+  })
+
+  if (detectedBounds.length === 0) {
+    if (options.expectedCount) {
+      return sliceSpriteSheetFrames(source, options.expectedCount)
+    }
+
+    throw new Error('No VFX frames were detected in the returned sprite sheet.')
+  }
+
+  const padding = Math.max(0, Math.round(options.padding ?? 8))
+  const outputCanvas = document.createElement('canvas')
+  const outputContext = outputCanvas.getContext('2d')
+
+  if (!outputContext) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  return detectedBounds.map((bounds) => {
+    const left = Math.max(0, bounds.left - padding)
+    const top = Math.max(0, bounds.top - padding)
+    const right = Math.min(width - 1, bounds.right + padding)
+    const bottom = Math.min(height - 1, bounds.bottom + padding)
+    const outputWidth = Math.max(1, right - left + 1)
+    const outputHeight = Math.max(1, bottom - top + 1)
+
+    outputCanvas.width = outputWidth
+    outputCanvas.height = outputHeight
+    outputContext.clearRect(0, 0, outputWidth, outputHeight)
+    outputContext.drawImage(
+      image,
+      left,
+      top,
+      outputWidth,
+      outputHeight,
+      0,
+      0,
+      outputWidth,
+      outputHeight,
+    )
+
+    return outputCanvas.toDataURL('image/png')
+  })
+}
+
+type SliceImageGridOptions = {
+  columns: number
+  count?: number
+  rows: number
+}
+
+export async function sliceImageGrid(
+  source: string | Blob,
+  options: SliceImageGridOptions,
+): Promise<string[]> {
+  const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
+  const image = await loadImage(blob)
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  const safeColumns = Math.max(1, Math.round(options.columns))
+  const safeRows = Math.max(1, Math.round(options.rows))
+  const safeCount = Math.min(
+    Math.max(1, Math.round(options.count ?? safeColumns * safeRows)),
+    safeColumns * safeRows,
+  )
+  const sliceWidth = image.naturalWidth / safeColumns
+  const sliceHeight = image.naturalHeight / safeRows
+  const outputWidth = Math.max(1, Math.round(sliceWidth))
+  const outputHeight = Math.max(1, Math.round(sliceHeight))
+  canvas.width = outputWidth
+  canvas.height = outputHeight
+
+  return Array.from({ length: safeCount }, (_, index) => {
+    const column = index % safeColumns
+    const row = Math.floor(index / safeColumns)
+
+    context.clearRect(0, 0, outputWidth, outputHeight)
+    context.drawImage(
+      image,
+      column * sliceWidth,
+      row * sliceHeight,
+      sliceWidth,
+      sliceHeight,
+      0,
+      0,
+      outputWidth,
+      outputHeight,
+    )
+
+    return canvas.toDataURL('image/png')
+  })
+}
+
+export function slicePortraitStudioFaces(source: string | Blob): Promise<string[]> {
+  return sliceImageGrid(source, {
+    columns: 3,
+    count: 5,
+    rows: 2,
+  })
+}
+
 export function downloadResult(result: ForgeResult, fileName: string) {
   downloadDataUrl(result.dataUrl, fileName)
 }
@@ -238,6 +415,155 @@ async function loadImage(file: Blob): Promise<HTMLImageElement> {
   } finally {
     URL.revokeObjectURL(objectUrl)
   }
+}
+
+function countActivePixelsInRow(
+  data: Uint8ClampedArray,
+  width: number,
+  y: number,
+) {
+  let count = 0
+  const rowOffset = y * width * 4
+
+  for (let x = 0; x < width; x += 1) {
+    if (isActiveSpritePixel(data, rowOffset + x * 4)) {
+      count += 1
+    }
+  }
+
+  return count
+}
+
+function countActivePixelsInColumn(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x: number,
+  startY: number,
+  endY: number,
+) {
+  let count = 0
+  const safeStartY = Math.max(0, startY)
+  const safeEndY = Math.min(height - 1, endY)
+
+  for (let y = safeStartY; y <= safeEndY; y += 1) {
+    if (isActiveSpritePixel(data, (y * width + x) * 4)) {
+      count += 1
+    }
+  }
+
+  return count
+}
+
+function collectActiveRanges(
+  values: number[],
+  options: {
+    maxGap: number
+    minimumSpan: number
+    threshold: number
+  },
+) {
+  const ranges: Array<{ end: number; start: number }> = []
+  let rangeStart = -1
+  let lastActiveIndex = -1
+
+  values.forEach((value, index) => {
+    const isActive = value >= options.threshold
+
+    if (isActive) {
+      if (rangeStart === -1) {
+        rangeStart = index
+      }
+      lastActiveIndex = index
+      return
+    }
+
+    if (rangeStart === -1) {
+      return
+    }
+
+    if (index - lastActiveIndex <= options.maxGap) {
+      return
+    }
+
+    if (lastActiveIndex - rangeStart + 1 >= options.minimumSpan) {
+      ranges.push({
+        end: lastActiveIndex,
+        start: rangeStart,
+      })
+    }
+
+    rangeStart = -1
+    lastActiveIndex = -1
+  })
+
+  if (
+    rangeStart !== -1 &&
+    lastActiveIndex - rangeStart + 1 >= options.minimumSpan
+  ) {
+    ranges.push({
+      end: lastActiveIndex,
+      start: rangeStart,
+    })
+  }
+
+  return ranges
+}
+
+function tightenSpriteBounds(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  startX: number,
+  endX: number,
+  startY: number,
+  endY: number,
+): SpriteSheetBounds | null {
+  let left = width
+  let right = -1
+  let top = height
+  let bottom = -1
+  let activePixelCount = 0
+
+  for (let y = startY; y <= endY; y += 1) {
+    for (let x = startX; x <= endX; x += 1) {
+      if (!isActiveSpritePixel(data, (y * width + x) * 4)) {
+        continue
+      }
+
+      activePixelCount += 1
+      left = Math.min(left, x)
+      right = Math.max(right, x)
+      top = Math.min(top, y)
+      bottom = Math.max(bottom, y)
+    }
+  }
+
+  if (activePixelCount < 12 || right < left || bottom < top) {
+    return null
+  }
+
+  return {
+    bottom,
+    left,
+    right,
+    top,
+  }
+}
+
+function isActiveSpritePixel(data: Uint8ClampedArray, offset: number) {
+  const alpha = data[offset + 3]
+
+  if (alpha < 12) {
+    return false
+  }
+
+  const red = data[offset]
+  const green = data[offset + 1]
+  const blue = data[offset + 2]
+  const maxChannel = Math.max(red, green, blue)
+
+  return maxChannel >= 24 || red + green + blue >= 54
 }
 
 function canvasToBlob(canvas: HTMLCanvasElement, mimeType: string): Promise<Blob> {
