@@ -51,6 +51,11 @@ const supportedForgeModes = [
   'visualizer',
 ]
 const forgeBatchMaxAttemptsPerImage = 4
+const forgeBatchMaxParallelRequests = 4
+const forgeGenerationTimeoutMs = clampTimeoutMs(
+  Number(process.env.FORGE_GENERATION_TIMEOUT_MS ?? 90000),
+  90000,
+)
 const forgeBatchInterRequestDelayMs = 250
 const forgeBatchRetryDelayMs = 1200
 const actionAnimatorPollingIntervalMs = 10000
@@ -402,80 +407,194 @@ app.post('/api/forge', async (request, response) => {
         },
       })),
     ]
-    const maxAttempts = candidateCount * forgeBatchMaxAttemptsPerImage
+    const batchRequestId = buildRequestId('forge-batch')
+    const batchStartedAt = Date.now()
+    logServerEvent(batchRequestId, 'batch started', {
+      candidateCount,
+      mode,
+      model: modelSelection.modelId,
+      providerModel: modelSelection.providerModel,
+      referenceCount: validReferences.length,
+    })
     const successfulRuns = []
     const normalizedErrors = []
     const noImageTexts = []
-    const images = []
-    let attempts = 0
+    const batchResults = await Promise.all(
+      Array.from(
+        {
+          length: Math.min(candidateCount, forgeBatchMaxParallelRequests),
+        },
+        async (_, workerIndex) => {
+          const workerImages = []
+          let fatalError = null
 
-    while (images.length < candidateCount && attempts < maxAttempts) {
-      attempts += 1
+          for (
+            let slotIndex = workerIndex;
+            slotIndex < candidateCount;
+            slotIndex += forgeBatchMaxParallelRequests
+          ) {
+            for (
+              let attempt = 1;
+              attempt <= forgeBatchMaxAttemptsPerImage;
+              attempt += 1
+            ) {
+              try {
+                const attemptStartedAt = Date.now()
+                const useModalities = attempt % 2 === 1
+                logServerEvent(batchRequestId, 'slot attempt started', {
+                  attempt,
+                  slot: slotIndex + 1,
+                  useModalities,
+                  worker: workerIndex + 1,
+                })
+                const generation = await withTimeout(
+                  ai.models.generateContent({
+                    model: modelSelection.providerModel,
+                    contents: baseContents,
+                    config: useModalities
+                      ? {
+                          candidateCount: 1,
+                          responseModalities: ['IMAGE', 'TEXT'],
+                          systemInstruction: resolvedSystemInstruction,
+                        }
+                      : {
+                          candidateCount: 1,
+                          systemInstruction: resolvedSystemInstruction,
+                        },
+                  }),
+                  forgeGenerationTimeoutMs,
+                  `Gemini image generation timed out after ${Math.round(
+                    forgeGenerationTimeoutMs / 1000,
+                  )} seconds.`,
+                )
 
-      try {
-        const useModalities = attempts % 2 === 1
-        const generation = await ai.models.generateContent({
-          model: modelSelection.providerModel,
-          contents: baseContents,
-          config: useModalities
-            ? {
-                candidateCount: 1,
-                responseModalities: ['IMAGE', 'TEXT'],
-                systemInstruction: resolvedSystemInstruction,
+                successfulRuns.push(generation)
+
+                const image = extractImages(generation).at(0)
+
+                if (image) {
+                  logServerEvent(batchRequestId, 'slot attempt succeeded', {
+                    attempt,
+                    durationMs: Date.now() - attemptStartedAt,
+                    slot: slotIndex + 1,
+                    worker: workerIndex + 1,
+                  })
+                  workerImages.push({
+                    image: {
+                      ...image,
+                      id: `batch-${slotIndex + 1}-${image.id}`,
+                    },
+                    slotIndex,
+                  })
+                  break
+                }
+
+                if (generation.text) {
+                  noImageTexts.push(generation.text)
+                }
+                logServerEvent(batchRequestId, 'slot returned no image', {
+                  attempt,
+                  durationMs: Date.now() - attemptStartedAt,
+                  slot: slotIndex + 1,
+                  textPreview: generation.text?.slice(0, 120) ?? null,
+                  worker: workerIndex + 1,
+                })
+
+                if (attempt < forgeBatchMaxAttemptsPerImage) {
+                  await sleep(forgeBatchInterRequestDelayMs)
+                }
+              } catch (requestError) {
+                const normalizedError = normalizeGeminiError(
+                  requestError,
+                  modelSelection.modelId,
+                )
+                normalizedErrors.push(normalizedError)
+                const isRetryable =
+                  normalizedError.status === 429 || normalizedError.status >= 500
+
+                if (!isRetryable) {
+                  logServerEvent(batchRequestId, 'slot failed with fatal error', {
+                    attempt,
+                    code: normalizedError.body?.error?.code ?? null,
+                    message: normalizedError.body?.error?.message ?? null,
+                    slot: slotIndex + 1,
+                    status: normalizedError.status,
+                    worker: workerIndex + 1,
+                  })
+                  fatalError = normalizedError
+                  break
+                }
+
+                const retryAfterSeconds =
+                  normalizedError.body?.error?.retryAfterSeconds
+                const retryAfterDelay =
+                  typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
+                    ? retryAfterSeconds * 1000
+                    : forgeBatchRetryDelayMs
+                logServerEvent(batchRequestId, 'slot attempt retrying', {
+                  attempt,
+                  code: normalizedError.body?.error?.code ?? null,
+                  delayMs: retryAfterDelay,
+                  message: normalizedError.body?.error?.message ?? null,
+                  slot: slotIndex + 1,
+                  status: normalizedError.status,
+                  worker: workerIndex + 1,
+                })
+                await sleep(retryAfterDelay)
               }
-            : {
-                candidateCount: 1,
-                systemInstruction: resolvedSystemInstruction,
-              },
-        })
+            }
 
-        successfulRuns.push(generation)
+            if (fatalError) {
+              break
+            }
+          }
 
-        const image = extractImages(generation).at(0)
-
-        if (image) {
-          images.push({
-            ...image,
-            id: `batch-${images.length + 1}-${image.id}`,
-          })
-        } else if (generation.text) {
-          noImageTexts.push(generation.text)
-        }
-
-        if (images.length < candidateCount) {
-          await sleep(forgeBatchInterRequestDelayMs)
-        }
-      } catch (requestError) {
-        const normalizedError = normalizeGeminiError(
-          requestError,
-          modelSelection.modelId,
-        )
-        normalizedErrors.push(normalizedError)
-        const isRetryable =
-          normalizedError.status === 429 || normalizedError.status >= 500
-        if (!isRetryable) {
-          break
-        }
-
-        const retryAfterSeconds = normalizedError.body?.error?.retryAfterSeconds
-        const retryAfterDelay =
-          typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
-            ? retryAfterSeconds * 1000
-            : forgeBatchRetryDelayMs
-        await sleep(retryAfterDelay)
-      }
-    }
+          return {
+            fatalError,
+            workerImages,
+          }
+        },
+      ),
+    )
+    const images = batchResults
+      .flatMap((result) => result.workerImages)
+      .sort((left, right) => left.slotIndex - right.slotIndex)
+      .map((entry) => entry.image)
+    const fatalErrors = batchResults
+      .map((result) => result.fatalError)
+      .filter(Boolean)
 
     if (images.length === 0) {
+      if (fatalErrors.length > 0) {
+        const preferredError =
+          fatalErrors.find((error) => error.status === 429) ?? fatalErrors[0]
+        logServerEvent(batchRequestId, 'batch finished with fatal error', {
+          durationMs: Date.now() - batchStartedAt,
+          errorCode: preferredError.body?.error?.code ?? null,
+          status: preferredError.status,
+        })
+        response.status(preferredError.status).json(preferredError.body)
+        return
+      }
+
       if (successfulRuns.length === 0 && normalizedErrors.length > 0) {
         const preferredError =
           normalizedErrors.find((error) => error.status === 429) ??
           normalizedErrors[0]
+        logServerEvent(batchRequestId, 'batch finished with retryable failure', {
+          durationMs: Date.now() - batchStartedAt,
+          errorCode: preferredError.body?.error?.code ?? null,
+          status: preferredError.status,
+        })
         response.status(preferredError.status).json(preferredError.body)
         return
       }
 
       const fallbackText = noImageTexts[0] ?? successfulRuns[0]?.text
+      logServerEvent(batchRequestId, 'batch finished with no images', {
+        durationMs: Date.now() - batchStartedAt,
+        textPreview: fallbackText?.slice(0, 120) ?? null,
+      })
       response
         .status(422)
         .json(buildNoImageResponseError('/api/forge', modelSelection, fallbackText))
@@ -499,6 +618,11 @@ app.post('/api/forge', async (request, response) => {
       providerModel: modelSelection.providerModel,
       prompt: finalPrompt,
       styleId: providedStyleText || null,
+    })
+    logServerEvent(batchRequestId, 'batch finished successfully', {
+      durationMs: Date.now() - batchStartedAt,
+      imageCount: Math.min(images.length, candidateCount),
+      retryCount: normalizedErrors.length,
     })
   } catch (error) {
     const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
@@ -1364,6 +1488,21 @@ function normalizeGeminiError(
     }
   }
 
+  if (statusCode === 504 || statusText === 'DEADLINE_EXCEEDED') {
+    return {
+      status: 504,
+      body: {
+        error: {
+          code: 'request_timeout',
+          details: message ? [message] : undefined,
+          message:
+            'Gemini did not finish this image request before the server timeout. Try again or reduce the batch count.',
+          title: 'Gemini Request Timed Out',
+        },
+      },
+    }
+  }
+
   return {
     status: statusCode,
     body: {
@@ -1402,6 +1541,51 @@ function extractRetryAfterSeconds(payload) {
 
   const numericValue = Number.parseInt(retryDelay, 10)
   return Number.isFinite(numericValue) ? numericValue : undefined
+}
+
+function buildRequestId(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function clampTimeoutMs(value, fallback) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return fallback
+  }
+
+  return Math.max(1000, Math.round(value))
+}
+
+function logServerEvent(requestId, message, details) {
+  const serializedDetails =
+    details && Object.keys(details).length > 0 ? ` ${JSON.stringify(details)}` : ''
+  console.log(`[${new Date().toISOString()}] [${requestId}] ${message}${serializedDetails}`)
+}
+
+async function withTimeout(promise, timeoutMs, timeoutMessage) {
+  let timeoutHandle
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(
+            new Error(
+              JSON.stringify({
+                error: {
+                  code: 504,
+                  message: timeoutMessage,
+                  status: 'DEADLINE_EXCEEDED',
+                },
+              }),
+            ),
+          )
+        }, timeoutMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timeoutHandle)
+  }
 }
 
 function buildQuotaDetails(payload, retryAfterSeconds) {
