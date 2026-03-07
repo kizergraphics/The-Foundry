@@ -212,8 +212,12 @@ export async function sliceSpriteSheetFrames(
 }
 
 export function downloadResult(result: ForgeResult, fileName: string) {
+  downloadDataUrl(result.dataUrl, fileName)
+}
+
+export function downloadDataUrl(dataUrl: string, fileName: string) {
   const link = document.createElement('a')
-  link.href = result.dataUrl
+  link.href = dataUrl
   link.download = fileName
   link.click()
 }

@@ -3,6 +3,7 @@ import {
   AlertCircle,
   Box,
   ChevronRight,
+  Download,
   FileText,
   Fingerprint,
   Gem,
@@ -36,6 +37,7 @@ import {
   buildTextureExpansionInput,
   copyResultToClipboard,
   createDataUrl,
+  downloadDataUrl,
   downloadResult,
   fileToBase64,
   sliceSpriteSheetFrames,
@@ -1398,9 +1400,16 @@ function App() {
             <div className="flex flex-col gap-6">
               <HeaderSummary
                 activeMode={activeMode}
+                currentSessionCount={currentSessionCount}
+                dailyEstimatedUsage={dailyEstimatedUsage}
+                dailyLimit={dailyLimit}
                 generationCount={activeGenerationCount}
                 inputLabel={headerInputLabel}
+                modelName={selectedTelemetryModel}
+                peakHourly={usageSummary?.peakHourly ?? 0}
                 promptLoaded={isReadyForApi}
+                projectedMonthlyCost={usageSummary?.projectedMonthlyCost ?? 0}
+                sessionMax={sessionMax}
               />
               <nav className="flex flex-wrap gap-3">
                 {(Object.entries(modeDefinitions) as [ForgeMode, ModeDefinition][]).map(
@@ -1701,16 +1710,6 @@ function App() {
                   </span>
                   <ChevronRight className="size-5 text-sky-100/80" strokeWidth={1.9} />
                 </button>
-
-                <TelemetryBar
-                  currentSessionCount={currentSessionCount}
-                  dailyEstimatedUsage={dailyEstimatedUsage}
-                  dailyLimit={dailyLimit}
-                  modelName={selectedTelemetryModel}
-                  peakHourly={usageSummary?.peakHourly ?? 0}
-                  projectedMonthlyCost={usageSummary?.projectedMonthlyCost ?? 0}
-                  sessionMax={sessionMax}
-                />
               </div>
             </aside>
 
@@ -1825,39 +1824,144 @@ function App() {
 
 type HeaderSummaryProps = {
   activeMode: ModeDefinition
+  currentSessionCount: number
+  dailyEstimatedUsage: number
+  dailyLimit: number
   generationCount: number
   inputLabel: string
+  modelName: ModelId | null
+  peakHourly: number
   promptLoaded: boolean
+  projectedMonthlyCost: number
+  sessionMax: number
 }
 
 function HeaderSummary({
   activeMode,
+  currentSessionCount,
+  dailyEstimatedUsage,
+  dailyLimit,
   promptLoaded,
   generationCount,
   inputLabel,
+  modelName,
+  peakHourly,
+  projectedMonthlyCost,
+  sessionMax,
 }: HeaderSummaryProps) {
   return (
-    <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
-      <div className="flex items-start gap-4">
+    <div className="flex flex-col gap-5 2xl:flex-row 2xl:items-end 2xl:justify-between">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(460px,620px)] xl:items-start">
         <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4 text-sky-300 shadow-[0_16px_30px_rgba(14,165,233,0.12)]">
-          <Hammer className="size-6" strokeWidth={1.7} />
+          <div className="flex items-start gap-4">
+            <Hammer className="size-6" strokeWidth={1.7} />
+            <div>
+              <p className="font-mono text-[11px] uppercase tracking-[0.42em] text-sky-300/70">
+                Workspace
+              </p>
+              <h1 className="mt-3 max-w-5xl text-4xl font-semibold tracking-[-0.04em] text-white sm:text-5xl xl:text-[3.75rem] xl:leading-[1.02]">
+                The Foundry
+              </h1>
+            </div>
+          </div>
         </div>
-        <div>
-          <p className="font-mono text-[11px] uppercase tracking-[0.42em] text-sky-300/70">
-            Workspace
-          </p>
-          <h1 className="mt-3 max-w-5xl text-4xl font-semibold tracking-[-0.04em] text-white sm:text-5xl xl:text-[3.75rem] xl:leading-[1.02]">
-            The Foundry
-          </h1>
-        </div>
+        <CompactTelemetryCard
+          currentSessionCount={currentSessionCount}
+          dailyEstimatedUsage={dailyEstimatedUsage}
+          dailyLimit={dailyLimit}
+          modelName={modelName}
+          peakHourly={peakHourly}
+          projectedMonthlyCost={projectedMonthlyCost}
+          sessionMax={sessionMax}
+        />
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-3 xl:min-w-[420px]">
         <MetricCard label="Mode" value={activeMode.label} />
         <MetricCard label={inputLabel} value={promptLoaded ? 'Loaded' : 'Missing'} />
         <MetricCard label="Batch Count" value={`${generationCount} outputs`} />
       </div>
     </div>
+  )
+}
+
+type CompactTelemetryCardProps = {
+  currentSessionCount: number
+  dailyEstimatedUsage: number
+  dailyLimit: number
+  modelName: ModelId | null
+  peakHourly: number
+  projectedMonthlyCost: number
+  sessionMax: number
+}
+
+function CompactTelemetryCard({
+  currentSessionCount,
+  dailyEstimatedUsage,
+  dailyLimit,
+  modelName,
+  peakHourly,
+  projectedMonthlyCost,
+  sessionMax,
+}: CompactTelemetryCardProps) {
+  const usageRatio =
+    dailyLimit > 0
+      ? Math.max(0, Math.min(dailyEstimatedUsage / dailyLimit, 1))
+      : 0
+  const usagePercent = Math.round(usageRatio * 100)
+  const progressClassName =
+    usageRatio >= 0.8
+      ? 'bg-amber-300 shadow-[0_0_18px_rgba(252,211,77,0.45)]'
+      : 'bg-emerald-300 shadow-[0_0_18px_rgba(110,231,183,0.4)]'
+
+  return (
+    <section className="self-start rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(7,9,12,0.88),rgba(7,9,12,0.96))] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
+            Session Telemetry
+          </p>
+        </div>
+        <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-300">
+          {usagePercent}%
+        </span>
+      </div>
+
+      <div className="mt-2 flex flex-col gap-1 text-xs text-zinc-400 sm:flex-row sm:items-center sm:justify-between">
+        <span className="truncate">
+          {modelName ? MODEL_LABELS[modelName as ModelId] ?? modelName : 'All models'}
+        </span>
+        <span>Projected monthly spend: ${projectedMonthlyCost.toFixed(2)}</span>
+      </div>
+
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.08]">
+        <div
+          className={`h-full rounded-full transition-all duration-300 ${progressClassName}`}
+          style={{ width: `${usageRatio * 100}%` }}
+        />
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs lg:grid-cols-4">
+        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Session</p>
+          <p className="mt-1 text-zinc-100">{currentSessionCount} req</p>
+        </div>
+        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Day</p>
+          <p className="mt-1 text-zinc-100">
+            {dailyEstimatedUsage} / {dailyLimit}
+          </p>
+        </div>
+        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Peak</p>
+          <p className="mt-1 text-zinc-100">{sessionMax} req</p>
+        </div>
+        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Hourly</p>
+          <p className="mt-1 text-zinc-100">{peakHourly} req</p>
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -1874,84 +1978,6 @@ function MetricCard({ label, value }: MetricCardProps) {
       </p>
       <p className="mt-2 text-sm font-medium text-white">{value}</p>
     </div>
-  )
-}
-
-type TelemetryBarProps = {
-  currentSessionCount: number
-  dailyEstimatedUsage: number
-  dailyLimit: number
-  modelName: ModelId | null
-  peakHourly: number
-  projectedMonthlyCost: number
-  sessionMax: number
-}
-
-function TelemetryBar({
-  currentSessionCount,
-  dailyEstimatedUsage,
-  dailyLimit,
-  modelName,
-  peakHourly,
-  projectedMonthlyCost,
-  sessionMax,
-}: TelemetryBarProps) {
-  const usageRatio =
-    dailyLimit > 0
-      ? Math.max(0, Math.min(dailyEstimatedUsage / dailyLimit, 1))
-      : 0
-  const usagePercent = Math.round(usageRatio * 100)
-  const progressClassName =
-    usageRatio >= 0.8
-      ? 'bg-amber-300 shadow-[0_0_18px_rgba(252,211,77,0.45)]'
-      : 'bg-emerald-300 shadow-[0_0_18px_rgba(110,231,183,0.4)]'
-
-  return (
-    <section className="sticky bottom-0 z-10 rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(7,9,12,0.94),rgba(7,9,12,0.98))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur">
-      <div className="flex items-center justify-between">
-        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-          Session Telemetry
-        </p>
-        <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-300">
-          {usagePercent}%
-        </span>
-      </div>
-      <p className="mt-2 truncate text-xs text-zinc-400">
-        Scope: {modelName ? MODEL_LABELS[modelName as ModelId] ?? modelName : 'all models'}
-      </p>
-
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.08]">
-        <div
-          className={`h-full rounded-full transition-all duration-300 ${progressClassName}`}
-          style={{ width: `${usageRatio * 100}%` }}
-        />
-      </div>
-
-      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-2.5 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Session</p>
-          <p className="mt-1 text-zinc-100">{currentSessionCount} requests</p>
-        </div>
-        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-2.5 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Day</p>
-          <p className="mt-1 text-zinc-100">
-            {dailyEstimatedUsage} / {dailyLimit}
-          </p>
-        </div>
-        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-2.5 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Session Peak</p>
-          <p className="mt-1 text-zinc-100">{sessionMax} requests</p>
-        </div>
-        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-2.5 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Peak Hourly</p>
-          <p className="mt-1 text-zinc-100">{peakHourly} requests</p>
-        </div>
-      </div>
-
-      <p className="mt-3 text-xs text-zinc-400">
-        Projected monthly spend: ${projectedMonthlyCost.toFixed(2)}
-      </p>
-    </section>
   )
 }
 
@@ -2440,6 +2466,7 @@ function ActionAnimatorPanel({
   const [frames, setFrames] = useState<string[]>([])
   const [isPlaying, setIsPlaying] = useState(false)
   const [previewIndex, setPreviewIndex] = useState(0)
+  const animationSlug = actionType === 'custom' ? 'custom' : actionType
 
   useEffect(() => {
     let cancelled = false
@@ -2489,6 +2516,21 @@ function ActionAnimatorPanel({
     ? activeFrames.map((frame) => ({ dataUrl: frame, ready: true }))
     : Array.from({ length: frameCount }, () => ({ dataUrl: null, ready: false }))
   const currentFrame = activeFrames[previewIndex] ?? null
+
+  function handleFrameDownload(frameDataUrl: string, frameIndex: number) {
+    downloadDataUrl(
+      frameDataUrl,
+      `kizer-forge-action-animator-${animationSlug}-frame-${String(frameIndex + 1).padStart(2, '0')}.png`,
+    )
+  }
+
+  function handleDownloadAllFrames() {
+    activeFrames.forEach((frameDataUrl, frameIndex) => {
+      window.setTimeout(() => {
+        handleFrameDownload(frameDataUrl, frameIndex)
+      }, frameIndex * 120)
+    })
+  }
 
   return (
     <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
@@ -2571,7 +2613,7 @@ function ActionAnimatorPanel({
           <input
             type="range"
             min={4}
-            max={12}
+            max={30}
             step={1}
             value={frameCount}
             onChange={(event) => onFrameCountChange(Number(event.target.value))}
@@ -2602,39 +2644,63 @@ function ActionAnimatorPanel({
       </div>
 
       <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <div className="flex items-center justify-between">
-          <div>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-xl">
             <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
               Frame Strip
             </p>
             <p className="mt-2 text-sm text-zinc-400">
-              The returned spritesheet is sliced locally into preview frames.
+              The returned spritesheet is sliced locally into preview frames. Use the tile download icons for full-size single PNG frames.
             </p>
           </div>
-          <button
-            type="button"
-            disabled={!frames.length}
-            onClick={() => setIsPlaying((currentValue) => !currentValue)}
-            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-4 py-2 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-black/30 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Play className="size-4" strokeWidth={1.7} />
-            {isPlaying ? 'Pause Preview' : 'Play Animation'}
-          </button>
+          <div className="flex flex-wrap gap-2 lg:max-w-[20rem] lg:justify-end">
+            <button
+              type="button"
+              disabled={!frames.length}
+              onClick={() => setIsPlaying((currentValue) => !currentValue)}
+              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-white/10 bg-black/20 px-4 py-2 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Play className="size-4" strokeWidth={1.7} />
+              {isPlaying ? 'Pause Preview' : 'Play Animation'}
+            </button>
+            <button
+              type="button"
+              disabled={!frames.length}
+              onClick={handleDownloadAllFrames}
+              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-white/10 bg-black/20 px-4 py-2 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Download className="size-4" strokeWidth={1.7} />
+              Download All Frames
+            </button>
+          </div>
         </div>
 
         <div className="mt-4 overflow-x-auto pb-2">
-          <div className="flex min-w-max gap-2">
+          <div className="flex min-w-max gap-3">
             {frameSlots.map((frame, index) => (
               <div
                 key={`${index}-${frame.dataUrl ?? 'empty'}`}
-                className="flex size-16 items-center justify-center overflow-hidden rounded-[16px] border border-white/10 bg-black/20"
+                className="relative flex size-20 shrink-0 items-center justify-center overflow-hidden rounded-[18px] border border-white/10 bg-black/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
               >
                 {frame.dataUrl ? (
-                  <img
-                    src={frame.dataUrl}
-                    alt={`Animation frame ${index + 1}`}
-                    className="h-full w-full object-contain"
-                  />
+                  <>
+                    <img
+                      src={frame.dataUrl}
+                      alt={`Animation frame ${index + 1}`}
+                      className="h-full w-full object-contain"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleFrameDownload(frame.dataUrl, index)}
+                      className="absolute right-1.5 top-1.5 inline-flex size-6 items-center justify-center rounded-full border border-black/30 bg-black/65 text-white transition hover:bg-black/80"
+                      aria-label={`Download frame ${index + 1}`}
+                    >
+                      <Download className="size-3" strokeWidth={1.9} />
+                    </button>
+                    <span className="absolute bottom-1.5 left-1.5 rounded-full border border-black/30 bg-black/55 px-1.5 py-0.5 text-[10px] text-zinc-200">
+                      {String(index + 1).padStart(2, '0')}
+                    </span>
+                  </>
                 ) : (
                   <span className="text-[11px] text-zinc-500">
                     {String(index + 1).padStart(2, '0')}

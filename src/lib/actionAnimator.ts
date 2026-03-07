@@ -43,7 +43,12 @@ export function buildActionAnimatorPrompt(state: ActionAnimatorState) {
     state.actionType !== 'custom' && directionPrompt
       ? `Additional direction: ${directionPrompt}.`
       : null,
+    'Preserve the exact character design from the reference image with no new accessories, materials, texture detail, props, or costume changes.',
+    'Do not alter the face, proportions, silhouette, colors, clothing shapes, or surface details from the reference image.',
+    'Animate the existing character only. Do not redesign or embellish the subject.',
     'Isolated on a solid #00FF00 green screen background.',
+    'The background must remain perfectly identical in every frame.',
+    'Do not introduce white backdrops, dark green flicker, gradients, shadows, floor planes, or background changes.',
   ]
     .filter(Boolean)
     .join(' ')

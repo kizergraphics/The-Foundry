@@ -523,8 +523,8 @@ export function clampFrameCount(value: number) {
     return 4
   }
 
-  if (value >= 12) {
-    return 12
+  if (value >= 30) {
+    return 30
   }
 
   return Math.round(value)

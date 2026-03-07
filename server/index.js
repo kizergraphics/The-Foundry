@@ -60,6 +60,8 @@ const maxActionAnimatorDurationSeconds = 8
 const actionAnimatorDurationSeconds = clampActionAnimatorDurationSeconds(
   Number(process.env.GEMINI_VEO_DURATION_SECONDS ?? minActionAnimatorDurationSeconds),
 )
+const actionAnimatorBackgroundColor = '0x00FF00'
+const actionAnimatorFrameSizePx = 512
 const coreSystemRules = [
   'Always render assets on a neutral gray #808080 background.',
   'Never include text, logos, or watermarks in the image.',
@@ -1448,6 +1450,7 @@ async function generateAnimatorSpriteSheet({
   const video = settledOperation.response?.generatedVideos?.[0]?.video
   const videoBuffer = await readGeneratedVideo(ai, video)
   const spriteSheetBase64 = await createSpriteSheetFromVideo({
+    image,
     frameCount,
     videoBuffer,
   })
@@ -1455,7 +1458,7 @@ async function generateAnimatorSpriteSheet({
   return {
     note:
       `Generated ${frameCount} frame sprite sheet from Veo 3.1 Fast with a target playback rate of ${fps} fps. ` +
-      'Feet, lighting, and centering constraints were injected server-side.',
+      'Frame 1 is locked to the reference image, with feet, lighting, centering, and background constraints injected server-side.',
     prompt: normalizedPrompt,
     spriteSheetBase64,
   }
@@ -1488,6 +1491,11 @@ function buildAnimatorPrompt({ actionType, fps, frameCount, prompt }) {
     'Keep the feet on the same horizontal plane with no vertical drifting.',
     'Keep the lighting constant across all frames.',
     'Keep the character centered within each frame to prevent jitter.',
+    'Preserve the exact character design from the reference image with no new accessories, materials, texture detail, props, or costume changes.',
+    'Do not alter the face, proportions, silhouette, colors, clothing shapes, or surface details from the reference image.',
+    'Animate the existing character only. Do not redesign or embellish the subject.',
+    'The background must remain perfectly identical in every frame.',
+    'Do not introduce white backdrops, dark green flicker, gradients, shadows, floor planes, or background changes.',
     'Use a solid green background (#00FF00) for easy post-processing removal.',
   ].join(' ')
 }
@@ -1557,35 +1565,56 @@ async function readGeneratedVideo(ai, video) {
   throw new Error('Veo returned no downloadable video bytes for the animation request.')
 }
 
-async function createSpriteSheetFromVideo({ frameCount, videoBuffer }) {
+async function createSpriteSheetFromVideo({ frameCount, image, videoBuffer }) {
   if (!ffmpegPath) {
     throw new Error('ffmpeg-static is unavailable, so sprite sheet extraction cannot run.')
   }
 
   const safeFrameCount = clampAnimatorFrameCount(frameCount)
+  const extractedVideoFrameCount = Math.max(0, safeFrameCount - 1)
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-action-animator-'))
+  const referenceImagePath = path.join(
+    tempDir,
+    `reference-source${getAnimatorImageExtension(image?.mimeType)}`,
+  )
   const videoPath = path.join(tempDir, 'source.mp4')
   const framePattern = path.join(tempDir, 'frame-%02d.png')
   const spriteSheetPath = path.join(tempDir, 'sprite-sheet.png')
 
   try {
+    await fs.writeFile(referenceImagePath, Buffer.from(image.data, 'base64'))
     await fs.writeFile(videoPath, videoBuffer)
     await runFfmpeg([
       '-y',
       '-i',
-      videoPath,
-      '-vf',
-      [
-        `fps=${safeFrameCount / 2}`,
-        'scale=256:256:force_original_aspect_ratio=decrease:flags=lanczos',
-        'pad=256:256:(ow-iw)/2:(oh-ih)/2:color=0x00FF00',
-        'chromakey=0x00FF00:0.10:0.08',
-        'format=rgba',
-      ].join(','),
+      referenceImagePath,
+      '-filter_complex',
+      buildAnimatorMatteFilter(),
+      '-map',
+      '[out]',
       '-frames:v',
-      String(safeFrameCount),
-      framePattern,
+      '1',
+      path.join(tempDir, 'frame-01.png'),
     ])
+
+    if (extractedVideoFrameCount > 0) {
+      await runFfmpeg([
+        '-y',
+        '-i',
+        videoPath,
+        '-filter_complex',
+        buildAnimatorMatteFilter({
+          sampleFps: extractedVideoFrameCount / actionAnimatorDurationSeconds,
+        }),
+        '-map',
+        '[out]',
+        '-frames:v',
+        String(extractedVideoFrameCount),
+        '-start_number',
+        '2',
+        framePattern,
+      ])
+    }
 
     const frameInputs = Array.from({ length: safeFrameCount }, (_, index) => [
       '-i',
@@ -1607,6 +1636,39 @@ async function createSpriteSheetFromVideo({ frameCount, videoBuffer }) {
   } finally {
     await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
   }
+}
+
+function buildAnimatorMatteFilter(options = {}) {
+  const filterSteps = []
+
+  if (typeof options.sampleFps === 'number' && Number.isFinite(options.sampleFps)) {
+    filterSteps.push(`fps=${Math.max(0.5, options.sampleFps)}`)
+  }
+
+  filterSteps.push(
+    `scale=${actionAnimatorFrameSizePx}:${actionAnimatorFrameSizePx}:force_original_aspect_ratio=decrease:flags=lanczos`,
+    `pad=${actionAnimatorFrameSizePx}:${actionAnimatorFrameSizePx}:(ow-iw)/2:(oh-ih)/2:color=${actionAnimatorBackgroundColor}`,
+    `chromakey=${actionAnimatorBackgroundColor}:0.22:0.06`,
+    'colorkey=0xFFFFFF:0.18:0.05',
+  )
+
+  return [
+    `[0:v]${filterSteps.join(',')}[subject]`,
+    `color=c=${actionAnimatorBackgroundColor}:s=${actionAnimatorFrameSizePx}x${actionAnimatorFrameSizePx}[background]`,
+    '[background][subject]overlay=format=auto,format=rgba[out]',
+  ].join(';')
+}
+
+function getAnimatorImageExtension(mimeType) {
+  if (mimeType === 'image/jpeg') {
+    return '.jpg'
+  }
+
+  if (mimeType === 'image/webp') {
+    return '.webp'
+  }
+
+  return '.png'
 }
 
 function runFfmpeg(args) {
@@ -1642,7 +1704,7 @@ function clampAnimatorFrameCount(frameCount) {
     return 8
   }
 
-  return Math.max(4, Math.min(12, Math.round(numericValue)))
+  return Math.max(4, Math.min(30, Math.round(numericValue)))
 }
 
 function clampActionAnimatorFps(fps) {
