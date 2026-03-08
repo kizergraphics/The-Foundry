@@ -8,7 +8,15 @@ import dotenv from 'dotenv'
 import express from 'express'
 import { GoogleGenAI } from '@google/genai/node'
 import ffmpegPath from 'ffmpeg-static'
-import { getUsageSummary, recordUsageEvent } from './usageStore.js'
+import {
+  getTelemetrySnapshot,
+  getUsageSummary,
+  recordUsageEvent,
+} from './usageStore.js'
+import {
+  getGoogleTelemetrySnapshot,
+  isGoogleTelemetryConfigured,
+} from './googleQuotaTelemetry.js'
 
 dotenv.config()
 
@@ -323,6 +331,8 @@ app.post('/api/forge', async (request, response) => {
       await recordUsageEvent({
         model: modelSelection.modelId,
         route: '/api/forge',
+        telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
+        tokenCount: extractTotalTokenCount(generation),
       }).catch((logError) => {
         console.warn('Telemetry logging failed for /api/forge texture expansion:', logError)
       })
@@ -384,6 +394,8 @@ app.post('/api/forge', async (request, response) => {
       await recordUsageEvent({
         model: modelSelection.modelId,
         route: '/api/forge',
+        telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
+        tokenCount: extractTotalTokenCount(generation),
       }).catch((logError) => {
         console.warn('Telemetry logging failed for /api/forge seam repair:', logError)
       })
@@ -602,10 +614,12 @@ app.post('/api/forge', async (request, response) => {
     }
 
     await Promise.all(
-      successfulRuns.map(() =>
+      successfulRuns.map((generation) =>
         recordUsageEvent({
           model: modelSelection.modelId,
           route: '/api/forge',
+          telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
+          tokenCount: extractTotalTokenCount(generation),
         }).catch((logError) => {
           console.warn('Telemetry logging failed for /api/forge:', logError)
         }),
@@ -747,6 +761,11 @@ app.post('/api/character-sheet', async (request, response) => {
     await recordUsageEvent({
       model: modelSelection.modelId,
       route: '/api/character-sheet',
+      telemetryModel: resolveTelemetryModelId(
+        modelSelection.modelId,
+        '/api/character-sheet',
+      ),
+      tokenCount: extractTotalTokenCount(generation),
     }).catch((logError) => {
       console.warn('Telemetry logging failed for /api/character-sheet:', logError)
     })
@@ -763,6 +782,32 @@ app.post('/api/character-sheet', async (request, response) => {
     const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
 
     response.status(normalizedError.status).json(normalizedError.body)
+  }
+})
+
+app.get('/api/usage/telemetry', async (_request, response) => {
+  try {
+    const telemetrySnapshot = isGoogleTelemetryConfigured()
+      ? await getGoogleTelemetrySnapshot()
+      : await getTelemetrySnapshot()
+    response.json(telemetrySnapshot)
+  } catch (error) {
+    response.status(500).json({
+      error: {
+        code:
+          error && typeof error === 'object' && 'code' in error
+            ? error.code
+            : 'telemetry_unavailable',
+        details:
+          error && typeof error === 'object' && 'details' in error
+            ? error.details
+            : undefined,
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Telemetry is unavailable right now.',
+      },
+    })
   }
 })
 
@@ -820,6 +865,10 @@ app.post('/api/action-animator', async (request, response) => {
     await recordUsageEvent({
       model: modelSelection.modelId,
       route: '/api/action-animator',
+      telemetryModel: resolveTelemetryModelId(
+        modelSelection.modelId,
+        '/api/action-animator',
+      ),
     }).catch((logError) => {
       console.warn('Telemetry logging failed for /api/action-animator:', logError)
     })
@@ -941,6 +990,16 @@ async function buildForgePromptWithBestPractices({
           'Return exactly one concise production prompt paragraph with no markdown and no bullets.',
       },
     })
+
+    await recordUsageEvent({
+      model: 'gemini-3-flash',
+      route: '/internal/prompt-orchestrator',
+      telemetryModel: resolveTelemetryModelId(
+        'gemini-3-flash',
+        '/internal/prompt-orchestrator',
+      ),
+      tokenCount: extractTotalTokenCount(promptGeneration),
+    }).catch(() => {})
 
     const generatedPrompt =
       typeof promptGeneration.text === 'string' ? promptGeneration.text.trim() : ''
@@ -1252,6 +1311,13 @@ async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
       },
     })
 
+    await recordUsageEvent({
+      model: 'gemini-3-flash',
+      route: '/internal/prompt-enhancer',
+      telemetryModel: resolveTelemetryModelId('gemini-3-flash', '/internal/prompt-enhancer'),
+      tokenCount: extractTotalTokenCount(enhancement),
+    }).catch(() => {})
+
     const enhancedPrompt =
       typeof enhancement.text === 'string' ? enhancement.text.trim() : ''
     return enhancedPrompt || normalizedPrompt
@@ -1386,6 +1452,42 @@ function resolveModelForRoute(routeKey, requestedModelId) {
     ok: true,
     providerModel,
   }
+}
+
+function resolveTelemetryModelId(modelId, routeKey) {
+  if (routeKey === '/internal/prompt-orchestrator') {
+    return 'gemini-3-flash-text'
+  }
+
+  if (routeKey === '/internal/prompt-enhancer') {
+    return 'gemini-3-flash-text'
+  }
+
+  if (modelId === 'gemini-3-pro') {
+    return 'nano-banana-pro'
+  }
+
+  if (modelId === 'veo-3.1-fast') {
+    return 'veo-3-fast-generate'
+  }
+
+  if (modelId === 'gemini-2.5-flash-image') {
+    return 'nano-banana'
+  }
+
+  if (modelId === 'gemini-3-flash') {
+    return 'nano-banana-2'
+  }
+
+  return null
+}
+
+function extractTotalTokenCount(result) {
+  const directCount = result?.usageMetadata?.totalTokenCount
+  const nestedCount = result?.response?.usageMetadata?.totalTokenCount
+  const tokenCount = Number(directCount ?? nestedCount)
+
+  return Number.isFinite(tokenCount) && tokenCount > 0 ? Math.round(tokenCount) : 0
 }
 
 function buildNoImageResponseError(routeKey, modelSelection, generationText) {

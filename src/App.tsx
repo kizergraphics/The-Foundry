@@ -83,17 +83,35 @@ type ForgeBriefItem = {
   value: string
 }
 
-type UsageSummary = {
-  activeRpdRatio: number
-  averageDailyUse: number
-  costEstimate: number
-  dailyLimit: number
-  peakHourly: number
-  projectedMonthlyCost: number
-  requestCostEstimate: number
-  scopedModel?: string | null
+type TelemetryMetric = {
+  current: number | null
+  limit: number | null
+  ratio: number | null
+}
+
+type TelemetryRow = {
+  category: string
+  chartPoints: number[]
+  id: string
+  label: string
+  lastRequestAt: string | null
+  metrics: {
+    rpm: TelemetryMetric
+    rpd: TelemetryMetric
+    tpm?: TelemetryMetric | null
+  }
+}
+
+type TelemetrySnapshot = {
+  error?: {
+    code?: string
+    details?: unknown
+    message?: string
+  }
+  generatedAt: string
+  rows: TelemetryRow[]
+  source?: string
   timeZone: string
-  todayTotal: number
 }
 
 type ForgeApiResponse = {
@@ -138,13 +156,6 @@ type TelemetryWindowState = {
 
 const telemetryWindowStorageKey = 'kizer-forge-telemetry-window'
 const telemetryWindowDurationMs = 24 * 60 * 60 * 1000
-const fallbackDailyLimit = 1500
-const LIMITS: Record<string, number> = {
-  'gemini-2.5-flash-image': 1500,
-  'gemini-3-flash': 1500,
-  'gemini-3-pro': 250,
-  'veo-3.1-fast': 100,
-}
 const MODEL_LABELS = {
   'gemini-2.5-flash-image': 'Gemini 2.5 Flash Image',
   'gemini-3-flash': 'Gemini 3 Flash',
@@ -152,6 +163,14 @@ const MODEL_LABELS = {
   'veo-3.1-fast': 'Veo 3.1 Fast',
 }
 type ModelId = keyof typeof MODEL_LABELS
+
+const TELEMETRY_ROW_BY_MODEL_ID: Record<ModelId, string> = {
+  'gemini-2.5-flash-image': 'nano-banana',
+  'gemini-3-flash': 'nano-banana-2',
+  'gemini-3-pro': 'nano-banana-pro',
+  'veo-3.1-fast': 'veo-3-fast-generate',
+}
+const telemetryRefreshIntervalMs = 10000
 
 const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
   armory: 'gemini-3-flash',
@@ -261,7 +280,10 @@ function App() {
   const [lastTextureLabRun, setLastTextureLabRun] =
     useState<TextureLabRunContext | null>(null)
   const [serviceHealth, setServiceHealth] = useState<ServiceHealth | null>(null)
-  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
+  const [telemetrySnapshot, setTelemetrySnapshot] = useState<TelemetrySnapshot | null>(
+    null,
+  )
+  const [telemetryError, setTelemetryError] = useState<string | null>(null)
   const [modelOverridesByMode, setModelOverridesByMode] = useState<
     Partial<Record<ForgeMode, ModelId>>
   >({})
@@ -412,10 +434,9 @@ function App() {
                 ]
   const modeAvailableModels = availableModelsByMode[state.activeMode]
   const selectedModelSupported = modeAvailableModels.includes(activeModel)
-  const dailyEstimatedUsage = usageSummary?.todayTotal ?? 0
-  const dailyLimit =
-    usageSummary?.dailyLimit ?? LIMITS[activeModel] ?? fallbackDailyLimit
   const selectedTelemetryModel = effectiveModel
+  const highlightedTelemetryRowId =
+    TELEMETRY_ROW_BY_MODEL_ID[selectedTelemetryModel ?? activeModel] ?? null
   const telemetryModelKey = selectedTelemetryModel ?? 'all-models'
   const currentSessionCount = sessionCountsByModel[telemetryModelKey] ?? 0
   const sessionMax = sessionMaxByModel[telemetryModelKey] ?? 0
@@ -441,28 +462,34 @@ function App() {
       })
   }
 
-  async function refreshUsage(
-    modelName?: string | null,
-    cancelState?: { cancelled: boolean },
-  ) {
-    const query = modelName ? `?model=${encodeURIComponent(modelName)}` : ''
-
-    await fetch(`/api/usage${query}`)
+  async function refreshTelemetry(cancelState?: { cancelled: boolean }) {
+    await fetch('/api/usage/telemetry')
       .then(async (response) => {
         if (!response.ok) {
-          throw new Error('Usage endpoint failed.')
+          const payload = (await response.json().catch(() => null)) as
+            | {
+                error?: {
+                  message?: string
+                }
+              }
+            | null
+          throw new Error(payload?.error?.message || 'Telemetry endpoint failed.')
         }
 
-        return (await response.json()) as UsageSummary
+        return (await response.json()) as TelemetrySnapshot
       })
       .then((payload) => {
         if (!cancelState?.cancelled) {
-          setUsageSummary(payload)
+          setTelemetrySnapshot(payload)
+          setTelemetryError(null)
         }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!cancelState?.cancelled) {
-          setUsageSummary(null)
+          setTelemetrySnapshot(null)
+          setTelemetryError(
+            error instanceof Error ? error.message : 'Telemetry is unavailable right now.',
+          )
         }
       })
   }
@@ -569,14 +596,18 @@ function App() {
 
   useEffect(() => {
     const cancelState = { cancelled: false }
+    const intervalId = window.setInterval(() => {
+      void refreshTelemetry(cancelState)
+    }, telemetryRefreshIntervalMs)
 
     void refreshHealth(cancelState)
-    void refreshUsage(selectedTelemetryModel, cancelState)
+    void refreshTelemetry(cancelState)
 
     return () => {
       cancelState.cancelled = true
+      window.clearInterval(intervalId)
     }
-  }, [selectedTelemetryModel])
+  }, [])
 
   useEffect(() => {
     const modeDefault = smartDefaultModelByMode[state.activeMode]
@@ -627,7 +658,7 @@ function App() {
       }
     })
 
-    void refreshUsage(modelName)
+    void refreshTelemetry()
   }
 
   function handleModelSelect(nextModel: ModelId) {
@@ -650,7 +681,7 @@ function App() {
     setNotice(
       `Model override set to ${MODEL_LABELS[nextModel]} for ${activeMode.label}.`,
     )
-    void refreshUsage(nextModel)
+    void refreshTelemetry()
   }
 
   function handleStyleInputChange(nextValue: string) {
@@ -1485,15 +1516,13 @@ function App() {
               <HeaderSummary
                 activeMode={activeMode}
                 currentSessionCount={currentSessionCount}
-                dailyEstimatedUsage={dailyEstimatedUsage}
-                dailyLimit={dailyLimit}
                 generationCount={activeGenerationCount}
+                highlightedTelemetryRowId={highlightedTelemetryRowId}
                 inputLabel={headerInputLabel}
-                modelName={selectedTelemetryModel}
-                peakHourly={usageSummary?.peakHourly ?? 0}
                 promptLoaded={isReadyForApi}
-                projectedMonthlyCost={usageSummary?.projectedMonthlyCost ?? 0}
                 sessionMax={sessionMax}
+                telemetryError={telemetryError}
+                telemetrySnapshot={telemetrySnapshot}
               />
               <nav className="flex flex-wrap gap-3">
                 {(Object.entries(modeDefinitions) as [ForgeMode, ModeDefinition][]).map(
@@ -1944,33 +1973,29 @@ function App() {
 type HeaderSummaryProps = {
   activeMode: ModeDefinition
   currentSessionCount: number
-  dailyEstimatedUsage: number
-  dailyLimit: number
   generationCount: number
+  highlightedTelemetryRowId: string | null
   inputLabel: string
-  modelName: ModelId | null
-  peakHourly: number
   promptLoaded: boolean
-  projectedMonthlyCost: number
   sessionMax: number
+  telemetryError: string | null
+  telemetrySnapshot: TelemetrySnapshot | null
 }
 
 function HeaderSummary({
   activeMode,
   currentSessionCount,
-  dailyEstimatedUsage,
-  dailyLimit,
-  promptLoaded,
   generationCount,
+  highlightedTelemetryRowId,
   inputLabel,
-  modelName,
-  peakHourly,
-  projectedMonthlyCost,
+  promptLoaded,
   sessionMax,
+  telemetryError,
+  telemetrySnapshot,
 }: HeaderSummaryProps) {
   return (
-    <div className="flex flex-col gap-5 2xl:flex-row 2xl:items-end 2xl:justify-between">
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(460px,620px)] xl:items-start">
+    <div className="flex flex-col gap-5">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,420px)] xl:items-start">
         <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4 text-sky-300 shadow-[0_16px_30px_rgba(14,165,233,0.12)]">
           <div className="flex items-start gap-4">
             <Hammer className="size-6" strokeWidth={1.7} />
@@ -1984,104 +2009,283 @@ function HeaderSummary({
             </div>
           </div>
         </div>
-        <CompactTelemetryCard
+        <TelemetryStatusCard
           currentSessionCount={currentSessionCount}
-          dailyEstimatedUsage={dailyEstimatedUsage}
-          dailyLimit={dailyLimit}
-          modelName={modelName}
-          peakHourly={peakHourly}
-          projectedMonthlyCost={projectedMonthlyCost}
           sessionMax={sessionMax}
+          telemetryError={telemetryError}
+          telemetrySnapshot={telemetrySnapshot}
         />
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-3 xl:min-w-[420px]">
+      <div className="grid gap-3 sm:grid-cols-3">
         <MetricCard label="Mode" value={activeMode.label} />
         <MetricCard label={inputLabel} value={promptLoaded ? 'Loaded' : 'Missing'} />
         <MetricCard label="Batch Count" value={`${generationCount} outputs`} />
       </div>
+
+      <TelemetryTableCard
+        highlightedTelemetryRowId={highlightedTelemetryRowId}
+        telemetryError={telemetryError}
+        telemetrySnapshot={telemetrySnapshot}
+      />
     </div>
   )
 }
 
-type CompactTelemetryCardProps = {
+type TelemetryStatusCardProps = {
   currentSessionCount: number
-  dailyEstimatedUsage: number
-  dailyLimit: number
-  modelName: ModelId | null
-  peakHourly: number
-  projectedMonthlyCost: number
   sessionMax: number
+  telemetryError: string | null
+  telemetrySnapshot: TelemetrySnapshot | null
 }
 
-function CompactTelemetryCard({
+function TelemetryStatusCard({
   currentSessionCount,
-  dailyEstimatedUsage,
-  dailyLimit,
-  modelName,
-  peakHourly,
-  projectedMonthlyCost,
   sessionMax,
-}: CompactTelemetryCardProps) {
-  const usageRatio =
-    dailyLimit > 0
-      ? Math.max(0, Math.min(dailyEstimatedUsage / dailyLimit, 1))
-      : 0
-  const usagePercent = Math.round(usageRatio * 100)
-  const progressClassName =
-    usageRatio >= 0.8
-      ? 'bg-amber-300 shadow-[0_0_18px_rgba(252,211,77,0.45)]'
-      : 'bg-emerald-300 shadow-[0_0_18px_rgba(110,231,183,0.4)]'
-
+  telemetryError,
+  telemetrySnapshot,
+}: TelemetryStatusCardProps) {
   return (
     <section className="self-start rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(7,9,12,0.88),rgba(7,9,12,0.96))] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur">
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-            Session Telemetry
+            Live Telemetry
+          </p>
+          <p className="mt-2 text-sm text-zinc-300">
+            Auto-refreshing model usage against the limits from your AI Studio snapshot.
           </p>
         </div>
         <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-300">
-          {usagePercent}%
+          {telemetrySnapshot
+            ? telemetrySnapshot.source === 'google-cloud-monitoring'
+              ? `Google ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+              : `Updated ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+            : telemetryError
+              ? 'Google blocked'
+              : 'Telemetry offline'}
         </span>
       </div>
 
-      <div className="mt-2 flex flex-col gap-1 text-xs text-zinc-400 sm:flex-row sm:items-center sm:justify-between">
-        <span className="truncate">
-          {modelName ? MODEL_LABELS[modelName as ModelId] ?? modelName : 'All models'}
-        </span>
-        <span>Projected monthly spend: ${projectedMonthlyCost.toFixed(2)}</span>
-      </div>
+      {telemetryError ? (
+        <div className="mt-4 whitespace-pre-line rounded-[16px] border border-amber-300/20 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+          {telemetryError}
+        </div>
+      ) : null}
 
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.08]">
-        <div
-          className={`h-full rounded-full transition-all duration-300 ${progressClassName}`}
-          style={{ width: `${usageRatio * 100}%` }}
-        />
-      </div>
-
-      <div className="mt-3 grid grid-cols-2 gap-2 text-xs lg:grid-cols-4">
+      <div className="mt-4 grid grid-cols-2 gap-2 text-xs lg:grid-cols-3">
         <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
           <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Session</p>
           <p className="mt-1 text-zinc-100">{currentSessionCount} req</p>
         </div>
         <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Day</p>
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">24h Peak</p>
           <p className="mt-1 text-zinc-100">
-            {dailyEstimatedUsage} / {dailyLimit}
+            {sessionMax} req
           </p>
         </div>
         <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Peak</p>
-          <p className="mt-1 text-zinc-100">{sessionMax} req</p>
-        </div>
-        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Hourly</p>
-          <p className="mt-1 text-zinc-100">{peakHourly} req</p>
+          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Source</p>
+          <p className="mt-1 text-zinc-100">
+            {telemetrySnapshot?.source === 'google-cloud-monitoring'
+              ? 'Google'
+              : telemetrySnapshot
+                ? 'Local'
+                : 'Unavailable'}
+          </p>
         </div>
       </div>
     </section>
   )
+}
+
+type TelemetryTableCardProps = {
+  highlightedTelemetryRowId: string | null
+  telemetryError: string | null
+  telemetrySnapshot: TelemetrySnapshot | null
+}
+
+function TelemetryTableCard({
+  highlightedTelemetryRowId,
+  telemetryError,
+  telemetrySnapshot,
+}: TelemetryTableCardProps) {
+  return (
+    <section className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(4,8,12,0.88),rgba(3,6,9,0.98))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-5">
+      <div className="flex flex-col gap-3 border-b border-white/8 pb-4 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
+            Model Limits
+          </p>
+          <h2 className="mt-2 text-lg font-semibold text-white">
+            Requests per minute and per day update live
+          </h2>
+          <p className="mt-2 max-w-3xl text-sm text-zinc-400">
+            RPM and RPD numbers shift from green to red as usage climbs. TPM uses live
+            token totals when Gemini returns usage metadata.
+          </p>
+        </div>
+        <p className="text-xs text-zinc-500">
+          {telemetrySnapshot
+            ? telemetrySnapshot.source === 'google-cloud-monitoring'
+              ? `Google refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+              : `Local refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+            : 'Waiting for telemetry'}
+        </p>
+      </div>
+
+      {telemetryError ? (
+        <div className="mt-4 whitespace-pre-line rounded-[18px] border border-rose-300/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
+          Google telemetry is configured but not returning quota data. {telemetryError}
+        </div>
+      ) : null}
+
+      <div className="mt-4 overflow-x-auto">
+        <div className="min-w-[1120px]">
+          <div className="grid grid-cols-[minmax(260px,1.3fr)_minmax(220px,0.9fr)_minmax(220px,0.8fr)_minmax(220px,0.8fr)_minmax(220px,0.8fr)_88px] gap-4 px-3 pb-3 text-[11px] font-medium uppercase tracking-[0.28em] text-zinc-500">
+            <span>Model</span>
+            <span>Category</span>
+            <span>RPM</span>
+            <span>TPM</span>
+            <span>RPD</span>
+            <span className="text-right">Charts</span>
+          </div>
+
+          <div className="space-y-2">
+            {telemetrySnapshot?.rows.map((row) => {
+              const isHighlighted = row.id === highlightedTelemetryRowId
+
+              return (
+                <div
+                  key={row.id}
+                  className={`grid grid-cols-[minmax(260px,1.3fr)_minmax(220px,0.9fr)_minmax(220px,0.8fr)_minmax(220px,0.8fr)_minmax(220px,0.8fr)_88px] gap-4 rounded-[22px] border px-3 py-3 transition ${
+                    isHighlighted
+                      ? 'border-sky-300/25 bg-sky-400/[0.08] shadow-[0_12px_30px_rgba(56,189,248,0.08)]'
+                      : 'border-white/8 bg-white/[0.02]'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-base font-medium text-zinc-100">{row.label}</p>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      {row.lastRequestAt
+                        ? `Last request ${new Date(row.lastRequestAt).toLocaleTimeString()}`
+                        : 'No requests recorded yet'}
+                    </p>
+                  </div>
+                  <div className="flex items-center text-sm text-zinc-400">{row.category}</div>
+                  <TelemetryMetricCell metric={row.metrics.rpm} />
+                  <TelemetryMetricCell metric={row.metrics.tpm} />
+                  <TelemetryMetricCell metric={row.metrics.rpd} />
+                  <div className="flex items-center justify-end">
+                    <TelemetryMiniChart
+                      accentRatio={
+                        Math.max(row.metrics.rpm.ratio ?? 0, row.metrics.rpd.ratio ?? 0)
+                      }
+                      points={row.chartPoints}
+                    />
+                  </div>
+                </div>
+              )
+            })}
+
+            {!telemetrySnapshot ? (
+              <div className="rounded-[22px] border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-zinc-500">
+                Live telemetry is unavailable right now.
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function TelemetryMetricCell({ metric }: { metric?: TelemetryMetric | null }) {
+  if (!metric) {
+    return <div className="flex items-center text-sm font-medium text-zinc-500">N/A</div>
+  }
+
+  if (
+    typeof metric.current !== 'number' ||
+    typeof metric.limit !== 'number' ||
+    typeof metric.ratio !== 'number'
+  ) {
+    return <div className="flex items-center text-sm font-medium text-zinc-500">N/A</div>
+  }
+
+  const accentColor = buildTelemetryAccentColor(metric.ratio)
+  const barWidth =
+    metric.current > 0 ? Math.max(metric.ratio * 100, 8) : Math.max(metric.ratio * 100, 0)
+
+  return (
+    <div className="flex items-center gap-3">
+      <div className="h-2 w-[5.5rem] overflow-hidden rounded-full bg-white/[0.06]">
+        <div
+          className="h-full rounded-full transition-all duration-300"
+          style={{
+            backgroundColor: accentColor,
+            width: `${Math.min(barWidth, 100)}%`,
+          }}
+        />
+      </div>
+      <span
+        className="min-w-[98px] text-right text-sm font-semibold tabular-nums"
+        style={{ color: accentColor }}
+      >
+        {formatTelemetryMetricValue(metric.current)} / {formatTelemetryMetricValue(metric.limit)}
+      </span>
+    </div>
+  )
+}
+
+function TelemetryMiniChart({
+  accentRatio,
+  points,
+}: {
+  accentRatio: number
+  points: number[]
+}) {
+  const peak = Math.max(...points, 1)
+  const accentColor = buildTelemetryAccentColor(accentRatio)
+
+  return (
+    <div className="flex h-9 items-end gap-1 rounded-full border border-white/8 bg-black/20 px-2 py-1">
+      {points.map((point, index) => (
+        <span
+          key={`${index}-${point}`}
+          className="w-1.5 rounded-full transition-all duration-300"
+          style={{
+            backgroundColor: accentColor,
+            height: `${Math.max((point / peak) * 100, point > 0 ? 24 : 12)}%`,
+            opacity: point > 0 ? 1 : 0.22,
+          }}
+        />
+      ))}
+    </div>
+  )
+}
+
+function buildTelemetryAccentColor(ratio: number) {
+  const clampedRatio = Math.max(0, Math.min(ratio, 1))
+  const hue = 120 - clampedRatio * 120
+  return `hsl(${hue} 82% 60%)`
+}
+
+function formatTelemetryMetricValue(value: number) {
+  if (value >= 1000000) {
+    return `${trimTrailingZeros((value / 1000000).toFixed(value < 10000000 ? 2 : 1))}M`
+  }
+
+  if (value >= 1000) {
+    const fractionDigits = value < 10000 ? 2 : value < 100000 ? 1 : 0
+    return `${trimTrailingZeros((value / 1000).toFixed(fractionDigits))}K`
+  }
+
+  return value.toLocaleString()
+}
+
+function trimTrailingZeros(value: string) {
+  return value.replace(/\.0+$|(\.\d*[1-9])0+$/, '$1')
 }
 
 type MetricCardProps = {

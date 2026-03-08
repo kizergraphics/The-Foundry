@@ -9,16 +9,98 @@ const usageFilePath = path.join(dataDir, 'usage-log.json')
 const pacificTimeZone = 'America/Los_Angeles'
 const defaultDailyRequestLimit = 1500
 const defaultRequestCostEstimate = 0.0005
-const dailyLimitByModel = {
-  'gemini-3-flash': 1500,
-  'gemini-3-pro': 250,
+const minuteWindowMs = 60 * 1000
+const chartBucketCount = 8
+const chartBucketDurationMs = 5 * minuteWindowMs
+
+const telemetryModelDefinitions = [
+  {
+    category: 'Multi-modal generative models',
+    id: 'nano-banana-pro',
+    label: 'Nano Banana Pro (Gemini 3 Pro Image)',
+    modelAliases: ['gemini-3-pro'],
+    limits: {
+      rpm: 20,
+      rpd: 250,
+      tpm: 100000,
+    },
+  },
+  {
+    category: 'Multi-modal generative models',
+    id: 'veo-3-fast-generate',
+    label: 'Veo 3 Fast Generate',
+    modelAliases: ['veo-3.1-fast'],
+    limits: {
+      rpm: 2,
+      rpd: 10,
+      tpm: null,
+    },
+  },
+  {
+    category: 'Multi-modal generative models',
+    id: 'nano-banana-2',
+    label: 'Nano Banana 2 (Gemini 3.1 Flash Image)',
+    modelAliases: ['gemini-3-flash'],
+    limits: {
+      rpm: 100,
+      rpd: 1000,
+      tpm: 200000,
+    },
+  },
+  {
+    category: 'Multi-modal generative models',
+    id: 'nano-banana',
+    label: 'Nano Banana (Gemini 2.5 Flash Preview Image)',
+    modelAliases: ['gemini-2.5-flash-image'],
+    limits: {
+      rpm: 500,
+      rpd: 2000,
+      tpm: 500000,
+    },
+  },
+  {
+    category: 'Text-out models',
+    id: 'gemini-3-flash-text',
+    label: 'Gemini 3 Flash',
+    modelAliases: [],
+    limits: {
+      rpm: 1000,
+      rpd: 10000,
+      tpm: 1000000,
+    },
+  },
+  {
+    category: 'Text-out models',
+    id: 'gemini-2.5-flash-text',
+    label: 'Gemini 2.5 Flash',
+    modelAliases: [],
+    limits: {
+      rpm: 1000,
+      rpd: 10000,
+      tpm: 1000000,
+    },
+  },
+]
+
+const telemetryModelIdByAlias = {
+  'gemini-2.5-flash-image': 'nano-banana',
+  'gemini-3-flash': 'nano-banana-2',
+  'gemini-3-pro': 'nano-banana-pro',
+  'veo-3.1-fast': 'veo-3-fast-generate',
 }
+
 const requestCostByModel = {
+  'gemini-2.5-flash-image': 0.0005,
   'gemini-3-flash': 0.0005,
   'gemini-3-pro': 0.0012,
-  'gemini-2.5-flash-image': 0.0005,
   'gemini-3-pro-image-preview': 0.0012,
+  'gemini-3-flash-text': 0.0003,
+  'gemini-2.5-flash-text': 0.0003,
 }
+
+const telemetryModelsById = new Map(
+  telemetryModelDefinitions.map((definition) => [definition.id, definition]),
+)
 
 const dateKeyFormatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: pacificTimeZone,
@@ -32,12 +114,20 @@ let writeQueue = Promise.resolve()
 export async function recordUsageEvent({
   model,
   route,
+  telemetryModel,
   timestamp = new Date().toISOString(),
+  tokenCount = 0,
 }) {
+  const normalizedTelemetryModel =
+    typeof telemetryModel === 'string' && telemetryModelsById.has(telemetryModel)
+      ? telemetryModel
+      : null
   const event = {
     model: typeof model === 'string' ? model : 'unknown',
     route: typeof route === 'string' ? route : 'unknown',
+    telemetryModel: normalizedTelemetryModel,
     timestamp,
+    tokenCount: normalizeTokenCount(tokenCount),
   }
 
   writeQueue = writeQueue.then(async () => {
@@ -54,10 +144,10 @@ export async function getUsageSummary({
   now = new Date(),
 } = {}) {
   const usageStore = await readUsageStore()
-  const normalizedModel =
+  const normalizedScope =
     typeof model === 'string' && model.trim().length > 0 ? model.trim() : null
-  const scopedEvents = normalizedModel
-    ? usageStore.events.filter((event) => event.model === normalizedModel)
+  const scopedEvents = normalizedScope
+    ? usageStore.events.filter((event) => eventMatchesScope(event, normalizedScope))
     : usageStore.events
   const todayKey = toPacificDateKey(now)
 
@@ -69,8 +159,8 @@ export async function getUsageSummary({
     .filter(Number.isFinite)
     .sort((left, right) => left - right)
 
-  const requestCostEstimate = resolveRequestCostEstimate(normalizedModel)
-  const dailyRequestLimit = resolveDailyRequestLimit(normalizedModel)
+  const requestCostEstimate = resolveRequestCostEstimate(normalizedScope)
+  const dailyRequestLimit = resolveDailyRequestLimit(normalizedScope)
   const todayTotal = todayEvents.length
   const peakHourly = computeRollingHourlyPeak(todayTimestamps)
   const costEstimate = roundCurrency(todayTotal * requestCostEstimate)
@@ -78,16 +168,65 @@ export async function getUsageSummary({
   const projectedMonthlyCost = roundCurrency(averageDailyUse * 30 * requestCostEstimate)
 
   return {
-    activeRpdRatio: todayTotal / dailyRequestLimit,
+    activeRpdRatio: dailyRequestLimit > 0 ? todayTotal / dailyRequestLimit : 0,
     averageDailyUse,
     costEstimate,
     dailyLimit: dailyRequestLimit,
     peakHourly,
     projectedMonthlyCost,
     requestCostEstimate,
-    scopedModel: normalizedModel,
+    scopedModel: normalizedScope,
     timeZone: pacificTimeZone,
     todayTotal,
+  }
+}
+
+export async function getTelemetrySnapshot({
+  now = new Date(),
+} = {}) {
+  const usageStore = await readUsageStore()
+  const nowTimestamp = new Date(now).getTime()
+  const minuteStart = nowTimestamp - minuteWindowMs
+  const todayKey = toPacificDateKey(now)
+
+  return {
+    generatedAt: new Date(nowTimestamp).toISOString(),
+    rows: telemetryModelDefinitions.map((definition) => {
+      const events = usageStore.events.filter(
+        (event) => resolveEventTelemetryModelId(event) === definition.id,
+      )
+      const minuteEvents = events.filter((event) => {
+        const timestamp = Date.parse(event.timestamp)
+        return Number.isFinite(timestamp) && timestamp >= minuteStart
+      })
+      const todayEvents = events.filter(
+        (event) => toPacificDateKey(event.timestamp) === todayKey,
+      )
+      const tpmCurrent =
+        definition.limits.tpm === null
+          ? null
+          : minuteEvents.reduce(
+              (sum, event) => sum + normalizeTokenCount(event.tokenCount),
+              0,
+            )
+
+      return {
+        category: definition.category,
+        chartPoints: buildChartPoints(events, nowTimestamp),
+        id: definition.id,
+        label: definition.label,
+        lastRequestAt: events.at(-1)?.timestamp ?? null,
+        metrics: {
+          rpm: buildMetricPayload(minuteEvents.length, definition.limits.rpm),
+          rpd: buildMetricPayload(todayEvents.length, definition.limits.rpd),
+          tpm:
+            definition.limits.tpm === null
+              ? buildMetricPayload(null, null)
+              : buildMetricPayload(tpmCurrent, definition.limits.tpm),
+        },
+      }
+    }),
+    timeZone: pacificTimeZone,
   }
 }
 
@@ -101,14 +240,23 @@ async function readUsageStore() {
     }
 
     return {
-      events: parsed.events.filter(
-        (event) =>
-          event &&
-          typeof event === 'object' &&
-          typeof event.timestamp === 'string' &&
-          typeof event.model === 'string' &&
-          typeof event.route === 'string',
-      ),
+      events: parsed.events
+        .filter(
+          (event) =>
+            event &&
+            typeof event === 'object' &&
+            typeof event.timestamp === 'string' &&
+            typeof event.model === 'string' &&
+            typeof event.route === 'string',
+        )
+        .map((event) => ({
+          model: event.model,
+          route: event.route,
+          telemetryModel:
+            typeof event.telemetryModel === 'string' ? event.telemetryModel : null,
+          timestamp: event.timestamp,
+          tokenCount: normalizeTokenCount(event.tokenCount),
+        })),
     }
   } catch (error) {
     if (
@@ -128,6 +276,80 @@ async function readUsageStore() {
 async function persistUsageStore(store) {
   await fs.mkdir(dataDir, { recursive: true })
   await fs.writeFile(usageFilePath, JSON.stringify(store, null, 2), 'utf8')
+}
+
+function buildChartPoints(events, nowTimestamp) {
+  const bucketStart = nowTimestamp - chartBucketCount * chartBucketDurationMs
+  const points = Array.from({ length: chartBucketCount }, () => 0)
+
+  for (const event of events) {
+    const timestamp = Date.parse(event.timestamp)
+
+    if (!Number.isFinite(timestamp) || timestamp < bucketStart || timestamp > nowTimestamp) {
+      continue
+    }
+
+    const bucketIndex = Math.min(
+      chartBucketCount - 1,
+      Math.floor((timestamp - bucketStart) / chartBucketDurationMs),
+    )
+
+    if (bucketIndex >= 0) {
+      points[bucketIndex] += 1
+    }
+  }
+
+  return points
+}
+
+function buildMetricPayload(current, limit) {
+  if (
+    typeof current !== 'number' ||
+    !Number.isFinite(current) ||
+    typeof limit !== 'number' ||
+    !Number.isFinite(limit) ||
+    limit <= 0
+  ) {
+    return {
+      current: null,
+      limit: null,
+      ratio: null,
+    }
+  }
+
+  return {
+    current,
+    limit,
+    ratio: Math.max(0, Math.min(current / limit, 1)),
+  }
+}
+
+function eventMatchesScope(event, scope) {
+  if (telemetryModelsById.has(scope)) {
+    return resolveEventTelemetryModelId(event) === scope
+  }
+
+  const telemetryModelId = telemetryModelIdByAlias[scope]
+  if (telemetryModelId) {
+    return resolveEventTelemetryModelId(event) === telemetryModelId
+  }
+
+  return event.model === scope
+}
+
+function resolveEventTelemetryModelId(event) {
+  if (
+    typeof event?.telemetryModel === 'string' &&
+    telemetryModelsById.has(event.telemetryModel)
+  ) {
+    return event.telemetryModel
+  }
+
+  if (typeof event?.model === 'string' && telemetryModelIdByAlias[event.model]) {
+    return telemetryModelIdByAlias[event.model]
+  }
+
+  return null
 }
 
 function toPacificDateKey(dateLike) {
@@ -170,6 +392,14 @@ function computeAverageDailyUse(events) {
   return Number((aggregate / totals.length).toFixed(2))
 }
 
+function normalizeTokenCount(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return 0
+  }
+
+  return Math.round(value)
+}
+
 function roundCurrency(value) {
   return Number(value.toFixed(4))
 }
@@ -179,7 +409,17 @@ function resolveRequestCostEstimate(model) {
     return defaultRequestCostEstimate
   }
 
-  return requestCostByModel[model] ?? defaultRequestCostEstimate
+  const normalizedModel = telemetryModelsById.has(model)
+    ? model === 'nano-banana-pro'
+      ? 'gemini-3-pro'
+      : model === 'nano-banana-2'
+        ? 'gemini-3-flash'
+        : model === 'nano-banana'
+          ? 'gemini-2.5-flash-image'
+          : model
+    : model
+
+  return requestCostByModel[normalizedModel] ?? defaultRequestCostEstimate
 }
 
 function resolveDailyRequestLimit(model) {
@@ -187,5 +427,14 @@ function resolveDailyRequestLimit(model) {
     return defaultDailyRequestLimit
   }
 
-  return dailyLimitByModel[model] ?? defaultDailyRequestLimit
+  if (telemetryModelsById.has(model)) {
+    return telemetryModelsById.get(model)?.limits.rpd ?? defaultDailyRequestLimit
+  }
+
+  const telemetryModelId = telemetryModelIdByAlias[model]
+  if (telemetryModelId) {
+    return telemetryModelsById.get(telemetryModelId)?.limits.rpd ?? defaultDailyRequestLimit
+  }
+
+  return defaultDailyRequestLimit
 }
