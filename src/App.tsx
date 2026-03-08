@@ -158,9 +158,9 @@ const telemetryWindowStorageKey = 'kizer-forge-telemetry-window'
 const telemetryWindowDurationMs = 24 * 60 * 60 * 1000
 const MODEL_LABELS = {
   'gemini-2.5-flash-image': 'Gemini 2.5 Flash Image',
-  'gemini-3-flash': 'Gemini 3 Flash',
-  'gemini-3-pro': 'Gemini 3 Pro',
-  'veo-3.1-fast': 'Veo 3.1 Fast',
+  'gemini-3-flash': 'Gemini 3.1 Flash',
+  'gemini-3-pro': 'Gemini 3 Pro Image',
+  'veo-3.1-fast': 'Veo 3 Fast Generate',
 }
 type ModelId = keyof typeof MODEL_LABELS
 
@@ -463,7 +463,7 @@ function App() {
   }
 
   async function refreshTelemetry(cancelState?: { cancelled: boolean }) {
-    await fetch('/api/usage/telemetry')
+    await fetch('/api/usage/telemetry', { cache: 'no-store' })
       .then(async (response) => {
         if (!response.ok) {
           const payload = (await response.json().catch(() => null)) as
@@ -481,7 +481,7 @@ function App() {
       .then((payload) => {
         if (!cancelState?.cancelled) {
           setTelemetrySnapshot(payload)
-          setTelemetryError(null)
+          setTelemetryError(payload.error?.message ?? null)
         }
       })
       .catch((error: unknown) => {
@@ -2045,6 +2045,24 @@ function TelemetryStatusCard({
   telemetryError,
   telemetrySnapshot,
 }: TelemetryStatusCardProps) {
+  const telemetryStatusLabel = telemetrySnapshot
+    ? telemetrySnapshot.source === 'hybrid'
+      ? `Hybrid ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+      : telemetrySnapshot.source === 'google-cloud-monitoring'
+        ? `Google ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+        : `Local ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+    : telemetryError
+      ? 'Telemetry degraded'
+      : 'Telemetry offline'
+  const telemetrySourceLabel =
+    telemetrySnapshot?.source === 'hybrid'
+      ? 'Hybrid'
+      : telemetrySnapshot?.source === 'google-cloud-monitoring'
+        ? 'Google'
+        : telemetrySnapshot
+          ? 'Local'
+          : 'Unavailable'
+
   return (
     <section className="self-start rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(7,9,12,0.88),rgba(7,9,12,0.96))] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur">
       <div className="flex items-center justify-between gap-3">
@@ -2053,17 +2071,12 @@ function TelemetryStatusCard({
             Live Telemetry
           </p>
           <p className="mt-2 text-sm text-zinc-300">
-            Auto-refreshing model usage against the limits from your AI Studio snapshot.
+            Auto-refreshing usage from the local log, with Google telemetry folded in when it
+            catches up.
           </p>
         </div>
         <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-300">
-          {telemetrySnapshot
-            ? telemetrySnapshot.source === 'google-cloud-monitoring'
-              ? `Google ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-              : `Updated ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-            : telemetryError
-              ? 'Google blocked'
-              : 'Telemetry offline'}
+          {telemetryStatusLabel}
         </span>
       </div>
 
@@ -2086,13 +2099,7 @@ function TelemetryStatusCard({
         </div>
         <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
           <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Source</p>
-          <p className="mt-1 text-zinc-100">
-            {telemetrySnapshot?.source === 'google-cloud-monitoring'
-              ? 'Google'
-              : telemetrySnapshot
-                ? 'Local'
-                : 'Unavailable'}
-          </p>
+          <p className="mt-1 text-zinc-100">{telemetrySourceLabel}</p>
         </div>
       </div>
     </section>
@@ -2110,6 +2117,14 @@ function TelemetryTableCard({
   telemetryError,
   telemetrySnapshot,
 }: TelemetryTableCardProps) {
+  const telemetryRefreshLabel = telemetrySnapshot
+    ? telemetrySnapshot.source === 'hybrid'
+      ? `Hybrid refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+      : telemetrySnapshot.source === 'google-cloud-monitoring'
+        ? `Google refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+        : `Local refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
+    : 'Waiting for telemetry'
+
   return (
     <section className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(4,8,12,0.88),rgba(3,6,9,0.98))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-5">
       <div className="flex flex-col gap-3 border-b border-white/8 pb-4 sm:flex-row sm:items-end sm:justify-between">
@@ -2125,18 +2140,14 @@ function TelemetryTableCard({
             token totals when Gemini returns usage metadata.
           </p>
         </div>
-        <p className="text-xs text-zinc-500">
-          {telemetrySnapshot
-            ? telemetrySnapshot.source === 'google-cloud-monitoring'
-              ? `Google refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-              : `Local refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-            : 'Waiting for telemetry'}
-        </p>
+        <p className="text-xs text-zinc-500">{telemetryRefreshLabel}</p>
       </div>
 
       {telemetryError ? (
         <div className="mt-4 whitespace-pre-line rounded-[18px] border border-rose-300/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
-          Google telemetry is configured but not returning quota data. {telemetryError}
+          Google telemetry is delayed or unavailable. Showing the live local usage log instead.
+          {' '}
+          {telemetryError}
         </div>
       ) : null}
 

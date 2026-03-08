@@ -787,9 +787,42 @@ app.post('/api/character-sheet', async (request, response) => {
 
 app.get('/api/usage/telemetry', async (_request, response) => {
   try {
-    const telemetrySnapshot = isGoogleTelemetryConfigured()
-      ? await getGoogleTelemetrySnapshot()
-      : await getTelemetrySnapshot()
+    const localTelemetrySnapshot = await getTelemetrySnapshot()
+    let telemetrySnapshot = {
+      ...localTelemetrySnapshot,
+      source: 'local',
+    }
+
+    if (isGoogleTelemetryConfigured()) {
+      try {
+        const googleTelemetrySnapshot = await getGoogleTelemetrySnapshot()
+        telemetrySnapshot = mergeTelemetrySnapshots(
+          localTelemetrySnapshot,
+          googleTelemetrySnapshot,
+        )
+      } catch (error) {
+        telemetrySnapshot = {
+          ...localTelemetrySnapshot,
+          error: {
+            code:
+              error && typeof error === 'object' && 'code' in error
+                ? error.code
+                : 'telemetry_unavailable',
+            details:
+              error && typeof error === 'object' && 'details' in error
+                ? error.details
+                : undefined,
+            message:
+              error instanceof Error
+                ? error.message
+                : 'Telemetry is unavailable right now.',
+          },
+          source: 'local',
+        }
+      }
+    }
+
+    response.set('Cache-Control', 'no-store')
     response.json(telemetrySnapshot)
   } catch (error) {
     response.status(500).json({
@@ -810,6 +843,101 @@ app.get('/api/usage/telemetry', async (_request, response) => {
     })
   }
 })
+
+const googleTelemetryRowIdByLegacyId = {
+  'gemini-2.5-flash-image': 'nano-banana',
+  'gemini-2.5-flash': 'gemini-2.5-flash-text',
+  'gemini-3-pro-image': 'nano-banana-pro',
+  'gemini-3.1-flash': 'gemini-3-flash-text',
+  'gemini-3.1-flash-image': 'nano-banana-2',
+  'veo-3-fast-generate': 'veo-3-fast-generate',
+}
+
+function mergeTelemetrySnapshots(localSnapshot, googleSnapshot) {
+  const googleRowsById = new Map(
+    googleSnapshot.rows.map((row) => [normalizeGoogleTelemetryRowId(row.id), row]),
+  )
+
+  return {
+    ...localSnapshot,
+    generatedAt: localSnapshot.generatedAt,
+    source: 'hybrid',
+    timeZone: localSnapshot.timeZone,
+    rows: localSnapshot.rows.map((localRow) =>
+      mergeTelemetryRow(localRow, googleRowsById.get(localRow.id)),
+    ),
+  }
+}
+
+function mergeTelemetryRow(localRow, googleRow) {
+  if (!googleRow) {
+    return localRow
+  }
+
+  const localChartHasActivity = localRow.chartPoints.some((value) => value > 0)
+
+  return {
+    ...localRow,
+    chartPoints: localChartHasActivity ? localRow.chartPoints : googleRow.chartPoints,
+    lastRequestAt: resolveLatestTelemetryTimestamp(localRow.lastRequestAt, googleRow.lastRequestAt),
+    metrics: {
+      rpm: mergeTelemetryMetric(localRow.metrics.rpm, googleRow.metrics.rpm),
+      rpd: mergeTelemetryMetric(localRow.metrics.rpd, googleRow.metrics.rpd),
+      tpm: mergeTelemetryMetric(localRow.metrics.tpm, googleRow.metrics.tpm),
+    },
+  }
+}
+
+function mergeTelemetryMetric(localMetric, googleMetric) {
+  if (!localMetric && !googleMetric) {
+    return null
+  }
+
+  const current = Math.max(
+    normalizeTelemetryMetricValue(localMetric?.current),
+    normalizeTelemetryMetricValue(googleMetric?.current),
+  )
+  const limitCandidate = firstFiniteTelemetryValue(googleMetric?.limit, localMetric?.limit)
+
+  return {
+    current: Number.isFinite(current) ? current : null,
+    limit: limitCandidate,
+    ratio:
+      typeof limitCandidate === 'number' && limitCandidate > 0 && Number.isFinite(current)
+        ? Math.max(0, Math.min(current / limitCandidate, 1))
+        : firstFiniteTelemetryValue(localMetric?.ratio, googleMetric?.ratio),
+  }
+}
+
+function normalizeGoogleTelemetryRowId(rowId) {
+  return googleTelemetryRowIdByLegacyId[rowId] ?? rowId
+}
+
+function normalizeTelemetryMetricValue(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+}
+
+function firstFiniteTelemetryValue(...values) {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value
+    }
+  }
+
+  return null
+}
+
+function resolveLatestTelemetryTimestamp(...timestamps) {
+  const validTimestamps = timestamps.filter(
+    (value) => typeof value === 'string' && Number.isFinite(Date.parse(value)),
+  )
+
+  if (validTimestamps.length === 0) {
+    return null
+  }
+
+  return validTimestamps.sort((left, right) => Date.parse(right) - Date.parse(left))[0]
+}
 
 app.post('/api/action-animator', async (request, response) => {
   if (!apiKey) {
