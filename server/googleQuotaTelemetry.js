@@ -1,56 +1,12 @@
 import { promises as fs } from 'node:fs'
 import crypto from 'node:crypto'
+import { telemetryModelDefinitions } from './telemetryModelCatalog.js'
 
 const googleTokenScope =
   'https://www.googleapis.com/auth/cloud-platform.read-only https://www.googleapis.com/auth/monitoring.read'
 const metricQueryPageSize = 500
 const chartBucketCount = 8
 const chartBucketDurationMs = 5 * 60 * 1000
-
-const telemetryModelDefinitions = [
-  {
-    category: 'Multi-modal generative models',
-    id: 'gemini-3-pro-image',
-    label: 'Nano Banana Pro (Gemini 3 Pro Image)',
-    metricFamily: 'generate',
-    modelMatchers: ['gemini-3-pro-image'],
-  },
-  {
-    category: 'Multi-modal generative models',
-    id: 'veo-3-fast-generate',
-    label: 'Veo 3 Fast Generate',
-    metricFamily: 'video',
-    modelMatchers: ['veo-3.1-fast-generate', 'veo-3.0-fast-generate'],
-  },
-  {
-    category: 'Multi-modal generative models',
-    id: 'gemini-3.1-flash-image',
-    label: 'Nano Banana 2 (Gemini 3.1 Flash Image)',
-    metricFamily: 'generate',
-    modelMatchers: ['gemini-3.1-flash-image'],
-  },
-  {
-    category: 'Multi-modal generative models',
-    id: 'gemini-2.5-flash-image',
-    label: 'Nano Banana (Gemini 2.5 Flash Preview Image)',
-    metricFamily: 'generate',
-    modelMatchers: ['gemini-2.5-flash-preview-image'],
-  },
-  {
-    category: 'Text-out models',
-    id: 'gemini-3.1-flash',
-    label: 'Gemini 3 Flash',
-    metricFamily: 'generate',
-    modelMatchers: ['gemini-3.1-flash', 'gemini-3-flash'],
-  },
-  {
-    category: 'Text-out models',
-    id: 'gemini-2.5-flash',
-    label: 'Gemini 2.5 Flash',
-    metricFamily: 'generate',
-    modelMatchers: ['gemini-2.5-flash'],
-  },
-]
 
 const metricFamilies = {
   generate: {
@@ -255,10 +211,31 @@ function buildTelemetryRow(definition, metricStore, now) {
     label: definition.label,
     lastRequestAt: resolveLastRequestAt([rpm.lastRequestAt, rpd.lastRequestAt, tpm.lastRequestAt]),
     metrics: {
-      rpm: rpm.metric,
-      rpd: rpd.metric,
-      tpm: tpm.metric,
+      rpm: applyCanonicalLimit(rpm.metric, definition.limits.rpm),
+      rpd: applyCanonicalLimit(rpd.metric, definition.limits.rpd),
+      tpm: applyCanonicalLimit(tpm.metric, definition.limits.tpm),
     },
+  }
+}
+
+function applyCanonicalLimit(metric, canonicalLimit) {
+  if (
+    typeof canonicalLimit !== 'number' ||
+    !Number.isFinite(canonicalLimit) ||
+    canonicalLimit <= 0
+  ) {
+    return buildEmptyMetric()
+  }
+
+  const current =
+    metric && typeof metric === 'object' && typeof metric.current === 'number' && Number.isFinite(metric.current)
+      ? metric.current
+      : 0
+
+  return {
+    current,
+    limit: canonicalLimit,
+    ratio: Math.max(0, Math.min(current / canonicalLimit, 1)),
   }
 }
 

@@ -897,7 +897,10 @@ function mergeTelemetryMetric(localMetric, googleMetric) {
     normalizeTelemetryMetricValue(localMetric?.current),
     normalizeTelemetryMetricValue(googleMetric?.current),
   )
-  const limitCandidate = firstFiniteTelemetryValue(googleMetric?.limit, localMetric?.limit)
+  // Keep the local limit table as the canonical max for each model. Google quota
+  // telemetry is still useful for live usage/current counts, but its reported
+  // limits can be broader than the per-model caps shown in the product UI.
+  const limitCandidate = firstFiniteTelemetryValue(localMetric?.limit, googleMetric?.limit)
 
   return {
     current: Number.isFinite(current) ? current : null,

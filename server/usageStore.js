@@ -1,6 +1,11 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  telemetryModelDefinitions,
+  telemetryModelIdByAlias,
+  telemetryModelsById,
+} from './telemetryModelCatalog.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -13,82 +18,6 @@ const minuteWindowMs = 60 * 1000
 const chartBucketCount = 8
 const chartBucketDurationMs = 5 * minuteWindowMs
 
-const telemetryModelDefinitions = [
-  {
-    category: 'Multi-modal generative models',
-    id: 'nano-banana-pro',
-    label: 'Nano Banana Pro (Gemini 3 Pro Image)',
-    modelAliases: ['gemini-3-pro'],
-    limits: {
-      rpm: 20,
-      rpd: 250,
-      tpm: 100000,
-    },
-  },
-  {
-    category: 'Multi-modal generative models',
-    id: 'veo-3-fast-generate',
-    label: 'Veo 3 Fast Generate',
-    modelAliases: ['veo-3.1-fast'],
-    limits: {
-      rpm: 2,
-      rpd: 10,
-      tpm: null,
-    },
-  },
-  {
-    category: 'Multi-modal generative models',
-    id: 'nano-banana-2',
-    label: 'Nano Banana 2 (Gemini 3.1 Flash Image)',
-    modelAliases: ['gemini-3-flash'],
-    limits: {
-      rpm: 100,
-      rpd: 1000,
-      tpm: 200000,
-    },
-  },
-  {
-    category: 'Multi-modal generative models',
-    id: 'nano-banana',
-    label: 'Nano Banana (Gemini 2.5 Flash Preview Image)',
-    modelAliases: ['gemini-2.5-flash-image'],
-    limits: {
-      rpm: 500,
-      rpd: 2000,
-      tpm: 500000,
-    },
-  },
-  {
-    category: 'Text-out models',
-    id: 'gemini-3-flash-text',
-    label: 'Gemini 3 Flash',
-    modelAliases: [],
-    limits: {
-      rpm: 1000,
-      rpd: 10000,
-      tpm: 1000000,
-    },
-  },
-  {
-    category: 'Text-out models',
-    id: 'gemini-2.5-flash-text',
-    label: 'Gemini 2.5 Flash',
-    modelAliases: [],
-    limits: {
-      rpm: 1000,
-      rpd: 10000,
-      tpm: 1000000,
-    },
-  },
-]
-
-const telemetryModelIdByAlias = {
-  'gemini-2.5-flash-image': 'nano-banana',
-  'gemini-3-flash': 'nano-banana-2',
-  'gemini-3-pro': 'nano-banana-pro',
-  'veo-3.1-fast': 'veo-3-fast-generate',
-}
-
 const requestCostByModel = {
   'gemini-2.5-flash-image': 0.0005,
   'gemini-3-flash': 0.0005,
@@ -97,10 +26,6 @@ const requestCostByModel = {
   'gemini-3-flash-text': 0.0003,
   'gemini-2.5-flash-text': 0.0003,
 }
-
-const telemetryModelsById = new Map(
-  telemetryModelDefinitions.map((definition) => [definition.id, definition]),
-)
 
 const dateKeyFormatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: pacificTimeZone,
