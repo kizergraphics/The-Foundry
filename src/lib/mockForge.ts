@@ -35,6 +35,11 @@ const modeAccents: Record<
     accentSoft: '#831843',
     label: 'Portrait Studio',
   },
+  'uv-lab': {
+    accent: '#fbbf24',
+    accentSoft: '#78350f',
+    label: 'UV Lab',
+  },
   visualizer: {
     accent: '#fbbf24',
     accentSoft: '#78350f',

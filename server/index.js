@@ -60,6 +60,7 @@ const supportedForgeModes = [
 ]
 const forgeBatchMaxAttemptsPerImage = 4
 const forgeBatchMaxParallelRequests = 4
+const forgeBatchRecoveryPasses = 2
 const forgeGenerationTimeoutMs = clampTimeoutMs(
   Number(process.env.FORGE_GENERATION_TIMEOUT_MS ?? 90000),
   90000,
@@ -80,6 +81,7 @@ const coreSystemRules = [
   'Never include text, logos, or watermarks in the image.',
   'Ensure all assets are centered and fit entirely within the frame.',
 ]
+const uvLabModelId = 'browser-uv-engine'
 
 const app = express()
 
@@ -92,11 +94,13 @@ app.get('/api/health', (_request, response) => {
       'action-animator': routeModelAllowlist['/api/action-animator'],
       'character-sheet': routeModelAllowlist['/api/character-sheet'],
       forge: routeModelAllowlist['/api/forge'],
+      'uv-lab': [uvLabModelId],
     },
     models: {
       'action-animator': routeModelDefaults['/api/action-animator'],
       'character-sheet': routeModelDefaults['/api/character-sheet'],
       forge: routeModelDefaults['/api/forge'],
+      'uv-lab': uvLabModelId,
     },
     keyConfigured: Boolean(apiKey),
   })
@@ -147,6 +151,7 @@ app.post('/api/forge', async (request, response) => {
     systemInstruction,
     seamRepair,
     seamlessMode,
+    textureSize,
     textureExpansion,
     workflow,
   } = request.body ?? {}
@@ -163,6 +168,7 @@ app.post('/api/forge', async (request, response) => {
         ? 'repair-seams'
         : 'generate'
   const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
+  const normalizedTextureSize = normalizeTextureLabOutputSize(textureSize)
 
   if (
     requestedWorkflow === 'generate' &&
@@ -266,6 +272,7 @@ app.post('/api/forge', async (request, response) => {
             hasSubjectReference: validReferences.some(
               (reference) => reference.slot === 'subject',
             ),
+            textureSize: normalizedTextureSize,
           })
     const resolvedSystemInstruction =
       requestedWorkflow === 'expand-texture'
@@ -281,8 +288,16 @@ app.post('/api/forge', async (request, response) => {
           : mode === 'texture-lab'
           ? resolveTextureGenerationSystemInstruction(systemInstruction, {
               seamlessMode: Boolean(seamlessMode),
+              textureSize: normalizedTextureSize,
             })
         : resolveSystemInstruction(systemInstruction)
+    const textureGenerationImageConfig =
+      requestedWorkflow === 'generate' && mode === 'texture-lab'
+        ? {
+            aspectRatio: '1:1',
+            imageSize: '1K',
+          }
+        : null
 
     if (requestedWorkflow === 'expand-texture') {
       const validExpansion = normalizeTextureExpansion(textureExpansion)
@@ -431,129 +446,193 @@ app.post('/api/forge', async (request, response) => {
     const successfulRuns = []
     const normalizedErrors = []
     const noImageTexts = []
+    const batchWorkerCount = Math.min(candidateCount, forgeBatchMaxParallelRequests)
+    const attemptBatchSlotGeneration = async ({
+      phase,
+      slotIndex,
+      workerLabel,
+    }) => {
+      const slotErrors = []
+      const slotNoImageTexts = []
+      const slotSuccessfulRuns = []
+
+      for (
+        let attempt = 1;
+        attempt <= forgeBatchMaxAttemptsPerImage;
+        attempt += 1
+      ) {
+        try {
+          const attemptStartedAt = Date.now()
+          const useModalities = attempt % 2 === 1
+          logServerEvent(batchRequestId, 'slot attempt started', {
+            attempt,
+            phase,
+            slot: slotIndex + 1,
+            useModalities,
+            worker: workerLabel,
+          })
+          const generation = await withTimeout(
+            ai.models.generateContent({
+              model: modelSelection.providerModel,
+              contents: baseContents,
+              config: useModalities
+                ? {
+                    candidateCount: 1,
+                    ...(textureGenerationImageConfig
+                      ? {
+                          imageConfig: textureGenerationImageConfig,
+                        }
+                      : {}),
+                    responseModalities: ['IMAGE', 'TEXT'],
+                    systemInstruction: resolvedSystemInstruction,
+                  }
+                : {
+                    candidateCount: 1,
+                    ...(textureGenerationImageConfig
+                      ? {
+                          imageConfig: textureGenerationImageConfig,
+                        }
+                      : {}),
+                    systemInstruction: resolvedSystemInstruction,
+                  },
+            }),
+            forgeGenerationTimeoutMs,
+            `Gemini image generation timed out after ${Math.round(
+              forgeGenerationTimeoutMs / 1000,
+            )} seconds.`,
+          )
+
+          slotSuccessfulRuns.push(generation)
+
+          const image = extractImages(generation).at(0)
+
+          if (image) {
+            logServerEvent(batchRequestId, 'slot attempt succeeded', {
+              attempt,
+              durationMs: Date.now() - attemptStartedAt,
+              phase,
+              slot: slotIndex + 1,
+              worker: workerLabel,
+            })
+            return {
+              fatalError: null,
+              image: {
+                image: {
+                  ...image,
+                  id: `batch-${slotIndex + 1}-${image.id}`,
+                },
+                slotIndex,
+              },
+              noImageTexts: slotNoImageTexts,
+              normalizedErrors: slotErrors,
+              successfulRuns: slotSuccessfulRuns,
+            }
+          }
+
+          if (generation.text) {
+            slotNoImageTexts.push(generation.text)
+          }
+          logServerEvent(batchRequestId, 'slot returned no image', {
+            attempt,
+            durationMs: Date.now() - attemptStartedAt,
+            phase,
+            slot: slotIndex + 1,
+            textPreview: generation.text?.slice(0, 120) ?? null,
+            worker: workerLabel,
+          })
+
+          if (attempt < forgeBatchMaxAttemptsPerImage) {
+            await sleep(forgeBatchInterRequestDelayMs)
+          }
+        } catch (requestError) {
+          const normalizedError = normalizeGeminiError(
+            requestError,
+            modelSelection.modelId,
+          )
+          slotErrors.push(normalizedError)
+          const isRetryable =
+            normalizedError.status === 429 || normalizedError.status >= 500
+
+          if (!isRetryable) {
+            logServerEvent(batchRequestId, 'slot failed with fatal error', {
+              attempt,
+              code: normalizedError.body?.error?.code ?? null,
+              message: normalizedError.body?.error?.message ?? null,
+              phase,
+              slot: slotIndex + 1,
+              status: normalizedError.status,
+              worker: workerLabel,
+            })
+            return {
+              fatalError: normalizedError,
+              image: null,
+              noImageTexts: slotNoImageTexts,
+              normalizedErrors: slotErrors,
+              successfulRuns: slotSuccessfulRuns,
+            }
+          }
+
+          const retryAfterSeconds =
+            normalizedError.body?.error?.retryAfterSeconds
+          const retryAfterDelay =
+            typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
+              ? retryAfterSeconds * 1000
+              : forgeBatchRetryDelayMs
+          logServerEvent(batchRequestId, 'slot attempt retrying', {
+            attempt,
+            code: normalizedError.body?.error?.code ?? null,
+            delayMs: retryAfterDelay,
+            message: normalizedError.body?.error?.message ?? null,
+            phase,
+            slot: slotIndex + 1,
+            status: normalizedError.status,
+            worker: workerLabel,
+          })
+          await sleep(retryAfterDelay)
+        }
+      }
+
+      return {
+        fatalError: null,
+        image: null,
+        noImageTexts: slotNoImageTexts,
+        normalizedErrors: slotErrors,
+        successfulRuns: slotSuccessfulRuns,
+      }
+    }
     const batchResults = await Promise.all(
       Array.from(
         {
-          length: Math.min(candidateCount, forgeBatchMaxParallelRequests),
+          length: batchWorkerCount,
         },
         async (_, workerIndex) => {
           const workerImages = []
+          const workerSuccessfulRuns = []
+          const workerErrors = []
+          const workerNoImageTexts = []
           let fatalError = null
 
           for (
             let slotIndex = workerIndex;
             slotIndex < candidateCount;
-            slotIndex += forgeBatchMaxParallelRequests
+            slotIndex += batchWorkerCount
           ) {
-            for (
-              let attempt = 1;
-              attempt <= forgeBatchMaxAttemptsPerImage;
-              attempt += 1
-            ) {
-              try {
-                const attemptStartedAt = Date.now()
-                const useModalities = attempt % 2 === 1
-                logServerEvent(batchRequestId, 'slot attempt started', {
-                  attempt,
-                  slot: slotIndex + 1,
-                  useModalities,
-                  worker: workerIndex + 1,
-                })
-                const generation = await withTimeout(
-                  ai.models.generateContent({
-                    model: modelSelection.providerModel,
-                    contents: baseContents,
-                    config: useModalities
-                      ? {
-                          candidateCount: 1,
-                          responseModalities: ['IMAGE', 'TEXT'],
-                          systemInstruction: resolvedSystemInstruction,
-                        }
-                      : {
-                          candidateCount: 1,
-                          systemInstruction: resolvedSystemInstruction,
-                        },
-                  }),
-                  forgeGenerationTimeoutMs,
-                  `Gemini image generation timed out after ${Math.round(
-                    forgeGenerationTimeoutMs / 1000,
-                  )} seconds.`,
-                )
+            const slotResult = await attemptBatchSlotGeneration({
+              phase: 'initial',
+              slotIndex,
+              workerLabel: workerIndex + 1,
+            })
 
-                successfulRuns.push(generation)
+            workerSuccessfulRuns.push(...slotResult.successfulRuns)
+            workerErrors.push(...slotResult.normalizedErrors)
+            workerNoImageTexts.push(...slotResult.noImageTexts)
 
-                const image = extractImages(generation).at(0)
+            if (slotResult.image) {
+              workerImages.push(slotResult.image)
+            }
 
-                if (image) {
-                  logServerEvent(batchRequestId, 'slot attempt succeeded', {
-                    attempt,
-                    durationMs: Date.now() - attemptStartedAt,
-                    slot: slotIndex + 1,
-                    worker: workerIndex + 1,
-                  })
-                  workerImages.push({
-                    image: {
-                      ...image,
-                      id: `batch-${slotIndex + 1}-${image.id}`,
-                    },
-                    slotIndex,
-                  })
-                  break
-                }
-
-                if (generation.text) {
-                  noImageTexts.push(generation.text)
-                }
-                logServerEvent(batchRequestId, 'slot returned no image', {
-                  attempt,
-                  durationMs: Date.now() - attemptStartedAt,
-                  slot: slotIndex + 1,
-                  textPreview: generation.text?.slice(0, 120) ?? null,
-                  worker: workerIndex + 1,
-                })
-
-                if (attempt < forgeBatchMaxAttemptsPerImage) {
-                  await sleep(forgeBatchInterRequestDelayMs)
-                }
-              } catch (requestError) {
-                const normalizedError = normalizeGeminiError(
-                  requestError,
-                  modelSelection.modelId,
-                )
-                normalizedErrors.push(normalizedError)
-                const isRetryable =
-                  normalizedError.status === 429 || normalizedError.status >= 500
-
-                if (!isRetryable) {
-                  logServerEvent(batchRequestId, 'slot failed with fatal error', {
-                    attempt,
-                    code: normalizedError.body?.error?.code ?? null,
-                    message: normalizedError.body?.error?.message ?? null,
-                    slot: slotIndex + 1,
-                    status: normalizedError.status,
-                    worker: workerIndex + 1,
-                  })
-                  fatalError = normalizedError
-                  break
-                }
-
-                const retryAfterSeconds =
-                  normalizedError.body?.error?.retryAfterSeconds
-                const retryAfterDelay =
-                  typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
-                    ? retryAfterSeconds * 1000
-                    : forgeBatchRetryDelayMs
-                logServerEvent(batchRequestId, 'slot attempt retrying', {
-                  attempt,
-                  code: normalizedError.body?.error?.code ?? null,
-                  delayMs: retryAfterDelay,
-                  message: normalizedError.body?.error?.message ?? null,
-                  slot: slotIndex + 1,
-                  status: normalizedError.status,
-                  worker: workerIndex + 1,
-                })
-                await sleep(retryAfterDelay)
-              }
+            if (slotResult.fatalError) {
+              fatalError = slotResult.fatalError
             }
 
             if (fatalError) {
@@ -563,18 +642,79 @@ app.post('/api/forge', async (request, response) => {
 
           return {
             fatalError,
+            normalizedErrors: workerErrors,
+            noImageTexts: workerNoImageTexts,
+            successfulRuns: workerSuccessfulRuns,
             workerImages,
           }
         },
       ),
     )
-    const images = batchResults
-      .flatMap((result) => result.workerImages)
-      .sort((left, right) => left.slotIndex - right.slotIndex)
-      .map((entry) => entry.image)
+    batchResults.forEach((result) => {
+      successfulRuns.push(...result.successfulRuns)
+      normalizedErrors.push(...result.normalizedErrors)
+      noImageTexts.push(...result.noImageTexts)
+    })
+    const imagesBySlot = new Map(
+      batchResults
+        .flatMap((result) => result.workerImages)
+        .map((entry) => [entry.slotIndex, entry.image]),
+    )
     const fatalErrors = batchResults
       .map((result) => result.fatalError)
       .filter(Boolean)
+
+    if (fatalErrors.length === 0 && imagesBySlot.size < candidateCount) {
+      let missingSlotIndexes = Array.from(
+        { length: candidateCount },
+        (_, slotIndex) => slotIndex,
+      ).filter((slotIndex) => !imagesBySlot.has(slotIndex))
+
+      for (
+        let recoveryPass = 1;
+        recoveryPass <= forgeBatchRecoveryPasses && missingSlotIndexes.length > 0;
+        recoveryPass += 1
+      ) {
+        logServerEvent(batchRequestId, 'batch recovery pass started', {
+          missingSlots: missingSlotIndexes.map((slotIndex) => slotIndex + 1),
+          recoveryPass,
+        })
+
+        for (const slotIndex of missingSlotIndexes) {
+          const slotResult = await attemptBatchSlotGeneration({
+            phase: `recovery-${recoveryPass}`,
+            slotIndex,
+            workerLabel: `recovery-${recoveryPass}`,
+          })
+
+          successfulRuns.push(...slotResult.successfulRuns)
+          normalizedErrors.push(...slotResult.normalizedErrors)
+          noImageTexts.push(...slotResult.noImageTexts)
+
+          if (slotResult.image) {
+            imagesBySlot.set(slotIndex, slotResult.image.image)
+          }
+
+          if (slotResult.fatalError) {
+            fatalErrors.push(slotResult.fatalError)
+            break
+          }
+        }
+
+        if (fatalErrors.length > 0) {
+          break
+        }
+
+        missingSlotIndexes = Array.from(
+          { length: candidateCount },
+          (_, slotIndex) => slotIndex,
+        ).filter((slotIndex) => !imagesBySlot.has(slotIndex))
+      }
+    }
+
+    const images = Array.from(imagesBySlot.entries())
+      .sort((left, right) => left[0] - right[0])
+      .map((entry) => entry[1])
 
     if (images.length === 0) {
       if (fatalErrors.length > 0) {
@@ -610,6 +750,30 @@ app.post('/api/forge', async (request, response) => {
       response
         .status(422)
         .json(buildNoImageResponseError('/api/forge', modelSelection, fallbackText))
+      return
+    }
+
+    if (images.length < candidateCount) {
+      const preferredError =
+        fatalErrors.find((error) => error.status === 429) ?? fatalErrors[0] ?? null
+      const fallbackText = noImageTexts[0] ?? successfulRuns[0]?.text
+      logServerEvent(batchRequestId, 'batch finished incomplete', {
+        durationMs: Date.now() - batchStartedAt,
+        imageCount: images.length,
+        requestedCount: candidateCount,
+        status: preferredError?.status ?? null,
+        textPreview: fallbackText?.slice(0, 120) ?? null,
+      })
+      response
+        .status(preferredError?.status ?? 502)
+        .json(
+          buildIncompleteBatchResponseError({
+            candidateCount,
+            imageCount: images.length,
+            modelSelection,
+            preferredError,
+          }),
+        )
       return
     }
 
@@ -1032,9 +1196,17 @@ if (process.env.NODE_ENV === 'production') {
   })
 }
 
-app.listen(port, () => {
-  console.log(`Kizer Forge API listening on http://localhost:${port}`)
-})
+export { app }
+
+export function startServer() {
+  return app.listen(port, () => {
+    console.log(`Kizer Forge API listening on http://localhost:${port}`)
+  })
+}
+
+if (process.env.NODE_ENV !== 'test') {
+  startServer()
+}
 
 async function buildForgePromptWithBestPractices({
   ai,
@@ -1044,10 +1216,12 @@ async function buildForgePromptWithBestPractices({
   styleText,
   hasStyleReference,
   hasSubjectReference,
+  textureSize,
 }) {
   const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
   const normalizedStyleText =
     typeof styleText === 'string' ? styleText.trim() : ''
+  const normalizedTextureSize = normalizeTextureLabOutputSize(textureSize)
 
   if (!normalizedPrompt) {
     return ''
@@ -1057,6 +1231,7 @@ async function buildForgePromptWithBestPractices({
     return buildSemanticTilingPrompt({
       prompt: normalizedPrompt,
       styleText: normalizedStyleText,
+      textureSize: normalizedTextureSize,
     })
   }
 
@@ -1070,12 +1245,15 @@ async function buildForgePromptWithBestPractices({
       styleText: normalizedStyleText,
       hasStyleReference,
       hasSubjectReference,
+      textureSize: normalizedTextureSize,
     })
   }
 
   const modeTask =
     mode === 'texture-lab'
-      ? 'Build a seamless, tile-safe texture prompt for production use.'
+      ? seamlessMode
+        ? 'Build a seamless, tile-safe texture prompt for production use.'
+        : 'Build a square production texture prompt for material generation.'
       : mode === 'visualizer'
         ? 'Build a cinematic concept-visualization prompt for high-end presentation.'
         : 'Build a production-ready game asset prompt with strong silhouette clarity.'
@@ -1091,6 +1269,9 @@ async function buildForgePromptWithBestPractices({
       : null,
     hasSubjectReference
       ? 'A subject image reference is attached; preserve structure and identity.'
+      : null,
+    mode === 'texture-lab'
+      ? `Delivery target: ${normalizedTextureSize} x ${normalizedTextureSize} square texture.`
       : null,
   ]
     .filter(Boolean)
@@ -1149,6 +1330,7 @@ async function buildForgePromptWithBestPractices({
     styleText: normalizedStyleText,
     hasStyleReference,
     hasSubjectReference,
+    textureSize: normalizedTextureSize,
   })
 }
 
@@ -1159,14 +1341,21 @@ function buildForgePromptFallback({
   styleText,
   hasStyleReference,
   hasSubjectReference,
+  textureSize,
 }) {
+  const normalizedTextureSize = normalizeTextureLabOutputSize(textureSize)
+
   if (mode === 'texture-lab' && seamlessMode) {
-    return buildSemanticTilingPrompt({ prompt, styleText })
+    return buildSemanticTilingPrompt({
+      prompt,
+      styleText,
+      textureSize: normalizedTextureSize,
+    })
   }
 
   const modeBestPractices =
     mode === 'texture-lab'
-      ? 'seamless tile-safe structure, flat lighting, controlled surface scale'
+      ? `${seamlessMode ? 'seamless tile-safe structure' : 'square top-down material read'}, flat lighting, controlled surface scale, ${normalizedTextureSize} x ${normalizedTextureSize} square delivery`
       : mode === 'visualizer'
         ? 'cinematic composition, clear focal hierarchy, premium lighting control'
         : 'clean silhouette readability, material clarity, game-ready presentation'
@@ -1187,17 +1376,18 @@ function buildForgePromptFallback({
   ].join('\n')
 }
 
-function buildSemanticTilingPrompt({ prompt, styleText }) {
+function buildSemanticTilingPrompt({ prompt, styleText, textureSize }) {
   const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
   const normalizedStyleText =
     typeof styleText === 'string' && styleText.trim()
       ? styleText.trim()
       : 'neutral production texture'
+  const normalizedTextureSize = normalizeTextureLabOutputSize(textureSize)
 
   return (
     `Create a seamless repeating pattern of ${normalizedPrompt}. ` +
     'Ensure smooth transitions at the edges for flawless tiling. ' +
-    `Style: ${normalizedStyleText}, high resolution, perfectly tileable horizontal and vertical edges, balanced composition. ` +
+    `Style: ${normalizedStyleText}, final delivery ${normalizedTextureSize} x ${normalizedTextureSize}, high resolution, perfectly tileable horizontal and vertical edges, balanced composition. ` +
     'Seamless repeating texture, tileable edges.'
   )
 }
@@ -1401,11 +1591,16 @@ function resolveSeamRepairSystemInstruction(customInstruction) {
     .join('\n')
 }
 
-function resolveTextureGenerationSystemInstruction(customInstruction, { seamlessMode }) {
+function resolveTextureGenerationSystemInstruction(
+  customInstruction,
+  { seamlessMode, textureSize },
+) {
+  const normalizedTextureSize = normalizeTextureLabOutputSize(textureSize)
   const textureRules = [
     'This request is a full-frame material texture generation task.',
     'Fill the image edge to edge with texture detail. Do not create a backdrop or empty border.',
     'Keep the view top-down and lighting flat and production-safe.',
+    `Deliver a square texture intended for ${normalizedTextureSize} x ${normalizedTextureSize} output.`,
     seamlessMode
       ? 'The result must tile seamlessly on both the horizontal and vertical edges.'
       : null,
@@ -1414,6 +1609,10 @@ function resolveTextureGenerationSystemInstruction(customInstruction, { seamless
   return [coreSystemRules.slice(1).join('\n'), textureRules.join('\n'), customInstruction]
     .filter((value) => typeof value === 'string' && value.trim())
     .join('\n')
+}
+
+function normalizeTextureLabOutputSize(value) {
+  return Number(value) <= 512 ? 512 : 1024
 }
 
 async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
@@ -1652,6 +1851,35 @@ function buildNoImageResponseError(routeKey, modelSelection, generationText) {
           ? 'The selected model did not return image parts for this tab. Switch to a supported image-capable model and try again.'
           : 'The selected model returned no image candidates for this request. Try a different model or revise the prompt.',
       title: 'No Image Output Returned',
+    },
+  }
+}
+
+function buildIncompleteBatchResponseError({
+  candidateCount,
+  imageCount,
+  modelSelection,
+  preferredError,
+}) {
+  const details = [
+    `Requested images: ${candidateCount}`,
+    `Completed images: ${imageCount}`,
+    `Selected model alias: ${modelSelection.modelId}`,
+    `Provider model: ${modelSelection.providerModel}`,
+    'Try the request again. If this keeps happening, reduce the batch count.',
+  ]
+
+  if (preferredError?.body?.error?.message) {
+    details.push(`Last upstream error: ${preferredError.body.error.message}`)
+  }
+
+  return {
+    error: {
+      code: 'batch_incomplete',
+      details,
+      message:
+        'Gemini did not return the full requested image batch for this forge run. Try again or reduce the batch count.',
+      title: 'Incomplete Image Batch',
     },
   }
 }

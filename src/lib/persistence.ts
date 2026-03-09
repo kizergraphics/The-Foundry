@@ -7,8 +7,15 @@ import type {
   LootLevelerRarity,
   TextureExpansionTargetSize,
   TextureLabWorkflow,
+  UvLabAtlasSize,
 } from './forge'
-import { clampActionAnimatorFps, clampFrameCount } from './forge'
+import {
+  clampActionAnimatorFps,
+  clampFrameCount,
+  clampTextureLabOutputSize,
+  clampUvAtlasSize,
+  clampUvPaddingPx,
+} from './forge'
 
 type StoredActionAnimatorSettings = {
   actionType: ActionAnimatorActionType
@@ -46,6 +53,10 @@ type StoredSettings = {
     seamlessMode: boolean
     workflow: TextureLabWorkflow
   }
+  uvLab: {
+    atlasSize: UvLabAtlasSize
+    paddingPx: number
+  }
   vfxForge: {
     frameCount: number
     intensity: number
@@ -55,6 +66,7 @@ type StoredSettings = {
 }
 
 type StoredSession = {
+  mode: ForgeMode | null
   results: ForgeResult[]
   serverModel: string | null
   serverPrompt: string | null
@@ -97,6 +109,7 @@ export function loadStoredState(): StoredState | null {
           parsed.settings?.activeMode === 'loot-leveler' ||
           parsed.settings?.activeMode === 'portrait-studio' ||
           parsed.settings?.activeMode === 'texture-lab' ||
+          parsed.settings?.activeMode === 'uv-lab' ||
           parsed.settings?.activeMode === 'vfx-forge' ||
           parsed.settings?.activeMode === 'visualizer' ||
           parsed.settings?.activeMode === 'character-sheet' ||
@@ -173,13 +186,18 @@ export function loadStoredState(): StoredState | null {
         prompt:
           typeof parsed.settings?.prompt === 'string' ? parsed.settings.prompt : '',
         textureLab: {
-          expansionTargetSize:
-            parsed.settings?.textureLab?.expansionTargetSize === 2048 ? 2048 : 1024,
+          expansionTargetSize: clampTextureLabOutputSize(
+            parsed.settings?.textureLab?.expansionTargetSize ?? 1024,
+          ),
           seamlessMode: Boolean(parsed.settings?.textureLab?.seamlessMode),
           workflow:
             parsed.settings?.textureLab?.workflow === 'expand'
               ? 'expand'
               : 'generate',
+        },
+        uvLab: {
+          atlasSize: clampUvAtlasSize(parsed.settings?.uvLab?.atlasSize ?? 2048),
+          paddingPx: clampUvPaddingPx(parsed.settings?.uvLab?.paddingPx ?? 8),
         },
         vfxForge: {
           frameCount:
@@ -206,12 +224,23 @@ export function loadStoredState(): StoredState | null {
       session:
         parsed.session &&
         Array.isArray(parsed.session.results) &&
+        (parsed.session.mode === null ||
+          parsed.session.mode === 'action-animator' ||
+          parsed.session.mode === 'loot-leveler' ||
+          parsed.session.mode === 'portrait-studio' ||
+          parsed.session.mode === 'texture-lab' ||
+          parsed.session.mode === 'uv-lab' ||
+          parsed.session.mode === 'vfx-forge' ||
+          parsed.session.mode === 'visualizer' ||
+          parsed.session.mode === 'character-sheet' ||
+          parsed.session.mode === 'armory') &&
         (parsed.session.serverModel === null ||
           typeof parsed.session.serverModel === 'string') &&
         (parsed.session.serverPrompt === null ||
           typeof parsed.session.serverPrompt === 'string') &&
         typeof parsed.session.savedAt === 'string'
           ? {
+              mode: parsed.session.mode ?? null,
               results: parsed.session.results.filter(isStoredResult),
               serverModel: parsed.session.serverModel,
               serverPrompt: parsed.session.serverPrompt,

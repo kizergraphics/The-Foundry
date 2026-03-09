@@ -165,6 +165,43 @@ export async function buildTiledPreviewDataUrl(
   return canvas.toDataURL('image/png')
 }
 
+export async function normalizeSquareTextureDataUrl(
+  source: string | Blob,
+  targetSize: number,
+): Promise<string> {
+  const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
+  const image = await loadImage(blob)
+  const canvas = document.createElement('canvas')
+  canvas.width = targetSize
+  canvas.height = targetSize
+
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  const cropSize = Math.min(image.naturalWidth, image.naturalHeight)
+  const sourceX = Math.max(0, Math.round((image.naturalWidth - cropSize) / 2))
+  const sourceY = Math.max(0, Math.round((image.naturalHeight - cropSize) / 2))
+
+  context.clearRect(0, 0, targetSize, targetSize)
+  context.imageSmoothingEnabled = true
+  context.drawImage(
+    image,
+    sourceX,
+    sourceY,
+    cropSize,
+    cropSize,
+    0,
+    0,
+    targetSize,
+    targetSize,
+  )
+
+  return canvas.toDataURL('image/png')
+}
+
 export async function copyResultToClipboard(result: ForgeResult): Promise<void> {
   if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
     throw new Error('Image clipboard copy is not supported in this browser.')

@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useState } from 'react'
+import { lazy, Suspense, useEffect, useEffectEvent, useReducer, useState } from 'react'
 import {
   AlertCircle,
   Box,
@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 
 import { ImageUploadField } from './components/ImageUploadField'
+import { ModelUploadField } from './components/ModelUploadField'
 import { GeneratedResultCard, PlaceholderCard } from './components/ResultCards'
 import {
   actionAnimatorActionOptions,
@@ -40,6 +41,7 @@ import {
   downloadDataUrl,
   downloadResult,
   fileToBase64,
+  normalizeSquareTextureDataUrl,
   sliceSpriteSheetFramesByContent,
   slicePortraitStudioFaces,
   sliceSpriteSheetFrames,
@@ -64,18 +66,38 @@ import type {
   ForgeResult,
   ForgeStatus,
   LootLevelerRarity,
+  ModelAsset,
   ModeDefinition,
   ReferenceAsset,
   ReferenceSlot,
   TextureExpansionTargetSize,
   TextureLabWorkflow,
+  UvLabAtlasSize,
 } from './lib/forge'
+import type { UvJobStatusResponse } from './lib/uvLab'
+import {
+  formatTriangleCount,
+  formatUvStep,
+  isTerminalUvJobStatus,
+  revokeUvJobArtifacts,
+  type UvEngineState as LocalUvEngineState,
+} from './lib/uvLab'
+import {
+  getBrowserUvEngineId,
+  primeUvEngine,
+  runLocalUvJob,
+} from './lib/uvEngine'
 
 type ServiceHealth = {
   availableModels?: Record<string, string[]>
   keyConfigured: boolean
   models: Record<string, string>
   ok: boolean
+}
+
+type UvEngineStatus = {
+  message: string | null
+  state: LocalUvEngineState
 }
 
 type ForgeBriefItem = {
@@ -138,6 +160,7 @@ type TextureLabRunContext = {
   prompt: string
   seamlessMode: boolean
   styleText: string
+  targetSize: TextureExpansionTargetSize
   workflow: 'expand' | 'generate'
 }
 
@@ -156,7 +179,9 @@ type TelemetryWindowState = {
 
 const telemetryWindowStorageKey = 'kizer-forge-telemetry-window'
 const telemetryWindowDurationMs = 24 * 60 * 60 * 1000
+const UvLabWorkspace = lazy(() => import('./components/UvLabWorkspace'))
 const MODEL_LABELS = {
+  'browser-uv-engine': 'Built-in UV Engine',
   'gemini-2.5-flash-image': 'Gemini 2.5 Flash Image',
   'gemini-3-flash': 'Gemini 3.1 Flash',
   'gemini-3-pro': 'Gemini 3 Pro Image',
@@ -165,6 +190,7 @@ const MODEL_LABELS = {
 type ModelId = keyof typeof MODEL_LABELS
 
 const TELEMETRY_ROW_BY_MODEL_ID: Record<ModelId, string> = {
+  'browser-uv-engine': 'browser-uv-engine',
   'gemini-2.5-flash-image': 'nano-banana',
   'gemini-3-flash': 'nano-banana-2',
   'gemini-3-pro': 'nano-banana-pro',
@@ -179,6 +205,7 @@ const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
   'loot-leveler': 'gemini-3-pro',
   'portrait-studio': 'gemini-3-pro',
   'texture-lab': 'gemini-3-flash',
+  'uv-lab': 'browser-uv-engine',
   'vfx-forge': 'gemini-3-flash',
   visualizer: 'gemini-3-flash',
 }
@@ -190,6 +217,7 @@ const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
   'loot-leveler': ['gemini-3-pro'],
   'portrait-studio': ['gemini-3-pro'],
   'texture-lab': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
+  'uv-lab': ['browser-uv-engine'],
   'vfx-forge': ['gemini-3-flash'],
   visualizer: ['gemini-3-flash', 'gemini-2.5-flash-image'],
 }
@@ -270,6 +298,12 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null)
   const [serverPrompt, setServerPrompt] = useState<string | null>(null)
   const [serverModel, setServerModel] = useState<string | null>(null)
+  const [uvJob, setUvJob] = useState<UvJobStatusResponse | null>(null)
+  const [uvEngineStatus, setUvEngineStatus] = useState<UvEngineStatus>({
+    message: 'UV engine has not been loaded yet.',
+    state: 'idle',
+  })
+  const [uvUploadError, setUvUploadError] = useState<string | null>(null)
   const [recentPrompts, setRecentPrompts] = useState<string[]>([])
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null)
   const [lastCharacterSheetResult, setLastCharacterSheetResult] =
@@ -305,6 +339,7 @@ function App() {
   const isLootLevelerMode = state.activeMode === 'loot-leveler'
   const isPortraitStudioMode = state.activeMode === 'portrait-studio'
   const isTextureLabMode = state.activeMode === 'texture-lab'
+  const isUvLabMode = state.activeMode === 'uv-lab'
   const isTextureExpansionMode =
     isTextureLabMode && state.textureLab.workflow === 'expand'
   const isTextureGenerateMode =
@@ -322,6 +357,8 @@ function App() {
         ? Number(Boolean(state.lootLeveler.baseAsset))
         : isPortraitStudioMode
           ? Number(Boolean(state.portraitStudio.heroImage))
+          : isUvLabMode
+            ? Number(Boolean(state.uvLab.mesh))
           : isTextureExpansionMode
             ? Number(Boolean(state.textureLab.expansionSource))
             : isVfxForgeMode
@@ -336,10 +373,15 @@ function App() {
         ? buildLootLevelerPromptPreview(state.lootLeveler.rarity)
         : isPortraitStudioMode
           ? buildPortraitStudioPromptPreview(state.portraitStudio.prompt)
+          : isUvLabMode
+            ? 'Automatic UV unwrap, packing, atlas export, and downloadable processed mesh.'
           : isTextureExpansionMode
             ? state.prompt.trim() || defaultTextureExpansionPrompt
-            : isTextureGenerateMode && state.textureLab.seamlessMode
-              ? buildSeamlessPromptPreview(state.prompt, activeStyleInput)
+            : isTextureGenerateMode
+              ? buildTextureLabPromptPreview(state.prompt, activeStyleInput, {
+                  seamlessMode: state.textureLab.seamlessMode,
+                  targetSize: state.textureLab.expansionTargetSize,
+                })
               : isVfxForgeMode
                 ? buildVfxForgePromptPreview(
                     state.vfxForge.projectileType,
@@ -358,6 +400,10 @@ function App() {
         ? buildLootLevelerPromptPreview(state.lootLeveler.rarity)
         : isPortraitStudioMode
           ? state.portraitStudio.prompt
+          : isUvLabMode
+            ? state.uvLab.mesh
+              ? `Source mesh: ${state.uvLab.mesh.name}. ${promptPreview}`
+              : promptPreview
           : isVfxForgeMode
             ? buildVfxForgePromptPreview(
                 state.vfxForge.projectileType,
@@ -380,6 +426,8 @@ function App() {
         ? Boolean(state.lootLeveler.baseAsset)
         : isPortraitStudioMode
           ? Boolean(state.portraitStudio.heroImage)
+          : isUvLabMode
+            ? Boolean(state.uvLab.mesh)
           : isTextureExpansionMode
             ? Boolean(state.textureLab.expansionSource)
             : isVfxForgeMode
@@ -393,6 +441,7 @@ function App() {
     isLootLevelerMode ||
     isPortraitStudioMode ||
     isTextureExpansionMode ||
+    isUvLabMode ||
     isVfxForgeMode
   const activeGenerationCount =
     isSingleResultMode ? 1 : state.generationCount
@@ -405,11 +454,15 @@ function App() {
   const briefItems = isCharacterSheetMode
     ? buildCharacterSheetBriefItems(state)
     : isActionAnimatorMode
-      ? buildActionAnimatorBriefItems(state)
+        ? buildActionAnimatorBriefItems(state)
       : isLootLevelerMode
         ? buildLootLevelerBriefItems(state)
         : isPortraitStudioMode
           ? buildPortraitStudioBriefItems(state)
+          : isUvLabMode
+            ? buildUvLabBriefItems(state)
+          : isTextureGenerateMode
+            ? buildTextureLabGenerateBriefItems(state)
           : isTextureExpansionMode
             ? buildTextureExpansionBriefItems(state)
             : isVfxForgeMode
@@ -423,17 +476,10 @@ function App() {
                     label: 'Subject Ref',
                     value: state.references.subject?.name ?? 'Not attached',
                   },
-                  ...(isTextureGenerateMode
-                    ? [
-                        {
-                          label: 'Seamless',
-                          value: state.textureLab.seamlessMode ? 'Enabled' : 'Disabled',
-                        },
-                      ]
-                    : []),
                 ]
   const modeAvailableModels = availableModelsByMode[state.activeMode]
-  const selectedModelSupported = modeAvailableModels.includes(activeModel)
+  const selectedModelSupported =
+    isUvLabMode || modeAvailableModels.includes(activeModel)
   const selectedTelemetryModel = effectiveModel
   const highlightedTelemetryRowId =
     TELEMETRY_ROW_BY_MODEL_ID[selectedTelemetryModel ?? activeModel] ?? null
@@ -576,14 +622,23 @@ function App() {
         type: 'set-texture-lab-seamless-mode',
         enabled: storedState.settings.textureLab.seamlessMode,
       })
+      dispatch({
+        type: 'set-uv-lab-atlas-size',
+        size: storedState.settings.uvLab.atlasSize,
+      })
+      dispatch({
+        type: 'set-uv-lab-padding-px',
+        paddingPx: storedState.settings.uvLab.paddingPx,
+      })
       setRecentPrompts(storedState.recentPrompts)
       setResults(storedState.session?.results ?? [])
       setServerModel(storedState.session?.serverModel ?? null)
       setServerPrompt(storedState.session?.serverPrompt ?? null)
       setLastSavedAt(storedState.session?.savedAt ?? null)
       if (storedState.session?.results?.length) {
-        setLastResultMode(storedState.settings.activeMode)
-        if (storedState.settings.activeMode === 'character-sheet') {
+        const restoredSessionMode = storedState.session.mode ?? null
+        setLastResultMode(restoredSessionMode)
+        if (restoredSessionMode === 'character-sheet') {
           setLastCharacterSheetResult(storedState.session.results[0] ?? null)
         }
         setStatus('success')
@@ -619,6 +674,52 @@ function App() {
 
     setActiveModel(nextModel)
   }, [modelOverridesByMode, state.activeMode])
+
+  const warmUvEngine = useEffectEvent(async () => {
+    setUvEngineStatus((previousStatus) =>
+      previousStatus.state === 'ready' || previousStatus.state === 'loading'
+        ? previousStatus
+        : {
+            message: 'Loading xatlas and the local format converter.',
+            state: 'loading',
+          },
+    )
+
+    try {
+      await primeUvEngine((step, detail) => {
+        setUvEngineStatus({
+          message: detail ?? formatUvStep(step),
+          state: 'loading',
+        })
+      })
+      setUvEngineStatus({
+        message: 'Ready. UV Lab runs entirely in this browser session.',
+        state: 'ready',
+      })
+    } catch (engineError) {
+      setUvEngineStatus({
+        message:
+          engineError instanceof Error
+            ? engineError.message
+            : 'The in-browser UV engine failed to load.',
+        state: 'error',
+      })
+    }
+  })
+
+  useEffect(() => {
+    if (!isUvLabMode || uvEngineStatus.state !== 'idle') {
+      return
+    }
+
+    void warmUvEngine()
+  }, [isUvLabMode, uvEngineStatus.state])
+
+  useEffect(() => {
+    return () => {
+      revokeUvJobArtifacts(uvJob)
+    }
+  }, [uvJob])
 
   function registerSuccessfulApiCall(modelName?: string | null) {
     const telemetryKey =
@@ -726,6 +827,10 @@ function App() {
           seamlessMode: state.textureLab.seamlessMode,
           workflow: state.textureLab.workflow,
         },
+        uvLab: {
+          atlasSize: state.uvLab.atlasSize,
+          paddingPx: state.uvLab.paddingPx,
+        },
         vfxForge: {
           frameCount: state.vfxForge.frameCount,
           intensity: state.vfxForge.intensity,
@@ -736,6 +841,7 @@ function App() {
       session:
         results.length > 0
           ? {
+              mode: lastResultMode,
               results,
               serverModel,
               serverPrompt,
@@ -767,10 +873,13 @@ function App() {
     state.textureLab.expansionTargetSize,
     state.textureLab.seamlessMode,
     state.textureLab.workflow,
+    state.uvLab.atlasSize,
+    state.uvLab.paddingPx,
     state.vfxForge.frameCount,
     state.vfxForge.intensity,
     state.vfxForge.prompt,
     state.vfxForge.projectileType,
+    lastResultMode,
   ])
 
   function finalizeForgeRun(
@@ -818,6 +927,28 @@ function App() {
     }
   }
 
+  async function normalizeTextureLabResults(
+    nextResults: ForgeResult[],
+    targetSize: TextureExpansionTargetSize,
+  ) {
+    return Promise.all(
+      nextResults.map(async (entry) => {
+        try {
+          return {
+            ...entry,
+            dataUrl: await normalizeSquareTextureDataUrl(
+              entry.dataUrl,
+              targetSize,
+            ),
+            mimeType: 'image/png',
+          }
+        } catch {
+          return entry
+        }
+      }),
+    )
+  }
+
   async function handleForge() {
     if (!isReadyForApi || isForging) {
       return
@@ -844,8 +975,69 @@ function App() {
     setNotice(null)
     setResults([])
     setServerPrompt(null)
+    if (isUvLabMode) {
+      setUvJob(null)
+    }
 
     try {
+      if (isUvLabMode) {
+        const meshAsset = state.uvLab.mesh
+
+        if (!meshAsset) {
+          throw new Error('Attach an OBJ or FBX mesh before running UV Lab.')
+        }
+
+        const localJobId = `local-${crypto.randomUUID()}`
+        setUvJob({
+          artifacts: null,
+          error: null,
+          id: localJobId,
+          stats: null,
+          status: 'running',
+          step: 'importing',
+        })
+        setServerModel(getBrowserUvEngineId())
+        setServerPrompt('Automatic UV unwrap and packing.')
+        setNotice('Preparing the in-browser UV engine.')
+        setLastResultMode(null)
+
+        const payload = await runLocalUvJob({
+          asset: meshAsset,
+          atlasSize: state.uvLab.atlasSize,
+          onProgress: (step, detail) => {
+            setUvJob((previousJob) => ({
+              artifacts: previousJob?.artifacts ?? null,
+              error: null,
+              id: localJobId,
+              stats: previousJob?.stats ?? null,
+              status: 'running',
+              step,
+            }))
+            setStatus('loading')
+            setError(null)
+            setNotice(detail ?? formatUvStep(step))
+            setUvEngineStatus({
+              message: detail ?? formatUvStep(step),
+              state: 'loading',
+            })
+          },
+          paddingPx: state.uvLab.paddingPx,
+        })
+        setUvJob({
+          ...payload,
+          id: localJobId,
+        })
+        setStatus('success')
+        setError(null)
+        setNotice('UV unwrap completed. Atlas and mesh artifacts are ready.')
+        setLastSavedAt(new Date().toISOString())
+        setUvEngineStatus({
+          message: 'Ready. UV Lab runs entirely in this browser session.',
+          state: 'ready',
+        })
+        return
+      }
+
       if (isActionAnimatorMode) {
         const payload = await generateActionAnimator({
           modelId: activeModel,
@@ -1047,13 +1239,18 @@ function App() {
           throw toForgeError(payload?.error)
         }
 
-        finalizeForgeRun(
+        const normalizedResults = await normalizeTextureLabResults(
           payload.images.map((image) => ({
             dataUrl: createDataUrl(image.data, image.mimeType),
             id: image.id,
             mimeType: image.mimeType,
             text: image.text,
           })),
+          state.textureLab.expansionTargetSize,
+        )
+
+        finalizeForgeRun(
+          normalizedResults,
           payload.model ?? null,
           payload.prompt ?? promptPreview,
           'Texture expansion completed with a centered outpaint pass.',
@@ -1062,6 +1259,7 @@ function App() {
               prompt: state.prompt.trim(),
               seamlessMode: state.textureLab.seamlessMode,
               styleText: activeStyleInput.trim(),
+              targetSize: state.textureLab.expansionTargetSize,
               workflow: 'expand',
             },
             telemetryModel: payload.model,
@@ -1140,6 +1338,9 @@ function App() {
           references,
           seamlessMode: isTextureGenerateMode && state.textureLab.seamlessMode,
           styleText: activeStyleInput.trim(),
+          textureSize: isTextureGenerateMode
+            ? state.textureLab.expansionTargetSize
+            : undefined,
         }),
       })
 
@@ -1149,13 +1350,26 @@ function App() {
         throw toForgeError(payload?.error)
       }
 
+      const finalizedResults =
+        isTextureLabMode && isTextureGenerateMode
+          ? await normalizeTextureLabResults(
+              payload.images.map((image) => ({
+                dataUrl: createDataUrl(image.data, image.mimeType),
+                id: image.id,
+                mimeType: image.mimeType,
+                text: image.text,
+              })),
+              state.textureLab.expansionTargetSize,
+            )
+          : payload.images.map((image) => ({
+              dataUrl: createDataUrl(image.data, image.mimeType),
+              id: image.id,
+              mimeType: image.mimeType,
+              text: image.text,
+            }))
+
       finalizeForgeRun(
-        payload.images.map((image) => ({
-          dataUrl: createDataUrl(image.data, image.mimeType),
-          id: image.id,
-          mimeType: image.mimeType,
-          text: image.text,
-        })),
+        finalizedResults,
         payload.model ?? null,
         activePromptValue.trim(),
         `Forge pass completed with ${payload.images.length} candidate outputs.`,
@@ -1165,6 +1379,7 @@ function App() {
                 prompt: state.prompt.trim(),
                 seamlessMode: state.textureLab.seamlessMode,
                 styleText: activeStyleInput.trim(),
+                targetSize: state.textureLab.expansionTargetSize,
                 workflow: 'generate',
               }
             : null,
@@ -1175,6 +1390,25 @@ function App() {
     } catch (requestError) {
       setStatus('error')
       setError(toForgeError(requestError))
+      if (isUvLabMode) {
+        const nextError = toForgeError(requestError, 'UV Job Failed')
+        setUvJob((previousJob) =>
+          previousJob
+            ? {
+                ...previousJob,
+                error: {
+                  code: nextError.code,
+                  message: nextError.message,
+                },
+                status: 'failed',
+              }
+            : null,
+        )
+        setUvEngineStatus(() => ({
+          message: nextError.message,
+          state: 'error',
+        }))
+      }
     }
   }
 
@@ -1332,7 +1566,18 @@ function App() {
       }
 
       const repairedImage = payload.images[0]
-      const nextResult: ForgeResult = {
+      const [nextResult] = await normalizeTextureLabResults(
+        [
+          {
+            dataUrl: createDataUrl(repairedImage.data, repairedImage.mimeType),
+            id: `${result.id}-repaired`,
+            mimeType: repairedImage.mimeType,
+            text: repairedImage.text,
+          },
+        ],
+        repairContext.targetSize,
+      )
+      const normalizedResult: ForgeResult = nextResult ?? {
         dataUrl: createDataUrl(repairedImage.data, repairedImage.mimeType),
         id: `${result.id}-repaired`,
         mimeType: repairedImage.mimeType,
@@ -1340,7 +1585,9 @@ function App() {
       }
 
       setResults((previousResults) =>
-        previousResults.map((entry) => (entry.id === result.id ? nextResult : entry)),
+        previousResults.map((entry) =>
+          entry.id === result.id ? normalizedResult : entry,
+        ),
       )
       setServerModel(payload.model ?? serverModel)
       setServerPrompt(payload.prompt ?? serverPrompt)
@@ -1356,12 +1603,19 @@ function App() {
     }
   }
 
-  function handleMockForge() {
-    const mockResults = buildMockResults({
+  async function handleMockForge() {
+    const rawMockResults = buildMockResults({
       count: activeGenerationCount,
       mode: state.activeMode,
       prompt: activePromptValue || promptPreview,
     })
+    const mockResults =
+      isTextureLabMode
+        ? await normalizeTextureLabResults(
+            rawMockResults,
+            state.textureLab.expansionTargetSize,
+          )
+        : rawMockResults
 
     finalizeForgeRun(
       mockResults,
@@ -1376,6 +1630,7 @@ function App() {
               prompt: state.prompt.trim(),
               seamlessMode: state.textureLab.seamlessMode,
               styleText: activeStyleInput.trim(),
+              targetSize: state.textureLab.expansionTargetSize,
               workflow: isTextureExpansionMode ? 'expand' : 'generate',
             }
           : null,
@@ -1387,6 +1642,8 @@ function App() {
     ? 'Source'
     : isActionAnimatorMode || isLootLevelerMode || isPortraitStudioMode
       ? 'Image'
+      : isUvLabMode
+        ? 'Mesh'
       : isVfxForgeMode
         ? 'Config'
         : 'Prompt'
@@ -1398,6 +1655,8 @@ function App() {
         ? 'Leveler settings'
         : isPortraitStudioMode
           ? 'Portrait settings'
+          : isUvLabMode
+            ? 'UV settings'
           : isVfxForgeMode
             ? 'VFX settings'
             : 'Forge settings'
@@ -1410,6 +1669,8 @@ function App() {
           ? 'LEVELING LOOT'
           : isPortraitStudioMode
             ? 'BUILDING PORTRAITS'
+            : isUvLabMode
+              ? 'UNWRAPPING UVS'
             : isTextureExpansionMode
               ? 'EXPANDING TEXTURE'
               : isVfxForgeMode
@@ -1423,6 +1684,8 @@ function App() {
           ? 'LEVEL LOOT'
           : isPortraitStudioMode
             ? 'BUILD PORTRAITS'
+            : isUvLabMode
+              ? 'ONE-CLICK UNWRAP'
             : isTextureExpansionMode
               ? 'EXPAND TEXTURE'
               : isVfxForgeMode
@@ -1437,6 +1700,8 @@ function App() {
           ? 'Applying rarity upgrade pass to the base asset'
           : isPortraitStudioMode
             ? 'Generating a locked five-expression portrait sheet'
+            : isUvLabMode
+              ? 'Unwrapping and exporting the mesh with the in-browser UV engine'
             : isTextureExpansionMode
               ? 'Sending centered outpaint canvas to Gemini 3 Pro'
               : isVfxForgeMode
@@ -1449,8 +1714,10 @@ function App() {
           ? 'Character image staged for Veo animation'
           : isLootLevelerMode
             ? 'Base asset staged for rarity upgrade'
-              : isPortraitStudioMode
-                ? 'Hero image staged for expression pack generation'
+            : isPortraitStudioMode
+              ? 'Hero image staged for expression pack generation'
+              : isUvLabMode
+                ? 'Mesh staged for in-browser unwrap and packing'
                 : isTextureExpansionMode
                   ? 'Centered source canvas staged for outpaint execution'
                   : isVfxForgeMode
@@ -1464,6 +1731,8 @@ function App() {
               ? 'Attach a base asset to begin rarity leveling'
               : isPortraitStudioMode
                 ? 'Attach a hero portrait or reuse the latest character sheet'
+                : isUvLabMode
+                  ? 'Attach an OBJ or FBX mesh to start UV Lab'
                 : isTextureExpansionMode
                   ? 'Attach a source texture to prepare the expansion pass'
                   : isVfxForgeMode
@@ -1474,12 +1743,16 @@ function App() {
       ? 'Source processing'
       : isActionAnimatorMode
         ? 'Animating'
+        : isUvLabMode
+          ? 'Unwrapping'
         : 'Generating'
     : isReadyForApi
       ? isTextureExpansionMode
         ? 'Source ready'
         : isActionAnimatorMode
           ? 'Animation ready'
+          : isUvLabMode
+            ? 'Mesh ready'
           : isVfxForgeMode
             ? 'Config ready'
             : 'Prompt ready'
@@ -1487,6 +1760,8 @@ function App() {
         ? 'Source required'
         : isActionAnimatorMode || isLootLevelerMode || isPortraitStudioMode
           ? 'Image required'
+          : isUvLabMode
+            ? 'Mesh required'
           : isVfxForgeMode
             ? 'Config required'
             : 'Prompt required'
@@ -1495,12 +1770,14 @@ function App() {
     : isActionAnimatorMode
       ? 'Action Animator sprite sheet'
       : isLootLevelerMode
-        ? 'Loot Leveler output slot'
-        : isPortraitStudioMode
-          ? 'Portrait Studio contact sheet'
-          : isVfxForgeMode
-            ? 'VFX Forge spritesheet output'
-            : 'Output slots for the current forge pass'
+      ? 'Loot Leveler output slot'
+      : isPortraitStudioMode
+        ? 'Portrait Studio contact sheet'
+        : isUvLabMode
+          ? 'UV layout, processed mesh, and preview'
+        : isVfxForgeMode
+          ? 'VFX Forge spritesheet output'
+          : 'Output slots for the current forge pass'
 
   return (
     <div className="min-h-screen bg-[var(--surface-0)] text-zinc-100">
@@ -1581,15 +1858,18 @@ function App() {
               </div>
 
               <div className="mt-6 space-y-5">
-                <ModelSelector
-                  activeModel={activeModel}
-                  availableModels={modeAvailableModels}
-                  onSelect={handleModelSelect}
-                />
+                {!isUvLabMode ? (
+                  <ModelSelector
+                    activeModel={activeModel}
+                    availableModels={modeAvailableModels}
+                    onSelect={handleModelSelect}
+                  />
+                ) : null}
 
                 {!(isActionAnimatorMode ||
                   isLootLevelerMode ||
                   isPortraitStudioMode ||
+                  isUvLabMode ||
                   isVfxForgeMode) ? (
                   <StyleInputPanel
                     value={activeStyleInput}
@@ -1597,7 +1877,7 @@ function App() {
                   />
                 ) : null}
 
-                {!selectedModelSupported ? (
+                {!isUvLabMode && !selectedModelSupported ? (
                   <div className="rounded-[20px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
                     {MODEL_LABELS[activeModel]} is not supported in {activeMode.label}.
                     Choose one of the available models to continue.
@@ -1711,6 +1991,33 @@ function App() {
                       }
                     />
                   </>
+                ) : isUvLabMode ? (
+                  <UvLabPanel
+                    asset={state.uvLab.mesh}
+                    atlasSize={state.uvLab.atlasSize}
+                    errorMessage={uvUploadError}
+                    latestJob={uvJob}
+                    paddingPx={state.uvLab.paddingPx}
+                    onAtlasSizeChange={(size) =>
+                      dispatch({ type: 'set-uv-lab-atlas-size', size })
+                    }
+                    onFileSelect={(asset) => {
+                      dispatch({ type: 'set-uv-lab-mesh', asset })
+                      setUvJob(null)
+                      setUvUploadError(null)
+                    }}
+                    onInvalidSelection={(message) => {
+                      setUvUploadError(message)
+                      setError({
+                        message,
+                        title: 'Mesh Upload Rejected',
+                      })
+                    }}
+                    onPaddingChange={(paddingPx) =>
+                      dispatch({ type: 'set-uv-lab-padding-px', paddingPx })
+                    }
+                    uvEngineStatus={uvEngineStatus}
+                  />
                 ) : isVfxForgeMode ? (
                   <VfxForgePanel
                     frameCount={state.vfxForge.frameCount}
@@ -1758,8 +2065,10 @@ function App() {
                         isTextureExpansionMode
                           ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
                           : isTextureGenerateMode && state.textureLab.seamlessMode
-                            ? 'Describe the material. Seamless Mode converts this into a tile-safe semantic tiling prompt.'
-                          : 'Describe the asset or scene you want generated'
+                            ? 'Describe the material. Seamless Mode converts this into a tile-safe semantic tiling prompt at the selected texture size.'
+                            : isTextureGenerateMode
+                              ? 'Describe the material texture to generate at the selected texture size.'
+                              : 'Describe the asset or scene you want generated'
                       }
                       placeholder={
                         isTextureExpansionMode
@@ -1858,7 +2167,7 @@ function App() {
                 <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                   <div>
                     <p className="font-mono text-[11px] uppercase tracking-[0.34em] text-zinc-500">
-                      Result Grid
+                      {isUvLabMode ? 'UV Workspace' : 'Result Grid'}
                     </p>
                     <h2 className="mt-1 text-xl font-semibold text-white">
                       {resultGridTitle}
@@ -1866,17 +2175,26 @@ function App() {
                   </div>
                   <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-sm text-zinc-300">
                     <ImagePlus className="size-4" strokeWidth={1.8} />
-                    {activeModelName
-                      ? `${activeModelName} response stream`
-                      : 'Ready for Gemini execution'}
+                    {isUvLabMode
+                      ? activeModelName
+                        ? `${activeModelName} worker pipeline`
+                        : 'Ready for local unwrap execution'
+                      : activeModelName
+                        ? `${activeModelName} response stream`
+                        : 'Ready for Gemini execution'}
                   </div>
                 </div>
 
                 {error ? (
                   <ErrorPanel
                     error={error}
-                    onUseMock={error.code === 'quota_exceeded' ? handleMockForge : undefined}
+                    onUseMock={
+                      !isUvLabMode && error.code === 'quota_exceeded'
+                        ? handleMockForge
+                        : undefined
+                    }
                     onRetry={isReadyForApi && !isForging ? () => void handleForge() : undefined}
+                    showDocsLink={!isUvLabMode}
                   />
                 ) : null}
 
@@ -1886,81 +2204,106 @@ function App() {
                   </div>
                 ) : null}
 
-                <ForgeBrief
-                  activeMode={activeMode}
-                  activeModelName={activeModelName}
-                  detailItems={briefItems}
-                  generationCount={activeGenerationCount}
-                  isForging={isForging}
-                  isReadyForApi={isReadyForApi}
-                  isShowingResults={isShowingResults}
-                  lastSavedAt={lastSavedAt}
-                  onRefreshHealth={() => void refreshHealth()}
-                  prompt={activePromptValue.trim()}
-                  referenceCount={referenceCount}
-                  resultsCount={results.length}
-                  serviceHealth={serviceHealth}
-                  consistencyMessage={
-                    isCharacterSheetMode && state.characterSheet.consistencyEnabled
-                      ? state.characterSheet.parentId
-                        ? `Consistency token staged locally: ${state.characterSheet.parentId}.`
-                        : 'Consistency is enabled. The next successful sheet will stage a reusable token locally.'
-                      : null
-                  }
-                />
+                {isUvLabMode ? (
+                  <>
+                    <UvLabBrief
+                      activeModelName={activeModelName}
+                      asset={state.uvLab.mesh}
+                      atlasSize={state.uvLab.atlasSize}
+                      job={uvJob}
+                      lastSavedAt={lastSavedAt}
+                      paddingPx={state.uvLab.paddingPx}
+                      uvEngineStatus={uvEngineStatus}
+                    />
+                    <Suspense
+                      fallback={
+                        <div className="rounded-[30px] border border-white/10 bg-black/20 px-5 py-12 text-center text-sm text-zinc-300">
+                          Loading UV workspace...
+                        </div>
+                      }
+                    >
+                      <UvLabWorkspace
+                        activeModelName={activeModelName}
+                        job={uvJob}
+                        sourceAsset={state.uvLab.mesh}
+                      />
+                    </Suspense>
+                  </>
+                ) : (
+                  <>
+                    <ForgeBrief
+                      activeMode={activeMode}
+                      activeModelName={activeModelName}
+                      detailItems={briefItems}
+                      generationCount={activeGenerationCount}
+                      isForging={isForging}
+                      isReadyForApi={isReadyForApi}
+                      isShowingResults={isShowingResults}
+                      lastSavedAt={lastSavedAt}
+                      onRefreshHealth={() => void refreshHealth()}
+                      prompt={activePromptValue.trim()}
+                      referenceCount={referenceCount}
+                      resultsCount={results.length}
+                      serviceHealth={serviceHealth}
+                      consistencyMessage={
+                        isCharacterSheetMode && state.characterSheet.consistencyEnabled
+                          ? state.characterSheet.parentId
+                            ? `Consistency token staged locally: ${state.characterSheet.parentId}.`
+                            : 'Consistency is enabled. The next successful sheet will stage a reusable token locally.'
+                          : null
+                      }
+                    />
 
-                <div
-                  className={
-                    isSingleResultMode
-                      ? 'grid gap-4'
-                      : 'grid gap-4 md:grid-cols-2 2xl:grid-cols-4'
-                  }
-                >
-                  {isShowingResults
-                    ? results.map((result, index) => (
-                        <GeneratedResultCard
-                          key={result.id}
-                          canRepairSeams={
-                            isTextureLabMode &&
-                            lastTextureLabRun?.seamlessMode === true &&
-                            lastTextureLabRun.workflow === 'generate'
-                          }
-                          extraActionLabel={
-                            isPortraitStudioMode
-                              ? 'Download Faces'
-                              : isVfxForgeMode
-                                ? 'Download Frames'
-                                : undefined
-                          }
-                          index={index}
-                          isRepairing={repairingResultId === result.id}
-                          mode={activeMode}
-                          result={result}
-                          onCopy={handleCopy}
-                          onDownload={handleDownload}
-                          onExtraAction={
-                            isPortraitStudioMode
-                              ? handleDownloadPortraitFaces
-                              : isVfxForgeMode
-                                ? handleDownloadVfxFrames
-                              : undefined
-                          }
-                          onRepairSeams={handleRepairSeams}
-                          showTilePreview={
-                            isTextureLabMode &&
-                            lastTextureLabRun?.seamlessMode === true
-                          }
-                        />
-                      ))
-                    : reservedOutputs.map((index) => (
-                        <PlaceholderCard
-                          key={index}
-                          index={index}
-                          mode={activeMode}
-                          state={isForging ? 'loading' : 'idle'}
-                        />
-                      ))}
-                </div>
+                    <div
+                      className={
+                        isSingleResultMode
+                          ? 'grid gap-4'
+                          : 'grid gap-4 md:grid-cols-2 2xl:grid-cols-4'
+                      }
+                    >
+                      {isShowingResults
+                        ? results.map((result, index) => (
+                            <GeneratedResultCard
+                              key={result.id}
+                              canRepairSeams={
+                                isTextureLabMode &&
+                                lastTextureLabRun?.seamlessMode === true &&
+                                lastTextureLabRun.workflow === 'generate'
+                              }
+                              extraActionLabel={
+                                isPortraitStudioMode
+                                  ? 'Download Faces'
+                                  : isVfxForgeMode
+                                    ? 'Download Frames'
+                                    : undefined
+                              }
+                              index={index}
+                              isRepairing={repairingResultId === result.id}
+                              mode={activeMode}
+                              result={result}
+                              onCopy={handleCopy}
+                              onDownload={handleDownload}
+                              onExtraAction={
+                                isPortraitStudioMode
+                                  ? handleDownloadPortraitFaces
+                                  : isVfxForgeMode
+                                    ? handleDownloadVfxFrames
+                                    : undefined
+                              }
+                              onRepairSeams={handleRepairSeams}
+                            />
+                          ))
+                        : reservedOutputs.map((index) => (
+                            <PlaceholderCard
+                              key={index}
+                              index={index}
+                              mode={activeMode}
+                              state={isForging ? 'loading' : 'idle'}
+                            />
+                          ))}
+                    </div>
+                  </>
+                )}
               </div>
             </section>
           </div>
@@ -2395,6 +2738,198 @@ function StyleInputPanel({ value, onChange }: StyleInputPanelProps) {
   )
 }
 
+type UvLabPanelProps = {
+  asset: ModelAsset | null
+  atlasSize: UvLabAtlasSize
+  errorMessage: string | null
+  latestJob: UvJobStatusResponse | null
+  paddingPx: number
+  onAtlasSizeChange: (size: UvLabAtlasSize) => void
+  onFileSelect: (asset: ModelAsset | null) => void
+  onInvalidSelection: (message: string) => void
+  onPaddingChange: (paddingPx: number) => void
+  uvEngineStatus: UvEngineStatus
+}
+
+function UvLabPanel({
+  asset,
+  atlasSize,
+  errorMessage,
+  latestJob,
+  paddingPx,
+  onAtlasSizeChange,
+  onFileSelect,
+  onInvalidSelection,
+  onPaddingChange,
+  uvEngineStatus,
+}: UvLabPanelProps) {
+  return (
+    <>
+      <ModelUploadField
+        asset={asset}
+        error={errorMessage}
+        helper="Required. UV Lab stages the mesh locally, previews it in-browser, then unwraps and exports it in this browser session."
+        label="Mesh Upload"
+        onFileSelect={onFileSelect}
+        onInvalidSelection={onInvalidSelection}
+      />
+
+      <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
+              Atlas Size
+            </p>
+            <p className="mt-2 text-sm font-medium text-white">
+              Choose the output UV layout resolution.
+            </p>
+          </div>
+          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-400">
+            PNG Export
+          </span>
+        </div>
+
+        <div className="mt-4 grid gap-2 sm:grid-cols-3">
+          {([1024, 2048, 4096] as UvLabAtlasSize[]).map((size) => (
+            <ModeToggleButton
+              key={size}
+              icon={Box}
+              isActive={atlasSize === size}
+              label={`${size}px`}
+              onClick={() => onAtlasSizeChange(size)}
+            />
+          ))}
+        </div>
+      </section>
+
+      <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
+              Packing Margin
+            </p>
+            <p className="mt-2 text-sm font-medium text-white">
+              Control the island padding used during pack.
+            </p>
+          </div>
+          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-300">
+            {paddingPx}px
+          </span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={64}
+          step={1}
+          value={paddingPx}
+          onChange={(event) => onPaddingChange(Number(event.target.value))}
+          className="mt-4 w-full"
+        />
+        <p className="mt-3 text-sm leading-6 text-zinc-400">
+          Higher padding reduces texture bleeding risk at the cost of atlas coverage.
+        </p>
+      </section>
+
+      <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+        <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
+          Engine Status
+        </p>
+        <div className="mt-4 space-y-3 text-sm text-zinc-300">
+          <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
+            Built-in UV engine: {uvEngineStatus.state}.
+          </div>
+          <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
+            Latest job:{' '}
+            {latestJob
+              ? `${latestJob.status} (${formatUvStep(latestJob.step).toLowerCase()})`
+              : 'none yet.'}
+          </div>
+          <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
+            {uvEngineStatus.message ?? 'Waiting to initialize the local UV engine.'}
+          </div>
+          <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
+            Output format: {asset ? asset.format.toUpperCase() : 'staged mesh required.'}
+          </div>
+        </div>
+      </section>
+    </>
+  )
+}
+
+type UvLabBriefProps = {
+  activeModelName: string | null
+  asset: ModelAsset | null
+  atlasSize: UvLabAtlasSize
+  job: UvJobStatusResponse | null
+  lastSavedAt: string | null
+  paddingPx: number
+  uvEngineStatus: UvEngineStatus
+}
+
+function UvLabBrief({
+  activeModelName,
+  asset,
+  atlasSize,
+  job,
+  lastSavedAt,
+  paddingPx,
+  uvEngineStatus,
+}: UvLabBriefProps) {
+  const description = job
+    ? isTerminalUvJobStatus(job.status)
+      ? job.status === 'succeeded'
+        ? 'The last UV job completed successfully. Review the processed preview, inspect island coverage, and download the new mesh artifacts.'
+        : 'The last UV job failed. Review the error panel above, adjust the mesh or settings, and retry.'
+      : `The built-in UV engine is ${formatUvStep(job.step).toLowerCase()} for the current mesh.`
+    : asset
+      ? 'The staged mesh is ready for a one-click unwrap pass using the built-in UV engine.'
+      : 'Upload an OBJ or FBX mesh to stage a UV unwrap request.'
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.75fr)]">
+      <div className="rounded-[28px] border border-white/10 bg-black/20 p-5">
+        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
+          UV Brief
+        </p>
+        <p className="mt-4 text-sm leading-7 text-zinc-300">{description}</p>
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          <MetricCard label="Mesh" value={asset?.name ?? 'Not attached'} />
+          <MetricCard label="Atlas" value={`${atlasSize}px`} />
+          <MetricCard label="Padding" value={`${paddingPx}px`} />
+          <MetricCard
+            label="Triangles"
+            value={formatTriangleCount(job?.stats?.triangleCount)}
+          />
+        </div>
+      </div>
+
+      <div className="rounded-[28px] border border-white/10 bg-black/20 p-5">
+        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
+          Engine Status
+        </p>
+        <ul className="mt-4 space-y-3">
+          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
+            Runtime: {uvEngineStatus.state}.{' '}
+            {activeModelName ? `Engine: ${activeModelName}.` : ''}
+          </li>
+          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
+            {uvEngineStatus.message ?? 'The local UV runtime has not been warmed yet.'}
+          </li>
+          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
+            Job state: {job ? `${job.status} / ${job.step}.` : 'idle.'}
+          </li>
+          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
+            Last saved session: {lastSavedAt ? new Date(lastSavedAt).toLocaleString() : 'none yet'}.
+          </li>
+          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
+            Outputs stay in memory only and are not persisted into browser local storage.
+          </li>
+        </ul>
+      </div>
+    </div>
+  )
+}
+
 type TextureLabWorkflowPanelProps = {
   expansionTargetSize: TextureExpansionTargetSize
   onSeamlessModeChange: (enabled: boolean) => void
@@ -2455,13 +2990,45 @@ function TextureLabWorkflowPanel({
         <span>
           <span className="block text-sm font-medium">Seamless Mode</span>
           <span className="mt-1 block text-xs leading-5 text-current/70">
-            Adds tile-safe texture tags, shows a 3x3 repeat preview, and enables seam repair.
+            Adds tile-safe texture tags and enables seam repair while keeping the original texture preview in view.
           </span>
         </span>
         <span className="rounded-full border border-current/20 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.28em]">
           {seamlessMode ? 'On' : 'Off'}
         </span>
       </button>
+
+      <div className="mt-4 rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Texture Size
+        </p>
+        <p className="mt-2 text-sm leading-6 text-zinc-300">
+          Choose the final square texture size for both fresh generations and
+          expansion output.
+        </p>
+
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          {[512, 1024].map((size) => (
+            <button
+              key={size}
+              type="button"
+              onClick={() => onTargetSizeChange(size as TextureExpansionTargetSize)}
+              className={`rounded-[18px] border px-3 py-3 text-left transition ${
+                expansionTargetSize === size
+                  ? 'border-emerald-300/35 bg-emerald-400/12 text-emerald-50'
+                  : 'border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]'
+              }`}
+            >
+              <span className="block text-sm font-medium">{size} x {size}</span>
+              <span className="mt-1 block text-xs leading-5 text-current/70">
+                {size === 512
+                  ? 'Compact game-ready output with a deterministic final resize.'
+                  : 'Preferred full-size square texture when the model can deliver 1K.'}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
 
       {workflow === 'expand' ? (
         <div className="mt-4 rounded-[22px] border border-emerald-300/20 bg-emerald-500/10 p-4">
@@ -2471,30 +3038,8 @@ function TextureLabWorkflowPanel({
           <p className="mt-2 text-sm leading-6 text-emerald-50">
             The source texture is centered on a larger transparent canvas, then Gemini
             fills the outer space while keeping the final map tile-safe. This workflow
-            routes through Gemini 3 Pro for the edit pass.
+            routes through Gemini 3 Pro for the edit pass using the selected output size.
           </p>
-
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            {[1024, 2048].map((size) => (
-              <button
-                key={size}
-                type="button"
-                onClick={() =>
-                  onTargetSizeChange(size as TextureExpansionTargetSize)
-                }
-                className={`rounded-[18px] border px-3 py-3 text-left transition ${
-                  expansionTargetSize === size
-                    ? 'border-emerald-300/35 bg-emerald-400/12 text-emerald-50'
-                    : 'border-white/10 bg-white/[0.03] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]'
-                }`}
-              >
-                <span className="block text-sm font-medium">{size} px canvas</span>
-                <span className="mt-1 block text-xs leading-5 text-current/70">
-                  Center the source in the inner 50% and outpaint the remaining area.
-                </span>
-              </button>
-            ))}
-          </div>
         </div>
       ) : null}
     </section>
@@ -3440,6 +3985,9 @@ function TopPanel({
   readinessLabel,
 }: TopPanelProps) {
   const ModeIcon = activeMode.icon
+  const profileLabel = activeMode.label === 'UV Lab' ? 'workflow profile' : 'prompt profile'
+  const previewLabel =
+    activeMode.label === 'UV Lab' ? 'Prepared workflow summary' : 'Composed request preview'
 
   return (
     <div
@@ -3452,7 +4000,7 @@ function TopPanel({
             {activeMode.eyebrow}
           </div>
           <h2 className="mt-4 text-2xl font-semibold tracking-[-0.03em] text-white sm:text-[2rem]">
-            {activeMode.label} prompt profile
+            {activeMode.label} {profileLabel}
           </h2>
           <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-300">
             {activeMode.description}
@@ -3467,7 +4015,7 @@ function TopPanel({
 
       <div className="mt-6 rounded-[24px] border border-white/10 bg-black/20 p-4">
         <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-          Composed request preview
+          {previewLabel}
         </p>
         <p className="mt-3 font-mono text-sm leading-7 text-zinc-200">{prompt}</p>
       </div>
@@ -3709,6 +4257,29 @@ function buildPortraitStudioBriefItems(
   ]
 }
 
+function buildTextureLabGenerateBriefItems(
+  state: typeof initialState,
+): ForgeBriefItem[] {
+  return [
+    {
+      label: 'Style Ref',
+      value: state.references.style?.name ?? 'Not attached',
+    },
+    {
+      label: 'Subject Ref',
+      value: state.references.subject?.name ?? 'Not attached',
+    },
+    {
+      label: 'Seamless',
+      value: state.textureLab.seamlessMode ? 'Enabled' : 'Disabled',
+    },
+    {
+      label: 'Size',
+      value: `${state.textureLab.expansionTargetSize} x ${state.textureLab.expansionTargetSize}`,
+    },
+  ]
+}
+
 function buildTextureExpansionBriefItems(
   state: typeof initialState,
 ): ForgeBriefItem[] {
@@ -3722,8 +4293,31 @@ function buildTextureExpansionBriefItems(
       value: state.textureLab.expansionSource?.name ?? 'Not attached',
     },
     {
-      label: 'Canvas',
-      value: `${state.textureLab.expansionTargetSize} px`,
+      label: 'Output',
+      value: `${state.textureLab.expansionTargetSize} x ${state.textureLab.expansionTargetSize}`,
+    },
+  ]
+}
+
+function buildUvLabBriefItems(
+  state: typeof initialState,
+): ForgeBriefItem[] {
+  return [
+    {
+      label: 'Mesh',
+      value: state.uvLab.mesh?.name ?? 'Not attached',
+    },
+    {
+      label: 'Atlas',
+      value: `${state.uvLab.atlasSize}px`,
+    },
+    {
+      label: 'Padding',
+      value: `${state.uvLab.paddingPx}px`,
+    },
+    {
+      label: 'Format',
+      value: state.uvLab.mesh?.format.toUpperCase() ?? 'N/A',
     },
   ]
 }
@@ -3770,15 +4364,25 @@ function buildPortraitStudioPromptPreview(prompt: string) {
     .join(' ')
 }
 
-function buildSeamlessPromptPreview(prompt: string, styleText: string) {
+function buildTextureLabPromptPreview(
+  prompt: string,
+  styleText: string,
+  options: {
+    seamlessMode: boolean
+    targetSize: TextureExpansionTargetSize
+  },
+) {
   const subject = prompt.trim() || 'weathered stone floor tile'
   const styleSegment = styleText.trim() ? styleText.trim() : 'neutral production texture'
 
-  return (
-    `Create a seamless repeating pattern of ${subject}. ` +
-    'Ensure smooth transitions at the edges for flawless tiling. ' +
-    `Style: ${styleSegment}, high resolution, perfectly tileable horizontal and vertical edges, balanced composition.`
-  )
+  return [
+    `Generate a ${options.targetSize} x ${options.targetSize} square top-down material texture of ${subject}.`,
+    options.seamlessMode
+      ? 'Ensure opposite edges tile cleanly on both axes.'
+      : 'Keep the full frame filled with material detail and avoid scene-style composition.',
+    `Style: ${styleSegment}.`,
+    'Use flat lighting with production-safe surface scale.',
+  ].join(' ')
 }
 
 function buildVfxForgePromptPreview(
@@ -3864,6 +4468,7 @@ const starterPromptByMode: Record<ForgeMode, string> = {
   'texture-lab': 'weathered basalt floor tile with subtle lava seams',
   'loot-leveler': 'legendary upgrade pass for a sword while keeping the silhouette identical',
   'portrait-studio': 'hero portrait expression sheet with locked identity',
+  'uv-lab': 'OBJ character mesh prepared for automatic UV unwrap and packing',
   visualizer: 'battle-worn ranger portrait with layered leather armor',
   'vfx-forge': 'fireball projectile spritesheet with soft glowing edges',
   'character-sheet':
@@ -3979,6 +4584,12 @@ const archetypeKeywordMap: Record<
     {
       archetype: 'character',
       keywords: ['portrait', 'expression', 'hero', 'face', 'emotion'],
+    },
+  ],
+  'uv-lab': [
+    {
+      archetype: 'prop',
+      keywords: ['mesh', 'model', 'obj', 'fbx', 'character', 'prop', 'asset'],
     },
   ],
   visualizer: [
@@ -4362,6 +4973,18 @@ const modeEndings: Record<ForgeMode, Record<PromptVariant, string[]>> = {
       'fresh VFX pass',
     ],
   },
+  'uv-lab': {
+    enhance: [
+      'deterministic UV unwrap workflow',
+      'atlas packing review',
+      'downloadable processed mesh output',
+    ],
+    remix: [
+      'alternate atlas size selection',
+      'different padding strategy',
+      'fresh unwrap configuration pass',
+    ],
+  },
   'character-sheet': {
     enhance: [
       'professional turnaround sheet',
@@ -4442,10 +5065,16 @@ function toForgeError(
 type ErrorPanelProps = {
   error: ForgeErrorInfo
   onRetry?: () => void
+  showDocsLink?: boolean
   onUseMock?: () => void
 }
 
-function ErrorPanel({ error, onRetry, onUseMock }: ErrorPanelProps) {
+function ErrorPanel({
+  error,
+  onRetry,
+  onUseMock,
+  showDocsLink = true,
+}: ErrorPanelProps) {
   return (
     <div className="rounded-[22px] border border-rose-300/20 bg-rose-500/10 px-4 py-4 text-sm text-rose-100">
       <div className="flex items-start gap-3">
@@ -4490,14 +5119,16 @@ function ErrorPanel({ error, onRetry, onUseMock }: ErrorPanelProps) {
                   Use Mock Results Instead
                 </button>
               ) : null}
-              <a
-                href="https://ai.google.dev/gemini-api/docs/rate-limits"
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-full border border-rose-100/20 px-4 py-2 text-sm text-rose-100/90 transition hover:border-rose-100/35 hover:bg-black/10"
-              >
-                Open Gemini Quota Docs
-              </a>
+              {showDocsLink ? (
+                <a
+                  href="https://ai.google.dev/gemini-api/docs/rate-limits"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-full border border-rose-100/20 px-4 py-2 text-sm text-rose-100/90 transition hover:border-rose-100/35 hover:bg-black/10"
+                >
+                  Open Gemini Quota Docs
+                </a>
+              ) : null}
             </div>
           ) : null}
         </div>

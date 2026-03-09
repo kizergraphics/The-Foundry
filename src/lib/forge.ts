@@ -1,5 +1,6 @@
 import type { LucideIcon } from 'lucide-react'
 import {
+  Box,
   Camera,
   Clapperboard,
   Flame,
@@ -16,6 +17,7 @@ export type ForgeMode =
   | 'loot-leveler'
   | 'portrait-studio'
   | 'texture-lab'
+  | 'uv-lab'
   | 'vfx-forge'
   | 'visualizer'
   | 'character-sheet'
@@ -24,9 +26,11 @@ export type ReferenceSlot = 'style' | 'subject'
 export type CharacterSheetReferenceSlot = 'face' | 'outfit' | 'art-style'
 export type CharacterSheetGenerationMode = 'reference' | 'manifest'
 export type TextureLabWorkflow = 'generate' | 'expand'
-export type TextureExpansionTargetSize = 1024 | 2048
+export type TextureExpansionTargetSize = 512 | 1024
+export type UvLabAtlasSize = 1024 | 2048 | 4096
 export type GenerationCount = 1 | 2 | 3 | 4
 export type ForgeStatus = 'idle' | 'loading' | 'success' | 'error'
+export type ModelFormat = 'obj' | 'fbx'
 export type ActionAnimatorActionType =
   | 'idle'
   | 'walk'
@@ -38,6 +42,14 @@ export type LootLevelerRarity = 'common' | 'rare' | 'epic' | 'legendary'
 
 export type ReferenceAsset = {
   file: File
+  mimeType: string
+  name: string
+  sizeLabel: string
+}
+
+export type ModelAsset = {
+  file: File
+  format: ModelFormat
   mimeType: string
   name: string
   sizeLabel: string
@@ -84,6 +96,12 @@ export type VfxForgeState = {
   projectileType: string
 }
 
+export type UvLabState = {
+  atlasSize: UvLabAtlasSize
+  mesh: ModelAsset | null
+  paddingPx: number
+}
+
 export type ForgeState = {
   activeMode: ForgeMode
   actionAnimator: ActionAnimatorState
@@ -94,6 +112,7 @@ export type ForgeState = {
   prompt: string
   references: Record<ReferenceSlot, ReferenceAsset | null>
   textureLab: TextureLabState
+  uvLab: UvLabState
   vfxForge: VfxForgeState
 }
 
@@ -132,6 +151,9 @@ export type ForgeAction =
   | { type: 'set-vfx-projectile-type'; projectileType: string }
   | { type: 'set-vfx-intensity'; intensity: number }
   | { type: 'set-vfx-prompt'; prompt: string }
+  | { type: 'set-uv-lab-mesh'; asset: ModelAsset | null }
+  | { type: 'set-uv-lab-atlas-size'; size: UvLabAtlasSize }
+  | { type: 'set-uv-lab-padding-px'; paddingPx: number }
 
 export type ModeDefinition = {
   description: string
@@ -180,13 +202,26 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     eyebrow: 'Tiles',
     description:
       'Focused on square, top-down, seamless surfaces with controlled lighting.',
-    instruction: 'seamless texture, flat lighting, 1024x1024',
+    instruction: 'square top-down material texture, flat lighting, tile-safe edges',
     surfaceClassName:
       'from-emerald-400/16 via-slate-950/80 to-slate-950/95 ring-emerald-300/20',
-    previewAspectClassName: 'aspect-[4/5]',
+    previewAspectClassName: 'aspect-square',
     previewImageClassName: 'object-cover',
     icon: Palette,
     focus: 'Stone, cloth, metal, terrain',
+  },
+  'uv-lab': {
+    label: 'UV Lab',
+    eyebrow: 'Meshes',
+    description:
+      'Focused on automatic UV unwrap and packing for production meshes with paired 3D and atlas review.',
+    instruction: 'Automatic UV unwrap, atlas packing, and downloadable mesh export',
+    surfaceClassName:
+      'from-amber-200/14 via-slate-950/80 to-slate-950/95 ring-amber-100/20',
+    previewAspectClassName: 'aspect-[4/3]',
+    previewImageClassName: 'object-contain',
+    icon: Box,
+    focus: 'OBJ and FBX unwrap, packing, atlas review',
   },
   'character-sheet': {
     label: 'Character Sheet',
@@ -302,6 +337,11 @@ export const initialState: ForgeState = {
     seamlessMode: false,
     workflow: 'generate',
   },
+  uvLab: {
+    atlasSize: 2048,
+    mesh: null,
+    paddingPx: 8,
+  },
   characterSheet: {
     consistencyEnabled: false,
     generationMode: 'reference',
@@ -416,7 +456,7 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         ...state,
         textureLab: {
           ...state.textureLab,
-          expansionTargetSize: action.size,
+          expansionTargetSize: clampTextureLabOutputSize(action.size),
         },
       }
     case 'set-loot-leveler-asset':
@@ -481,6 +521,30 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         vfxForge: {
           ...state.vfxForge,
           prompt: action.prompt,
+        },
+      }
+    case 'set-uv-lab-mesh':
+      return {
+        ...state,
+        uvLab: {
+          ...state.uvLab,
+          mesh: action.asset,
+        },
+      }
+    case 'set-uv-lab-atlas-size':
+      return {
+        ...state,
+        uvLab: {
+          ...state.uvLab,
+          atlasSize: clampUvAtlasSize(action.size),
+        },
+      }
+    case 'set-uv-lab-padding-px':
+      return {
+        ...state,
+        uvLab: {
+          ...state.uvLab,
+          paddingPx: clampUvPaddingPx(action.paddingPx),
         },
       }
     case 'set-character-sheet-mode':
@@ -587,6 +651,40 @@ export function clampIntensity(value: number) {
   return Math.round(value)
 }
 
+export function clampUvAtlasSize(value: number): UvLabAtlasSize {
+  if (value >= 4096) {
+    return 4096
+  }
+
+  if (value <= 1024) {
+    return 1024
+  }
+
+  return 2048
+}
+
+export function clampTextureLabOutputSize(
+  value: number,
+): TextureExpansionTargetSize {
+  if (value <= 512) {
+    return 512
+  }
+
+  return 1024
+}
+
+export function clampUvPaddingPx(value: number) {
+  if (value <= 0) {
+    return 0
+  }
+
+  if (value >= 64) {
+    return 64
+  }
+
+  return Math.round(value)
+}
+
 export function composePrompt(state: ForgeState): string {
   const activeMode = modeDefinitions[state.activeMode]
   const prompt = state.prompt.trim()
@@ -610,6 +708,36 @@ export function toReferenceAsset(file: File): ReferenceAsset {
   return {
     file,
     mimeType: file.type || 'image/png',
+    name: file.name,
+    sizeLabel: formatFileSize(file.size),
+  }
+}
+
+export function detectModelFormat(fileName: string): ModelFormat | null {
+  const normalizedName = fileName.trim().toLowerCase()
+
+  if (normalizedName.endsWith('.obj')) {
+    return 'obj'
+  }
+
+  if (normalizedName.endsWith('.fbx')) {
+    return 'fbx'
+  }
+
+  return null
+}
+
+export function toModelAsset(file: File): ModelAsset {
+  const format = detectModelFormat(file.name)
+
+  if (!format) {
+    throw new Error('UV Lab only accepts .obj or .fbx files.')
+  }
+
+  return {
+    file,
+    format,
+    mimeType: file.type || 'application/octet-stream',
     name: file.name,
     sizeLabel: formatFileSize(file.size),
   }
