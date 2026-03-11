@@ -89,12 +89,6 @@ import {
 } from './lib/uvEngine'
 
 type ServiceHealth = {
-<<<<<<< HEAD
-  availableModels?: Record<string, string[]>
-  keyConfigured: boolean
-  models: Record<string, string>
-=======
->>>>>>> f38f3db (Restore local workspace and hardening changes)
   ok: boolean
 }
 
@@ -634,27 +628,12 @@ function App() {
         paddingPx: storedState.settings.uvLab.paddingPx,
       })
       setRecentPrompts(storedState.recentPrompts)
-<<<<<<< HEAD
-      setResults(storedState.session?.results ?? [])
-      setServerModel(storedState.session?.serverModel ?? null)
-      setServerPrompt(storedState.session?.serverPrompt ?? null)
-      setLastSavedAt(storedState.session?.savedAt ?? null)
-      if (storedState.session?.results?.length) {
-        const restoredSessionMode = storedState.session.mode ?? null
-        setLastResultMode(restoredSessionMode)
-        if (restoredSessionMode === 'character-sheet') {
-          setLastCharacterSheetResult(storedState.session.results[0] ?? null)
-        }
-        setStatus('success')
-        setNotice('Restored the latest forge session from this browser.')
-=======
       setServerModel(storedState.session?.serverModel ?? null)
       setServerPrompt(storedState.session?.serverPrompt ?? null)
       setLastSavedAt(storedState.session?.savedAt ?? null)
       if (storedState.session) {
         setLastResultMode(storedState.session.mode ?? null)
         setNotice('Restored the latest forge settings from this browser.')
->>>>>>> f38f3db (Restore local workspace and hardening changes)
       }
     }
 
@@ -851,16 +830,9 @@ function App() {
         },
       },
       session:
-<<<<<<< HEAD
-        results.length > 0
-          ? {
-              mode: lastResultMode,
-              results,
-=======
         lastSavedAt
           ? {
               mode: lastResultMode,
->>>>>>> f38f3db (Restore local workspace and hardening changes)
               serverModel,
               serverPrompt,
               savedAt: lastSavedAt ?? new Date().toISOString(),
@@ -871,10 +843,6 @@ function App() {
     hasRestoredState,
     lastSavedAt,
     recentPrompts,
-<<<<<<< HEAD
-    results,
-=======
->>>>>>> f38f3db (Restore local workspace and hardening changes)
     serverModel,
     serverPrompt,
     state.activeMode,
@@ -2943,11 +2911,7 @@ function UvLabBrief({
             Last saved session: {lastSavedAt ? new Date(lastSavedAt).toLocaleString() : 'none yet'}.
           </li>
           <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
-<<<<<<< HEAD
-            Outputs stay in memory only and are not persisted into browser local storage.
-=======
             Generated outputs stay in memory only and are not persisted into browser local storage.
->>>>>>> f38f3db (Restore local workspace and hardening changes)
           </li>
         </ul>
       </div>
@@ -4139,11 +4103,7 @@ function ForgeBrief({
             {activeModelName ? ` Model: ${activeModelName}.` : ''}
           </li>
           <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
-<<<<<<< HEAD
-            API key: {serviceHealth?.keyConfigured ? 'configured on server.' : 'not detected on server.'}
-=======
             Server health only exposes availability status. Credential state stays server-side.
->>>>>>> f38f3db (Restore local workspace and hardening changes)
           </li>
           <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
             If live Gemini is blocked, use mock forge outputs to keep iterating on layout, downloads, palette extraction, and review flow.

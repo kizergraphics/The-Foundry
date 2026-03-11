@@ -1,52 +1,26 @@
-<<<<<<< HEAD
-import { useId } from 'react'
-=======
 import { useId, useState } from 'react'
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 import type { ChangeEvent } from 'react'
 import { CheckCircle2 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 import type { ReferenceAsset } from '../lib/forge'
-<<<<<<< HEAD
-import { toReferenceAsset } from '../lib/forge'
-
-type ImageUploadFieldProps = {
-  asset: ReferenceAsset | null
-=======
 import { validateReferenceImageUpload } from '../lib/forge'
 
 type ImageUploadFieldProps = {
   asset: ReferenceAsset | null
   error?: string | null
->>>>>>> f38f3db (Restore local workspace and hardening changes)
   helper: string
   icon: LucideIcon
   isRequired?: boolean
   label: string
   onFileSelect: (asset: ReferenceAsset | null) => void
-<<<<<<< HEAD
-=======
   onInvalidSelection?: (message: string) => void
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 }
 
 export function ImageUploadField({
   label,
   helper,
   asset,
-<<<<<<< HEAD
-  icon: Icon,
-  isRequired = false,
-  onFileSelect,
-}: ImageUploadFieldProps) {
-  const inputId = useId()
-
-  function handleChange(event: ChangeEvent<HTMLInputElement>) {
-    const nextFile = event.target.files?.[0]
-
-    onFileSelect(nextFile ? toReferenceAsset(nextFile) : null)
-=======
   error = null,
   icon: Icon,
   isRequired = false,
@@ -77,7 +51,6 @@ export function ImageUploadField({
 
     setLocalError(null)
     onFileSelect(validation.asset)
->>>>>>> f38f3db (Restore local workspace and hardening changes)
     event.target.value = ''
   }
 
@@ -110,8 +83,6 @@ export function ImageUploadField({
             <p className="mt-1 text-sm leading-6 text-zinc-400">
               {asset ? `${asset.sizeLabel} loaded into the forge queue.` : helper}
             </p>
-<<<<<<< HEAD
-=======
             {resolvedError ? (
               <p className="mt-2 text-sm text-rose-200">{resolvedError}</p>
             ) : (
@@ -119,7 +90,6 @@ export function ImageUploadField({
                 Accepts PNG, JPEG, and WebP up to 10 MB
               </p>
             )}
->>>>>>> f38f3db (Restore local workspace and hardening changes)
           </div>
         </div>
       </label>

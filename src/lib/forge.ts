@@ -47,13 +47,10 @@ export type ReferenceAsset = {
   sizeLabel: string
 }
 
-<<<<<<< HEAD
-=======
 export type ImageValidationResult =
   | { asset: ReferenceAsset; ok: true }
   | { error: string; ok: false }
 
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 export type ModelAsset = {
   file: File
   format: ModelFormat
@@ -720,8 +717,6 @@ export function toReferenceAsset(file: File): ReferenceAsset {
   }
 }
 
-<<<<<<< HEAD
-=======
 export const maxReferenceImageBytes = 10 * 1024 * 1024
 export const allowedReferenceImageMimeTypes = new Set([
   'image/jpeg',
@@ -775,7 +770,6 @@ export async function validateReferenceImageUpload(
   }
 }
 
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 export function detectModelFormat(fileName: string): ModelFormat | null {
   const normalizedName = fileName.trim().toLowerCase()
 

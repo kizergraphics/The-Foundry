@@ -5,27 +5,6 @@ export function createDataUrl(data: string, mimeType: string): string {
 }
 
 export async function fileToBase64(file: Blob): Promise<string> {
-<<<<<<< HEAD
-  const buffer = await file.arrayBuffer()
-  const bytes = new Uint8Array(buffer)
-  let binary = ''
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte)
-  }
-
-  return btoa(binary)
-}
-
-export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  const response = await fetch(dataUrl)
-
-  if (!response.ok) {
-    throw new Error('Failed to load the generated image for post-processing.')
-  }
-
-  return response.blob()
-=======
   const dataUrl = await blobToDataUrl(file)
   const separatorIndex = dataUrl.indexOf(',')
 
@@ -47,7 +26,6 @@ export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
   const binaryString = atob(encodedPayload)
   const bytes = Uint8Array.from(binaryString, (character) => character.charCodeAt(0))
   return new Blob([bytes], { type: mimeType })
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 }
 
 export async function dataUrlToFile(
@@ -186,11 +164,7 @@ export async function buildTiledPreviewDataUrl(
     }
   }
 
-<<<<<<< HEAD
-  return canvas.toDataURL('image/png')
-=======
   return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 }
 
 export async function normalizeSquareTextureDataUrl(
@@ -227,11 +201,7 @@ export async function normalizeSquareTextureDataUrl(
     targetSize,
   )
 
-<<<<<<< HEAD
-  return canvas.toDataURL('image/png')
-=======
   return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 }
 
 export async function copyResultToClipboard(result: ForgeResult): Promise<void> {
@@ -239,11 +209,7 @@ export async function copyResultToClipboard(result: ForgeResult): Promise<void> 
     throw new Error('Image clipboard copy is not supported in this browser.')
   }
 
-<<<<<<< HEAD
-  const blob = await fetch(result.dataUrl).then((response) => response.blob())
-=======
   const blob = await dataUrlToBlob(result.dataUrl)
->>>>>>> f38f3db (Restore local workspace and hardening changes)
   await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])
 }
 
@@ -266,11 +232,7 @@ export async function sliceSpriteSheetFrames(
   canvas.width = frameWidth
   canvas.height = frameHeight
 
-<<<<<<< HEAD
-  return Array.from({ length: safeFrameCount }, (_, index) => {
-=======
   return Promise.all(Array.from({ length: safeFrameCount }, async (_, index) => {
->>>>>>> f38f3db (Restore local workspace and hardening changes)
     context.clearRect(0, 0, frameWidth, frameHeight)
     context.drawImage(
       image,
@@ -284,13 +246,8 @@ export async function sliceSpriteSheetFrames(
       frameHeight,
     )
 
-<<<<<<< HEAD
-    return canvas.toDataURL('image/png')
-  })
-=======
     return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
   }))
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 }
 
 type SpriteSheetBounds = {
@@ -323,10 +280,7 @@ export async function sliceSpriteSheetFramesByContent(
   }
 
   analysisContext.drawImage(image, 0, 0)
-<<<<<<< HEAD
-=======
   await yieldToMainThread()
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 
   const { data, height, width } = analysisContext.getImageData(0, 0, image.naturalWidth, image.naturalHeight)
   const rowThreshold = Math.max(3, Math.round(width * 0.002))
@@ -386,11 +340,7 @@ export async function sliceSpriteSheetFramesByContent(
     throw new Error('Canvas rendering is not available in this browser.')
   }
 
-<<<<<<< HEAD
-  return detectedBounds.map((bounds) => {
-=======
   return Promise.all(detectedBounds.map(async (bounds) => {
->>>>>>> f38f3db (Restore local workspace and hardening changes)
     const left = Math.max(0, bounds.left - padding)
     const top = Math.max(0, bounds.top - padding)
     const right = Math.min(width - 1, bounds.right + padding)
@@ -413,13 +363,8 @@ export async function sliceSpriteSheetFramesByContent(
       outputHeight,
     )
 
-<<<<<<< HEAD
-    return outputCanvas.toDataURL('image/png')
-  })
-=======
     return blobToDataUrl(await canvasToBlob(outputCanvas, 'image/png'))
   }))
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 }
 
 type SliceImageGridOptions = {
@@ -454,11 +399,7 @@ export async function sliceImageGrid(
   canvas.width = outputWidth
   canvas.height = outputHeight
 
-<<<<<<< HEAD
-  return Array.from({ length: safeCount }, (_, index) => {
-=======
   return Promise.all(Array.from({ length: safeCount }, async (_, index) => {
->>>>>>> f38f3db (Restore local workspace and hardening changes)
     const column = index % safeColumns
     const row = Math.floor(index / safeColumns)
 
@@ -475,13 +416,8 @@ export async function sliceImageGrid(
       outputHeight,
     )
 
-<<<<<<< HEAD
-    return canvas.toDataURL('image/png')
-  })
-=======
     return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
   }))
->>>>>>> f38f3db (Restore local workspace and hardening changes)
 }
 
 export function slicePortraitStudioFaces(source: string | Blob): Promise<string[]> {
@@ -682,8 +618,6 @@ function canvasToBlob(canvas: HTMLCanvasElement, mimeType: string): Promise<Blob
     }, mimeType)
   })
 }
-<<<<<<< HEAD
-=======
 
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -706,4 +640,3 @@ function yieldToMainThread() {
     window.setTimeout(resolve, 0)
   })
 }
->>>>>>> f38f3db (Restore local workspace and hardening changes)
