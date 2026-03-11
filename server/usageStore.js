@@ -11,6 +11,10 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const dataDir = path.join(__dirname, 'data')
 const usageFilePath = path.join(dataDir, 'usage-log.json')
+<<<<<<< HEAD
+=======
+const usageEventLogPath = path.join(dataDir, 'usage-events.ndjson')
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 const pacificTimeZone = 'America/Los_Angeles'
 const defaultDailyRequestLimit = 1500
 const defaultRequestCostEstimate = 0.0005
@@ -56,9 +60,13 @@ export async function recordUsageEvent({
   }
 
   writeQueue = writeQueue.then(async () => {
+<<<<<<< HEAD
     const usageStore = await readUsageStore()
     usageStore.events.push(event)
     await persistUsageStore(usageStore)
+=======
+    await persistUsageEvent(event)
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   })
 
   await writeQueue
@@ -156,6 +164,15 @@ export async function getTelemetrySnapshot({
 }
 
 async function readUsageStore() {
+<<<<<<< HEAD
+=======
+  const ndjsonStore = await readUsageEventLog()
+
+  if (ndjsonStore.events.length > 0) {
+    return ndjsonStore
+  }
+
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   try {
     const rawFile = await fs.readFile(usageFilePath, 'utf8')
     const parsed = JSON.parse(rawFile)
@@ -203,6 +220,65 @@ async function persistUsageStore(store) {
   await fs.writeFile(usageFilePath, JSON.stringify(store, null, 2), 'utf8')
 }
 
+<<<<<<< HEAD
+=======
+async function persistUsageEvent(event) {
+  await fs.mkdir(dataDir, { recursive: true })
+  await fs.appendFile(usageEventLogPath, `${JSON.stringify(event)}\n`, 'utf8')
+}
+
+async function readUsageEventLog() {
+  try {
+    const rawFile = await fs.readFile(usageEventLogPath, 'utf8')
+    const events = rawFile
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          const event = JSON.parse(line)
+
+          if (
+            event &&
+            typeof event === 'object' &&
+            typeof event.timestamp === 'string' &&
+            typeof event.model === 'string' &&
+            typeof event.route === 'string'
+          ) {
+            return [
+              {
+                model: event.model,
+                route: event.route,
+                telemetryModel:
+                  typeof event.telemetryModel === 'string' ? event.telemetryModel : null,
+                timestamp: event.timestamp,
+                tokenCount: normalizeTokenCount(event.tokenCount),
+              },
+            ]
+          }
+        } catch {
+          return []
+        }
+
+        return []
+      })
+
+    return { events }
+  } catch (error) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return { events: [] }
+    }
+
+    throw error
+  }
+}
+
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 function buildChartPoints(events, nowTimestamp) {
   const bucketStart = nowTimestamp - chartBucketCount * chartBucketDurationMs
   const points = Array.from({ length: chartBucketCount }, () => 0)

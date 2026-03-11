@@ -2,7 +2,10 @@ import type {
   ActionAnimatorActionType,
   CharacterSheetGenerationMode,
   ForgeMode,
+<<<<<<< HEAD
   ForgeResult,
+=======
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   GenerationCount,
   LootLevelerRarity,
   TextureExpansionTargetSize,
@@ -67,7 +70,10 @@ type StoredSettings = {
 
 type StoredSession = {
   mode: ForgeMode | null
+<<<<<<< HEAD
   results: ForgeResult[]
+=======
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   serverModel: string | null
   serverPrompt: string | null
   savedAt: string
@@ -223,7 +229,10 @@ export function loadStoredState(): StoredState | null {
       },
       session:
         parsed.session &&
+<<<<<<< HEAD
         Array.isArray(parsed.session.results) &&
+=======
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
         (parsed.session.mode === null ||
           parsed.session.mode === 'action-animator' ||
           parsed.session.mode === 'loot-leveler' ||
@@ -238,10 +247,16 @@ export function loadStoredState(): StoredState | null {
           typeof parsed.session.serverModel === 'string') &&
         (parsed.session.serverPrompt === null ||
           typeof parsed.session.serverPrompt === 'string') &&
+<<<<<<< HEAD
         typeof parsed.session.savedAt === 'string'
           ? {
               mode: parsed.session.mode ?? null,
               results: parsed.session.results.filter(isStoredResult),
+=======
+          typeof parsed.session.savedAt === 'string'
+          ? {
+              mode: parsed.session.mode ?? null,
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
               serverModel: parsed.session.serverModel,
               serverPrompt: parsed.session.serverPrompt,
               savedAt: parsed.session.savedAt,
@@ -258,6 +273,7 @@ export function persistStoredState(state: StoredState) {
     return
   }
 
+<<<<<<< HEAD
   try {
     window.localStorage.setItem(storageKey, JSON.stringify(state))
     return
@@ -266,12 +282,17 @@ export function persistStoredState(state: StoredState) {
     // Retry with lightweight state so runtime does not crash.
   }
 
+=======
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   const fallbackState: StoredState = {
     ...state,
     session: state.session
       ? {
           ...state.session,
+<<<<<<< HEAD
           results: [],
+=======
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
         }
       : null,
   }
@@ -299,6 +320,7 @@ export function buildRecentPrompts(nextPrompt: string, previousPrompts: string[]
     ...previousPrompts.filter((prompt) => prompt !== trimmedPrompt),
   ].slice(0, maxRecentPrompts)
 }
+<<<<<<< HEAD
 
 function isStoredResult(result: unknown): result is ForgeResult {
   if (!result || typeof result !== 'object') {
@@ -315,3 +337,5 @@ function isStoredResult(result: unknown): result is ForgeResult {
     (Array.isArray(candidate.paletteHexes) || typeof candidate.paletteHexes === 'undefined')
   )
 }
+=======
+>>>>>>> f38f3db (Restore local workspace and hardening changes)

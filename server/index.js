@@ -9,6 +9,22 @@ import express from 'express'
 import { GoogleGenAI } from '@google/genai/node'
 import ffmpegPath from 'ffmpeg-static'
 import {
+<<<<<<< HEAD
+=======
+  createConcurrencyLimiter,
+  createCorsMiddleware,
+  createRateLimiter,
+  createSecurityHeadersMiddleware,
+  createTokenAuthMiddleware,
+} from './requestGuards.js'
+import {
+  toValidationResponse,
+  validateActionAnimatorRequest,
+  validateCharacterSheetRequest,
+  validateForgeRequest,
+} from './requestValidation.js'
+import {
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   getTelemetrySnapshot,
   getUsageSummary,
   recordUsageEvent,
@@ -28,8 +44,19 @@ const distDir = path.join(rootDir, 'dist')
 const port = Number(process.env.PORT ?? 3001)
 const apiKey =
   process.env.GEMINI_API_KEY ??
+<<<<<<< HEAD
   process.env.VITE_GEMINI_API_KEY ??
   process.env.GOOGLE_API_KEY
+=======
+  process.env.GOOGLE_API_KEY
+const allowedCorsOrigin = process.env.CORS_ORIGIN
+const generationApiToken = process.env.FORGE_API_TOKEN
+const internalApiToken = process.env.INTERNAL_API_TOKEN
+const enablePromptOrchestration = process.env.ENABLE_PROMPT_ORCHESTRATION === 'true'
+const forgeJsonLimit = process.env.FORGE_JSON_LIMIT ?? '12mb'
+const characterSheetJsonLimit = process.env.CHARACTER_SHEET_JSON_LIMIT ?? '14mb'
+const actionAnimatorJsonLimit = process.env.ACTION_ANIMATOR_JSON_LIMIT ?? '8mb'
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 const modelRegistry = {
   'gemini-2.5-flash-image':
     process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
@@ -67,6 +94,11 @@ const forgeGenerationTimeoutMs = clampTimeoutMs(
 )
 const forgeBatchInterRequestDelayMs = 250
 const forgeBatchRetryDelayMs = 1200
+<<<<<<< HEAD
+=======
+const maxPromptOrchestrationWordCount = 24
+const maxPromptEnhancerWordCount = 9
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 const actionAnimatorPollingIntervalMs = 10000
 const actionAnimatorTimeoutMs = 5 * 60 * 1000
 const minActionAnimatorDurationSeconds = 4
@@ -84,12 +116,59 @@ const coreSystemRules = [
 const uvLabModelId = 'browser-uv-engine'
 
 const app = express()
+<<<<<<< HEAD
 
 app.use(express.json({ limit: '25mb' }))
+=======
+const parseForgeBody = express.json({ limit: forgeJsonLimit })
+const parseCharacterSheetBody = express.json({ limit: characterSheetJsonLimit })
+const parseActionAnimatorBody = express.json({ limit: actionAnimatorJsonLimit })
+const usageAuth = createTokenAuthMiddleware({
+  allowLoopback: true,
+  envToken: internalApiToken,
+  headerName: 'x-internal-api-token',
+  message:
+    'Usage telemetry is restricted. Provide a valid internal API token or access the service from the local machine.',
+})
+const optionalGenerationAuth = createTokenAuthMiddleware({
+  allowLoopback: false,
+  envToken: generationApiToken,
+  headerName: 'x-api-token',
+  message: 'This generation route requires a valid API token.',
+})
+const forgeRateLimit = createRateLimiter({
+  keyPrefix: 'forge',
+  maxRequests: Number(process.env.FORGE_RATE_LIMIT_PER_MINUTE ?? 12),
+})
+const characterSheetRateLimit = createRateLimiter({
+  keyPrefix: 'character-sheet',
+  maxRequests: Number(process.env.CHARACTER_SHEET_RATE_LIMIT_PER_MINUTE ?? 8),
+})
+const actionAnimatorRateLimit = createRateLimiter({
+  keyPrefix: 'action-animator',
+  maxRequests: Number(process.env.ACTION_ANIMATOR_RATE_LIMIT_PER_MINUTE ?? 6),
+})
+const forgeConcurrencyLimit = createConcurrencyLimiter({
+  limit: Number(process.env.FORGE_MAX_IN_FLIGHT ?? 3),
+  routeLabel: 'Forge',
+})
+const characterSheetConcurrencyLimit = createConcurrencyLimiter({
+  limit: Number(process.env.CHARACTER_SHEET_MAX_IN_FLIGHT ?? 2),
+  routeLabel: 'Character Sheet',
+})
+const actionAnimatorConcurrencyLimit = createConcurrencyLimiter({
+  limit: Number(process.env.ACTION_ANIMATOR_MAX_IN_FLIGHT ?? 1),
+  routeLabel: 'Action Animator',
+})
+
+app.use(createSecurityHeadersMiddleware())
+app.use(createCorsMiddleware({ allowedOrigin: allowedCorsOrigin }))
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 
 app.get('/api/health', (_request, response) => {
   response.json({
     ok: true,
+<<<<<<< HEAD
     availableModels: {
       'action-animator': routeModelAllowlist['/api/action-animator'],
       'character-sheet': routeModelAllowlist['/api/character-sheet'],
@@ -107,6 +186,12 @@ app.get('/api/health', (_request, response) => {
 })
 
 app.get('/api/usage', async (request, response) => {
+=======
+  })
+})
+
+app.get('/api/usage', usageAuth, async (request, response) => {
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   try {
     const requestedModel =
       typeof request.query?.model === 'string' ? request.query.model : undefined
@@ -127,15 +212,41 @@ app.get('/api/usage', async (request, response) => {
   }
 })
 
+<<<<<<< HEAD
 app.post('/api/forge', async (request, response) => {
   if (!apiKey) {
     response.status(500).json({
       error:
         'Gemini API key is missing. Set GEMINI_API_KEY in .env. VITE_GEMINI_API_KEY is accepted temporarily, but server-side naming is preferred.',
+=======
+app.post(
+  '/api/forge',
+  optionalGenerationAuth,
+  forgeRateLimit,
+  forgeConcurrencyLimit,
+  parseForgeBody,
+  async (request, response) => {
+  if (!apiKey) {
+    response.status(500).json({
+      error:
+        'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
     })
     return
   }
 
+<<<<<<< HEAD
+=======
+  let validatedRequest
+
+  try {
+    validatedRequest = validateForgeRequest(request.body ?? {})
+  } catch (error) {
+    response.status(400).json(toValidationResponse(error))
+    return
+  }
+
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   const {
     mode,
     modelId,
@@ -154,7 +265,11 @@ app.post('/api/forge', async (request, response) => {
     textureSize,
     textureExpansion,
     workflow,
+<<<<<<< HEAD
   } = request.body ?? {}
+=======
+  } = validatedRequest
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 
   if (!supportedForgeModes.includes(mode)) {
     response.status(400).json({ error: 'Unsupported forge mode.' })
@@ -807,6 +922,7 @@ app.post('/api/forge', async (request, response) => {
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
+<<<<<<< HEAD
 })
 
 app.post('/api/character-sheet', async (request, response) => {
@@ -814,10 +930,38 @@ app.post('/api/character-sheet', async (request, response) => {
     response.status(500).json({
       error:
         'Gemini API key is missing. Set GEMINI_API_KEY in .env. VITE_GEMINI_API_KEY is accepted temporarily, but server-side naming is preferred.',
+=======
+  },
+)
+
+app.post(
+  '/api/character-sheet',
+  optionalGenerationAuth,
+  characterSheetRateLimit,
+  characterSheetConcurrencyLimit,
+  parseCharacterSheetBody,
+  async (request, response) => {
+  if (!apiKey) {
+    response.status(500).json({
+      error:
+        'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
     })
     return
   }
 
+<<<<<<< HEAD
+=======
+  let validatedRequest
+
+  try {
+    validatedRequest = validateCharacterSheetRequest(request.body ?? {})
+  } catch (error) {
+    response.status(400).json(toValidationResponse(error))
+    return
+  }
+
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   const {
     aspectRatio = '16:9',
     generationMode,
@@ -828,7 +972,11 @@ app.post('/api/character-sheet', async (request, response) => {
     responseModalities = ['IMAGE', 'TEXT'],
     styleId,
     systemInstruction,
+<<<<<<< HEAD
   } = request.body ?? {}
+=======
+  } = validatedRequest
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 
   if (generationMode !== 'reference' && generationMode !== 'manifest') {
     response.status(400).json({ error: 'Unsupported character sheet generation mode.' })
@@ -947,9 +1095,16 @@ app.post('/api/character-sheet', async (request, response) => {
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
+<<<<<<< HEAD
 })
 
 app.get('/api/usage/telemetry', async (_request, response) => {
+=======
+  },
+)
+
+app.get('/api/usage/telemetry', usageAuth, async (_request, response) => {
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   try {
     const localTelemetrySnapshot = await getTelemetrySnapshot()
     let telemetrySnapshot = {
@@ -965,6 +1120,7 @@ app.get('/api/usage/telemetry', async (_request, response) => {
           googleTelemetrySnapshot,
         )
       } catch (error) {
+<<<<<<< HEAD
         telemetrySnapshot = {
           ...localTelemetrySnapshot,
           error: {
@@ -980,6 +1136,15 @@ app.get('/api/usage/telemetry', async (_request, response) => {
               error instanceof Error
                 ? error.message
                 : 'Telemetry is unavailable right now.',
+=======
+        console.warn('Google telemetry unavailable:', error)
+        telemetrySnapshot = {
+          ...localTelemetrySnapshot,
+          error: {
+            code: 'telemetry_unavailable',
+            message:
+              'Google quota telemetry is unavailable right now. Local telemetry is still active.',
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
           },
           source: 'local',
         }
@@ -995,6 +1160,7 @@ app.get('/api/usage/telemetry', async (_request, response) => {
           error && typeof error === 'object' && 'code' in error
             ? error.code
             : 'telemetry_unavailable',
+<<<<<<< HEAD
         details:
           error && typeof error === 'object' && 'details' in error
             ? error.details
@@ -1003,6 +1169,10 @@ app.get('/api/usage/telemetry', async (_request, response) => {
           error instanceof Error
             ? error.message
             : 'Telemetry is unavailable right now.',
+=======
+        message:
+          'Telemetry is unavailable right now.',
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
       },
     })
   }
@@ -1106,16 +1276,43 @@ function resolveLatestTelemetryTimestamp(...timestamps) {
   return validTimestamps.sort((left, right) => Date.parse(right) - Date.parse(left))[0]
 }
 
+<<<<<<< HEAD
 app.post('/api/action-animator', async (request, response) => {
   if (!apiKey) {
     response.status(500).json({
       error:
         'Gemini API key is missing. Set GEMINI_API_KEY in .env. VITE_GEMINI_API_KEY is accepted temporarily, but server-side naming is preferred.',
+=======
+app.post(
+  '/api/action-animator',
+  optionalGenerationAuth,
+  actionAnimatorRateLimit,
+  actionAnimatorConcurrencyLimit,
+  parseActionAnimatorBody,
+  async (request, response) => {
+  if (!apiKey) {
+    response.status(500).json({
+      error:
+        'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
     })
     return
   }
 
+<<<<<<< HEAD
   const { actionType, fps, frameCount, image, modelId, prompt } = request.body ?? {}
+=======
+  let validatedRequest
+
+  try {
+    validatedRequest = validateActionAnimatorRequest(request.body ?? {})
+  } catch (error) {
+    response.status(400).json(toValidationResponse(error))
+    return
+  }
+
+  const { actionType, fps, frameCount, image, modelId, prompt } = validatedRequest
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   const normalizedFps = clampActionAnimatorFps(fps)
   const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
 
@@ -1186,7 +1383,12 @@ app.post('/api/action-animator', async (request, response) => {
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
+<<<<<<< HEAD
 })
+=======
+  },
+)
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(distDir))
@@ -1196,9 +1398,56 @@ if (process.env.NODE_ENV === 'production') {
   })
 }
 
+<<<<<<< HEAD
 export { app }
 
 export function startServer() {
+=======
+app.use((error, _request, response, next) => {
+  if (
+    error &&
+    typeof error === 'object' &&
+    'type' in error &&
+    error.type === 'entity.too.large'
+  ) {
+    response.status(413).json({
+      error: {
+        code: 'payload_too_large',
+        message: 'The request body exceeds the configured size limit.',
+        title: 'Payload Too Large',
+      },
+    })
+    return
+  }
+
+  if (error instanceof SyntaxError && 'body' in error) {
+    response.status(400).json({
+      error: {
+        code: 'invalid_json',
+        message: 'The request body is not valid JSON.',
+        title: 'Invalid JSON',
+      },
+    })
+    return
+  }
+
+  next(error)
+})
+
+export { app }
+
+export function startServer() {
+  console.log(
+    JSON.stringify({
+      allowCorsOrigin: allowedCorsOrigin || 'same-origin only',
+      generationAuth: generationApiToken ? 'token-required' : 'disabled',
+      internalAuth: internalApiToken ? 'token-or-loopback' : 'loopback-only',
+      promptOrchestration: enablePromptOrchestration,
+      trustBoundary: 'client requests only; Gemini credentials remain server-side',
+      type: 'server-security-config',
+    }),
+  )
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   return app.listen(port, () => {
     console.log(`Kizer Forge API listening on http://localhost:${port}`)
   })
@@ -1227,6 +1476,24 @@ async function buildForgePromptWithBestPractices({
     return ''
   }
 
+<<<<<<< HEAD
+=======
+  if (
+    !enablePromptOrchestration ||
+    countWords(normalizedPrompt) > maxPromptOrchestrationWordCount
+  ) {
+    return buildForgePromptFallback({
+      mode,
+      prompt: normalizedPrompt,
+      seamlessMode,
+      styleText: normalizedStyleText,
+      hasStyleReference,
+      hasSubjectReference,
+      textureSize: normalizedTextureSize,
+    })
+  }
+
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
   if (mode === 'texture-lab' && seamlessMode) {
     return buildSemanticTilingPrompt({
       prompt: normalizedPrompt,
@@ -1618,7 +1885,15 @@ function normalizeTextureLabOutputSize(value) {
 async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
   const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
 
+<<<<<<< HEAD
   if (!normalizedPrompt || countWords(normalizedPrompt) >= 10) {
+=======
+  if (
+    !enablePromptOrchestration ||
+    !normalizedPrompt ||
+    countWords(normalizedPrompt) > maxPromptEnhancerWordCount
+  ) {
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
     return normalizedPrompt
   }
 
@@ -2018,10 +2293,47 @@ function clampTimeoutMs(value, fallback) {
 
 function logServerEvent(requestId, message, details) {
   const serializedDetails =
+<<<<<<< HEAD
     details && Object.keys(details).length > 0 ? ` ${JSON.stringify(details)}` : ''
   console.log(`[${new Date().toISOString()}] [${requestId}] ${message}${serializedDetails}`)
 }
 
+=======
+    details && Object.keys(details).length > 0
+      ? ` ${JSON.stringify(sanitizeLogDetails(details))}`
+      : ''
+  console.log(`[${new Date().toISOString()}] [${requestId}] ${message}${serializedDetails}`)
+}
+
+function sanitizeLogDetails(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeLogDetails(entry))
+  }
+
+  if (!value || typeof value !== 'object') {
+    return typeof value === 'string' && value.length > 160
+      ? `${value.slice(0, 157)}...`
+      : value
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => {
+      if (
+        key === 'data' ||
+        key === 'inlineData' ||
+        key === 'prompt' ||
+        key === 'systemInstruction' ||
+        key === 'contents'
+      ) {
+        return [key, '[redacted]']
+      }
+
+      return [key, sanitizeLogDetails(entry)]
+    }),
+  )
+}
+
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 async function withTimeout(promise, timeoutMs, timeoutMessage) {
   let timeoutHandle
 

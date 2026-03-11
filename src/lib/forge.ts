@@ -47,6 +47,13 @@ export type ReferenceAsset = {
   sizeLabel: string
 }
 
+<<<<<<< HEAD
+=======
+export type ImageValidationResult =
+  | { asset: ReferenceAsset; ok: true }
+  | { error: string; ok: false }
+
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 export type ModelAsset = {
   file: File
   format: ModelFormat
@@ -713,6 +720,62 @@ export function toReferenceAsset(file: File): ReferenceAsset {
   }
 }
 
+<<<<<<< HEAD
+=======
+export const maxReferenceImageBytes = 10 * 1024 * 1024
+export const allowedReferenceImageMimeTypes = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+])
+
+export async function validateReferenceImageUpload(
+  file: File,
+  maxBytes = maxReferenceImageBytes,
+): Promise<ImageValidationResult> {
+  if (!allowedReferenceImageMimeTypes.has(file.type)) {
+    return {
+      error: 'Only PNG, JPEG, and WebP images are supported.',
+      ok: false,
+    }
+  }
+
+  if (file.size > maxBytes) {
+    return {
+      error: `Images must be ${Math.round(Math.max(1, maxBytes / (1024 * 1024)))} MB or smaller.`,
+      ok: false,
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(file)
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const image = new Image()
+      image.onload = () => resolve()
+      image.onerror = () =>
+        reject(new Error('The selected image could not be decoded in this browser.'))
+      image.src = objectUrl
+    })
+
+    return {
+      asset: toReferenceAsset(file),
+      ok: true,
+    }
+  } catch (error) {
+    return {
+      error:
+        error instanceof Error
+          ? error.message
+          : 'The selected image could not be decoded in this browser.',
+      ok: false,
+    }
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
+>>>>>>> f38f3db (Restore local workspace and hardening changes)
 export function detectModelFormat(fileName: string): ModelFormat | null {
   const normalizedName = fileName.trim().toLowerCase()
 
