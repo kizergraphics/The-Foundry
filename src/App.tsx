@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useEffectEvent, useReducer, useState } from 'react'
+import { lazy, Suspense, useEffect, useEffectEvent, useReducer, useRef, useState } from 'react'
 import {
   AlertCircle,
   Box,
@@ -324,6 +324,7 @@ function App() {
   const [activeModel, setActiveModel] = useState<ModelId>(
     smartDefaultModelByMode[initialState.activeMode],
   )
+  const forgeRunInFlightRef = useRef(false)
   const [sessionCountsByModel, setSessionCountsByModel] = useState<
     Record<string, number>
   >({})
@@ -939,7 +940,7 @@ function App() {
   }
 
   async function handleForge() {
-    if (!isReadyForApi || isForging) {
+    if (!isReadyForApi || isForging || forgeRunInFlightRef.current) {
       return
     }
 
@@ -959,10 +960,10 @@ function App() {
       return
     }
 
+    forgeRunInFlightRef.current = true
     setStatus('loading')
     setError(null)
     setNotice(null)
-    setResults([])
     setServerPrompt(null)
     if (isUvLabMode) {
       setUvJob(null)
@@ -1398,6 +1399,8 @@ function App() {
           state: 'error',
         }))
       }
+    } finally {
+      forgeRunInFlightRef.current = false
     }
   }
 

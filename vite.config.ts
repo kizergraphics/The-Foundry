@@ -35,6 +35,9 @@ export default defineConfig({
     proxy: {
       '/api': 'http://localhost:3001',
     },
+    watch: {
+      ignored: ['**/server/data/**'],
+    },
   },
   test: {
     environment: 'jsdom',
