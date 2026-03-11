@@ -116,7 +116,7 @@ describe('API hardening', () => {
     const firstResponse = await request(app).post('/api/action-animator').send({})
     const secondResponse = await request(app).post('/api/action-animator').send({})
 
-    expect(firstResponse.status).toBe(500)
+    expect(firstResponse.status).toBe(400)
     expect(secondResponse.status).toBe(429)
     expect(secondResponse.body.error.code).toBe('rate_limited')
   })
