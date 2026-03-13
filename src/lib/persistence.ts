@@ -1,5 +1,7 @@
 import type {
   ActionAnimatorActionType,
+  ActionAnimatorNormalizedSize,
+  ActionAnimatorPipeline,
   CharacterSheetGenerationMode,
   ForgeMode,
   GenerationCount,
@@ -10,6 +12,7 @@ import type {
 } from './forge'
 import {
   clampActionAnimatorFps,
+  clampActionAnimatorNormalizedSize,
   clampFrameCount,
   clampTextureLabOutputSize,
   clampUvAtlasSize,
@@ -21,6 +24,8 @@ type StoredActionAnimatorSettings = {
   customActionPrompt: string
   frameCount: number
   fps: number
+  normalizedSize: ActionAnimatorNormalizedSize
+  pipeline: ActionAnimatorPipeline
 }
 
 type StoredCharacterSheetSettings = {
@@ -93,6 +98,10 @@ export function loadStoredState(): StoredState | null {
 
   try {
     const parsed = JSON.parse(rawValue) as Partial<StoredState>
+    const actionAnimatorPipeline: ActionAnimatorPipeline =
+      parsed.settings?.actionAnimator?.pipeline === 'veo-video'
+        ? 'veo-video'
+        : 'sprite-strip'
 
     return {
       recentPrompts: Array.isArray(parsed.recentPrompts)
@@ -137,6 +146,15 @@ export function loadStoredState(): StoredState | null {
             Number.isFinite(parsed.settings.actionAnimator.fps)
               ? clampActionAnimatorFps(parsed.settings.actionAnimator.fps)
               : 8,
+          normalizedSize:
+            typeof parsed.settings?.actionAnimator?.normalizedSize === 'number' &&
+            Number.isFinite(parsed.settings.actionAnimator.normalizedSize)
+              ? clampActionAnimatorNormalizedSize(
+                  parsed.settings.actionAnimator.normalizedSize,
+                  actionAnimatorPipeline,
+                )
+              : clampActionAnimatorNormalizedSize(64, actionAnimatorPipeline),
+          pipeline: actionAnimatorPipeline,
         },
         characterSheet: {
           consistencyEnabled: Boolean(

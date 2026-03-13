@@ -1,5 +1,15 @@
-import { createDataUrl, fileToBase64 } from './browser'
-import type { ActionAnimatorActionType, ActionAnimatorState, ForgeResult } from './forge'
+import {
+  buildAnimatorStripCanvasInput,
+  createDataUrl,
+  fileToBase64,
+  normalizeAnimatorSpriteFrames,
+  sliceAnimatorStripSlots,
+} from './browser'
+import type {
+  ActionAnimatorActionType,
+  ActionAnimatorState,
+  ForgeResult,
+} from './forge'
 
 export const actionAnimatorActionOptions: Array<{
   label: string
@@ -13,9 +23,10 @@ export const actionAnimatorActionOptions: Array<{
   { label: 'Custom', value: 'custom' },
 ]
 
-export type ActionAnimatorRequestPayload = {
+type ActionAnimatorVideoRequestPayload = {
   actionType: ActionAnimatorActionType
   frameCount: number
+  frameSize: ActionAnimatorState['normalizedSize']
   fps: number
   image: {
     data: string
@@ -26,7 +37,280 @@ export type ActionAnimatorRequestPayload = {
   prompt: string
 }
 
+type ActionAnimatorStripChunkRequestPayload = {
+  actionType: ActionAnimatorActionType
+  anchorImage: {
+    data: string
+    mimeType: string
+    name: string
+  }
+  canvasImage: {
+    data: string
+    mimeType: string
+  }
+  chunkIndex: number
+  frameCount: number
+  fps: number
+  modelId: string
+  prompt: string
+}
+
+type ActionAnimatorApiResponse =
+  | {
+      error?:
+        | string
+        | {
+            code?: string
+            details?: string[]
+            message?: string
+            retryAfterSeconds?: number
+            title?: string
+          }
+      images?: Array<{
+        data: string
+        id: string
+        mimeType: string
+        text?: string
+      }>
+      model?: string
+      prompt?: string
+    }
+  | undefined
+
+type ActionAnimatorChunkPlan = {
+  chunkIndex: number
+  slotCount: number
+}
+
 export function buildActionAnimatorPrompt(state: ActionAnimatorState) {
+  return state.pipeline === 'veo-video'
+    ? buildActionAnimatorVideoPrompt(state)
+    : buildActionAnimatorStripPrompt(state)
+}
+
+export function planActionAnimatorChunks(frameCount: number): ActionAnimatorChunkPlan[] {
+  const safeFrameCount = Math.max(4, Math.round(frameCount))
+  const chunkCount = Math.max(1, Math.ceil((safeFrameCount - 1) / 3))
+
+  return Array.from({ length: chunkCount }, (_, chunkIndex) => ({
+    chunkIndex,
+    slotCount: 4,
+  }))
+}
+
+async function buildActionAnimatorVideoRequest(
+  state: ActionAnimatorState,
+  modelId: string,
+): Promise<ActionAnimatorVideoRequestPayload> {
+  if (!state.characterImage) {
+    throw new Error('A character image is required before generating animation.')
+  }
+
+  return {
+    actionType: state.actionType,
+    frameCount: state.frameCount,
+    frameSize: state.normalizedSize,
+    fps: state.fps,
+    image: {
+      data: await fileToBase64(state.characterImage.file),
+      mimeType: state.characterImage.mimeType,
+      name: state.characterImage.name,
+    },
+    modelId,
+    prompt: buildActionAnimatorPrompt(state),
+  }
+}
+
+async function buildActionAnimatorStripChunkRequest(
+  state: ActionAnimatorState,
+  modelId: string,
+  anchorSource: string,
+  chunkIndex: number,
+): Promise<ActionAnimatorStripChunkRequestPayload> {
+  if (!state.characterImage) {
+    throw new Error('A seed frame is required before generating animation.')
+  }
+
+  const canvasImage = await buildAnimatorStripCanvasInput(anchorSource, {
+    canvasSize: 1024,
+    slotCount: 4,
+  })
+  const anchorBase64 = anchorSource.startsWith('data:')
+    ? anchorSource.slice(anchorSource.indexOf(',') + 1)
+    : await fileToBase64(state.characterImage.file)
+  const anchorMimeType =
+    anchorSource.startsWith('data:')
+      ? anchorSource.match(/^data:([^;]+);base64,/)?.[1] ?? 'image/png'
+      : state.characterImage.mimeType
+
+  return {
+    actionType: state.actionType,
+    anchorImage: {
+      data: anchorBase64,
+      mimeType: anchorMimeType,
+      name: `action-animator-anchor-${String(chunkIndex + 1).padStart(2, '0')}.png`,
+    },
+    canvasImage: {
+      data: canvasImage.base64,
+      mimeType: canvasImage.mimeType,
+    },
+    chunkIndex,
+    frameCount: 4,
+    fps: state.fps,
+    modelId,
+    prompt: buildActionAnimatorPrompt(state),
+  }
+}
+
+export async function generateActionAnimator({
+  modelId,
+  state,
+}: {
+  modelId: string
+  state: ActionAnimatorState
+}) {
+  return state.pipeline === 'veo-video'
+    ? generateVeoActionAnimator({
+        modelId,
+        state,
+      })
+    : generateStripActionAnimator({
+        modelId,
+        state,
+      })
+}
+
+async function generateVeoActionAnimator({
+  modelId,
+  state,
+}: {
+  modelId: string
+  state: ActionAnimatorState
+}) {
+  const request = await buildActionAnimatorVideoRequest(state, modelId)
+  const payload = await postActionAnimatorRequest('/api/action-animator', request)
+
+  return {
+    model: payload.model ?? null,
+    prompt: payload.prompt ?? null,
+    results: payload.images.map<ForgeResult>((image) => ({
+      dataUrl: createDataUrl(image.data, image.mimeType),
+      id: image.id,
+      mimeType: image.mimeType,
+      text: image.text,
+    })),
+  }
+}
+
+async function generateStripActionAnimator({
+  modelId,
+  state,
+}: {
+  modelId: string
+  state: ActionAnimatorState
+}) {
+  if (!state.characterImage) {
+    throw new Error('A seed frame is required before generating animation.')
+  }
+
+  const seedBase64 = await fileToBase64(state.characterImage.file)
+  const seedDataUrl = createDataUrl(seedBase64, state.characterImage.mimeType)
+  const chunkPlan = planActionAnimatorChunks(state.frameCount)
+  const rawFrames: string[] = []
+  let latestModel: string | null = null
+  let latestPrompt: string | null = null
+  let anchorSource = seedDataUrl
+
+  for (const chunk of chunkPlan) {
+    const request = await buildActionAnimatorStripChunkRequest(
+      state,
+      modelId,
+      anchorSource,
+      chunk.chunkIndex,
+    )
+    const payload = await postActionAnimatorRequest('/api/action-animator-strip', request)
+    const chunkImage = payload.images[0]
+    const rawStripDataUrl = createDataUrl(chunkImage.data, chunkImage.mimeType)
+    const slotFrames = await sliceAnimatorStripSlots(rawStripDataUrl, chunk.slotCount)
+    const nextFrames = chunk.chunkIndex === 0 ? slotFrames : slotFrames.slice(1)
+
+    rawFrames.push(...nextFrames)
+    anchorSource = slotFrames[slotFrames.length - 1] ?? anchorSource
+    latestModel = payload.model ?? latestModel
+    latestPrompt = payload.prompt ?? latestPrompt
+  }
+
+  const normalizedFrames = await normalizeAnimatorSpriteFrames(
+    rawFrames.slice(0, state.frameCount),
+    {
+      seedFrame: seedDataUrl,
+      targetSize: state.normalizedSize,
+    },
+  )
+
+  return {
+    model: latestModel,
+    prompt: latestPrompt ?? buildActionAnimatorPrompt(state),
+    results: [
+      {
+        dataUrl: normalizedFrames.spriteSheetDataUrl,
+        id: 'action-animator-sprite-strip',
+        mimeType: 'image/png',
+        text:
+          `Generated ${state.frameCount} normalized frames at ${state.normalizedSize} x ${state.normalizedSize}. ` +
+          'The strip pipeline used four-slot chunking with frame 1 locked to the seed frame.',
+      },
+    ],
+  }
+}
+
+async function postActionAnimatorRequest(
+  route: '/api/action-animator' | '/api/action-animator-strip',
+  request: ActionAnimatorVideoRequestPayload | ActionAnimatorStripChunkRequestPayload,
+) {
+  const response = await fetch(route, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
+  })
+  const payload = (await response.json()) as ActionAnimatorApiResponse
+
+  if (!response.ok || !payload?.images?.length) {
+    throw payload?.error ?? 'Action Animator generation failed.'
+  }
+
+  return {
+    images: payload.images,
+    model: payload.model ?? null,
+    prompt: payload.prompt ?? null,
+  }
+}
+
+function buildActionAnimatorStripPrompt(state: ActionAnimatorState) {
+  const directionPrompt = state.customActionPrompt.trim()
+  const actionLabel =
+    state.actionType === 'custom' ? directionPrompt || 'custom action' : state.actionType
+
+  return [
+    `Create a candidate production sprite strip for a 2D game ${actionLabel} animation.`,
+    'Use the uploaded seed frame as the identity anchor and exact starting frame.',
+    `${state.frameCount} total frames with chunked four-slot strip generation.`,
+    `Normalize the final output to ${state.normalizedSize} x ${state.normalizedSize} frames.`,
+    `Preview target playback rate: ${state.fps} fps.`,
+    state.actionType !== 'custom' && directionPrompt
+      ? `Additional direction: ${directionPrompt}.`
+      : null,
+    'Preserve the exact face, palette, silhouette, proportions, outfit shapes, and side-view orientation from the seed frame.',
+    'Do not introduce props, scenery, floor planes, glow, haze, labels, or UI.',
+    'Keep the image transparent outside the reserved frame slots.',
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function buildActionAnimatorVideoPrompt(state: ActionAnimatorState) {
   const directionPrompt = state.customActionPrompt.trim()
   const actionLabel =
     state.actionType === 'custom' ? directionPrompt || 'custom action' : state.actionType
@@ -52,80 +336,4 @@ export function buildActionAnimatorPrompt(state: ActionAnimatorState) {
   ]
     .filter(Boolean)
     .join(' ')
-}
-
-export async function buildActionAnimatorRequest(
-  state: ActionAnimatorState,
-  modelId: string,
-): Promise<ActionAnimatorRequestPayload> {
-  if (!state.characterImage) {
-    throw new Error('A character image is required before generating animation.')
-  }
-
-  return {
-    actionType: state.actionType,
-    frameCount: state.frameCount,
-    fps: state.fps,
-    image: {
-      data: await fileToBase64(state.characterImage.file),
-      mimeType: state.characterImage.mimeType,
-      name: state.characterImage.name,
-    },
-    modelId,
-    prompt: buildActionAnimatorPrompt(state),
-  }
-}
-
-export async function generateActionAnimator({
-  modelId,
-  state,
-}: {
-  modelId: string
-  state: ActionAnimatorState
-}) {
-  const request = await buildActionAnimatorRequest(state, modelId)
-  const response = await fetch('/api/action-animator', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(request),
-  })
-
-  const payload = (await response.json()) as
-    | {
-        error?:
-          | string
-          | {
-              code?: string
-              details?: string[]
-              message?: string
-              retryAfterSeconds?: number
-              title?: string
-            }
-        images?: Array<{
-          data: string
-          id: string
-          mimeType: string
-          text?: string
-        }>
-        model?: string
-        prompt?: string
-      }
-    | undefined
-
-  if (!response.ok || !payload?.images?.length) {
-    throw payload?.error ?? 'Action Animator generation failed.'
-  }
-
-  return {
-    model: payload.model ?? null,
-    prompt: payload.prompt ?? null,
-    results: payload.images.map<ForgeResult>((image) => ({
-      dataUrl: createDataUrl(image.data, image.mimeType),
-      id: image.id,
-      mimeType: image.mimeType,
-      text: image.text,
-    })),
-  }
 }

@@ -13,6 +13,8 @@ describe('persistStoredState', () => {
           customActionPrompt: '',
           frameCount: 8,
           fps: 8,
+          normalizedSize: 64,
+          pipeline: 'sprite-strip',
         },
         characterSheet: {
           consistencyEnabled: false,
@@ -72,6 +74,8 @@ describe('persistStoredState', () => {
             customActionPrompt: '',
             frameCount: 8,
             fps: 8,
+            normalizedSize: 64,
+            pipeline: 'sprite-strip',
           },
           characterSheet: {
             consistencyEnabled: false,
@@ -120,6 +124,116 @@ describe('persistStoredState', () => {
       savedAt: '2026-03-10T00:00:00.000Z',
       serverModel: 'gemini-3-flash',
       serverPrompt: 'hero sword',
+    })
+  })
+
+  it('restores animator sizes with pipeline-aware clamping', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          activeMode: 'action-animator',
+          actionAnimator: {
+            actionType: 'walk',
+            customActionPrompt: '',
+            frameCount: 8,
+            fps: 8,
+            normalizedSize: 700,
+            pipeline: 'sprite-strip',
+          },
+          characterSheet: {
+            consistencyEnabled: false,
+            generationMode: 'reference',
+            manifestPrompt: '',
+            parentId: null,
+            referencePrompt: '',
+          },
+          generationCount: 1,
+          lootLeveler: {
+            rarity: 'common',
+          },
+          portraitStudio: {
+            prompt: '',
+          },
+          prompt: '',
+          textureLab: {
+            expansionTargetSize: 1024,
+            seamlessMode: false,
+            workflow: 'generate',
+          },
+          uvLab: {
+            atlasSize: 2048,
+            paddingPx: 8,
+          },
+          vfxForge: {
+            frameCount: 8,
+            intensity: 60,
+            prompt: '',
+            projectileType: 'Fireball',
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.actionAnimator).toMatchObject({
+      normalizedSize: 512,
+      pipeline: 'sprite-strip',
+    })
+
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          activeMode: 'action-animator',
+          actionAnimator: {
+            actionType: 'walk',
+            customActionPrompt: '',
+            frameCount: 8,
+            fps: 8,
+            normalizedSize: 256,
+            pipeline: 'veo-video',
+          },
+          characterSheet: {
+            consistencyEnabled: false,
+            generationMode: 'reference',
+            manifestPrompt: '',
+            parentId: null,
+            referencePrompt: '',
+          },
+          generationCount: 1,
+          lootLeveler: {
+            rarity: 'common',
+          },
+          portraitStudio: {
+            prompt: '',
+          },
+          prompt: '',
+          textureLab: {
+            expansionTargetSize: 1024,
+            seamlessMode: false,
+            workflow: 'generate',
+          },
+          uvLab: {
+            atlasSize: 2048,
+            paddingPx: 8,
+          },
+          vfxForge: {
+            frameCount: 8,
+            intensity: 60,
+            prompt: '',
+            projectileType: 'Fireball',
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.actionAnimator).toMatchObject({
+      normalizedSize: 512,
+      pipeline: 'veo-video',
     })
   })
 })

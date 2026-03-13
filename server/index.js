@@ -18,6 +18,7 @@ import {
 import {
   toValidationResponse,
   validateActionAnimatorRequest,
+  validateActionAnimatorStripRequest,
   validateCharacterSheetRequest,
   validateForgeRequest,
 } from './requestValidation.js'
@@ -61,11 +62,13 @@ const modelRegistry = {
 }
 const routeModelDefaults = {
   '/api/action-animator': 'veo-3.1-fast',
+  '/api/action-animator-strip': 'gemini-3-pro',
   '/api/character-sheet': 'gemini-3-pro',
   '/api/forge': 'gemini-3-flash',
 }
 const routeModelAllowlist = {
   '/api/action-animator': ['veo-3.1-fast'],
+  '/api/action-animator-strip': ['gemini-3-pro', 'gemini-2.5-flash-image'],
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
 }
@@ -96,7 +99,7 @@ const actionAnimatorDurationSeconds = clampActionAnimatorDurationSeconds(
   Number(process.env.GEMINI_VEO_DURATION_SECONDS ?? minActionAnimatorDurationSeconds),
 )
 const actionAnimatorBackgroundColor = '0x00FF00'
-const actionAnimatorFrameSizePx = 512
+const defaultActionAnimatorFrameSizePx = 512
 const coreSystemRules = [
   'Always render assets on a neutral gray #808080 background.',
   'Never include text, logos, or watermarks in the image.',
@@ -1197,7 +1200,7 @@ app.post(
     return
   }
 
-  const { actionType, fps, frameCount, image, modelId, prompt } = validatedRequest
+  const { actionType, fps, frameCount, frameSize, image, modelId, prompt } = validatedRequest
   const normalizedFps = clampActionAnimatorFps(fps)
   const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
 
@@ -1234,6 +1237,7 @@ app.post(
       ai,
       fps: normalizedFps,
       frameCount: normalizedFrameCount,
+      frameSize,
       image,
       modelSelection,
       prompt,
@@ -1268,6 +1272,120 @@ app.post(
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
+  },
+)
+
+app.post(
+  '/api/action-animator-strip',
+  optionalGenerationAuth,
+  actionAnimatorRateLimit,
+  actionAnimatorConcurrencyLimit,
+  parseActionAnimatorBody,
+  async (request, response) => {
+    if (!apiKey) {
+      response.status(500).json({
+        error:
+          'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
+      })
+      return
+    }
+
+    let validatedRequest
+
+    try {
+      validatedRequest = validateActionAnimatorStripRequest(request.body ?? {})
+    } catch (error) {
+      response.status(400).json(toValidationResponse(error))
+      return
+    }
+
+    const {
+      actionType,
+      anchorImage,
+      canvasImage,
+      chunkIndex,
+      fps,
+      frameCount,
+      modelId,
+      prompt,
+    } = validatedRequest
+    const modelSelection = resolveModelForRoute('/api/action-animator-strip', modelId)
+
+    if (!modelSelection.ok) {
+      response.status(400).json({
+        error: {
+          code: 'model_unsupported',
+          details: modelSelection.details,
+          message: modelSelection.message,
+          title: 'Model Not Supported For This Tab',
+        },
+      })
+      return
+    }
+
+    const ai = new GoogleGenAI({ apiKey })
+
+    try {
+      const animatorResult = await generateAnimatorStripChunk({
+        actionType,
+        ai,
+        anchorImage,
+        canvasImage,
+        chunkIndex,
+        fps,
+        frameCount,
+        modelSelection,
+        prompt,
+      })
+
+      if (!animatorResult.image) {
+        response
+          .status(422)
+          .json(
+            buildNoImageResponseError(
+              '/api/action-animator-strip',
+              modelSelection,
+              animatorResult.text,
+            ),
+          )
+        return
+      }
+
+      await recordUsageEvent({
+        model: modelSelection.modelId,
+        route: '/api/action-animator-strip',
+        telemetryModel: resolveTelemetryModelId(
+          modelSelection.modelId,
+          '/api/action-animator-strip',
+        ),
+        tokenCount: animatorResult.tokenCount,
+      }).catch((logError) => {
+        console.warn(
+          'Telemetry logging failed for /api/action-animator-strip:',
+          logError,
+        )
+      })
+
+      response.json({
+        images: [
+          {
+            data: animatorResult.image.data,
+            id: animatorResult.image.id,
+            mimeType: animatorResult.image.mimeType,
+            text:
+              animatorResult.image.text ??
+              'Generated a four-slot sprite-strip chunk from the provided anchor frame.',
+          },
+        ],
+        model: modelSelection.modelId,
+        prompt: animatorResult.prompt,
+        providerModel: modelSelection.providerModel,
+      })
+    } catch (error) {
+      const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
+
+      response.status(normalizedError.status).json(normalizedError.body)
+    }
   },
 )
 
@@ -2247,10 +2365,12 @@ async function generateAnimatorSpriteSheet({
   ai,
   fps,
   frameCount,
+  frameSize,
   image,
   modelSelection,
   prompt,
 }) {
+  const normalizedFrameSize = normalizeActionAnimatorFrameSize(frameSize)
   const normalizedPrompt = buildAnimatorPrompt({
     actionType,
     fps,
@@ -2278,6 +2398,7 @@ async function generateAnimatorSpriteSheet({
   const video = settledOperation.response?.generatedVideos?.[0]?.video
   const videoBuffer = await readGeneratedVideo(ai, video)
   const spriteSheetBase64 = await createSpriteSheetFromVideo({
+    frameSize: normalizedFrameSize,
     image,
     frameCount,
     videoBuffer,
@@ -2285,10 +2406,66 @@ async function generateAnimatorSpriteSheet({
 
   return {
     note:
-      `Generated ${frameCount} frame sprite sheet from Veo 3.1 Fast with a target playback rate of ${fps} fps. ` +
+      `Generated ${frameCount} frame sprite sheet from Veo 3.1 Fast with a target playback rate of ${fps} fps at ${normalizedFrameSize} x ${normalizedFrameSize} per frame. ` +
       'Frame 1 is locked to the reference image, with feet, lighting, centering, and background constraints injected server-side.',
     prompt: normalizedPrompt,
     spriteSheetBase64,
+  }
+}
+
+async function generateAnimatorStripChunk({
+  actionType,
+  ai,
+  anchorImage,
+  canvasImage,
+  chunkIndex,
+  fps,
+  frameCount,
+  modelSelection,
+  prompt,
+}) {
+  const normalizedPrompt = buildAnimatorStripPrompt({
+    actionType,
+    chunkIndex,
+    fps,
+    frameCount,
+    prompt,
+  })
+  const generation = await ai.models.generateContent({
+    model: modelSelection.providerModel,
+    contents: [
+      { text: normalizedPrompt },
+      {
+        inlineData: {
+          mimeType: canvasImage.mimeType,
+          data: canvasImage.data,
+        },
+      },
+      {
+        inlineData: {
+          mimeType: anchorImage.mimeType,
+          data: anchorImage.data,
+        },
+      },
+    ],
+    config: {
+      candidateCount: 1,
+      responseModalities: ['IMAGE', 'TEXT'],
+      systemInstruction: [
+        'You are editing a production sprite-strip reference canvas.',
+        'Treat the transparent slot layout in the canvas image as authoritative.',
+        'Keep the leftmost slot unchanged as the anchor pose for the chunk.',
+        'Return only the edited image with transparency preserved and no text.',
+      ].join(' '),
+    },
+  })
+  const images = extractImages(generation).slice(0, 1)
+
+  return {
+    image: images[0] ?? null,
+    prompt: normalizedPrompt,
+    text: generation.text,
+    tokenCount: extractTotalTokenCount(generation),
   }
 }
 
@@ -2325,6 +2502,32 @@ function buildAnimatorPrompt({ actionType, fps, frameCount, prompt }) {
     'The background must remain perfectly identical in every frame.',
     'Do not introduce white backdrops, dark green flicker, gradients, shadows, floor planes, or background changes.',
     'Use a solid green background (#00FF00) for easy post-processing removal.',
+  ].join(' ')
+}
+
+function buildAnimatorStripPrompt({ actionType, chunkIndex, fps, frameCount, prompt }) {
+  const normalizedAction =
+    typeof actionType === 'string' && actionType.trim().length > 0
+      ? actionType.trim().toLowerCase()
+      : 'idle'
+  const normalizedFps = clampActionAnimatorFps(fps)
+  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
+  const basePrompt =
+    typeof prompt === 'string' && prompt.trim().length > 0
+      ? prompt.trim()
+      : `Create a 2D game sprite ${normalizedAction} strip from the provided seed frame.`
+
+  return [
+    basePrompt,
+    `Chunk index: ${chunkIndex + 1}.`,
+    `Layout: exactly ${normalizedFrameCount} equal square frame slots in one horizontal row across a 1024 x 1024 transparent canvas.`,
+    `Target playback rate: ${normalizedFps} fps.`,
+    'Keep the leftmost slot unchanged as the chunk starting frame.',
+    'Continue the motion naturally across the remaining slots.',
+    'Preserve the exact face, silhouette, palette, proportions, clothing shapes, and side-profile orientation from the anchor image.',
+    'Keep wide transparent empty space outside the slot row.',
+    'Do not add props, scenery, floor, shadows outside the sprite, glow, labels, poster layout, or UI.',
+    'Return a crisp pixel-art sprite strip candidate, not a concept illustration.',
   ].join(' ')
 }
 
@@ -2393,12 +2596,13 @@ async function readGeneratedVideo(ai, video) {
   throw new Error('Veo returned no downloadable video bytes for the animation request.')
 }
 
-async function createSpriteSheetFromVideo({ frameCount, image, videoBuffer }) {
+async function createSpriteSheetFromVideo({ frameCount, frameSize, image, videoBuffer }) {
   if (!ffmpegPath) {
     throw new Error('ffmpeg-static is unavailable, so sprite sheet extraction cannot run.')
   }
 
   const safeFrameCount = clampAnimatorFrameCount(frameCount)
+  const safeFrameSize = normalizeActionAnimatorFrameSize(frameSize)
   const extractedVideoFrameCount = Math.max(0, safeFrameCount - 1)
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-action-animator-'))
   const referenceImagePath = path.join(
@@ -2417,7 +2621,9 @@ async function createSpriteSheetFromVideo({ frameCount, image, videoBuffer }) {
       '-i',
       referenceImagePath,
       '-filter_complex',
-      buildAnimatorMatteFilter(),
+      buildAnimatorMatteFilter({
+        frameSizePx: safeFrameSize,
+      }),
       '-map',
       '[out]',
       '-frames:v',
@@ -2432,6 +2638,7 @@ async function createSpriteSheetFromVideo({ frameCount, image, videoBuffer }) {
         videoPath,
         '-filter_complex',
         buildAnimatorMatteFilter({
+          frameSizePx: safeFrameSize,
           sampleFps: extractedVideoFrameCount / actionAnimatorDurationSeconds,
         }),
         '-map',
@@ -2466,7 +2673,8 @@ async function createSpriteSheetFromVideo({ frameCount, image, videoBuffer }) {
   }
 }
 
-function buildAnimatorMatteFilter(options = {}) {
+export function buildAnimatorMatteFilter(options = {}) {
+  const frameSizePx = normalizeActionAnimatorFrameSize(options.frameSizePx)
   const filterSteps = []
 
   if (typeof options.sampleFps === 'number' && Number.isFinite(options.sampleFps)) {
@@ -2474,17 +2682,21 @@ function buildAnimatorMatteFilter(options = {}) {
   }
 
   filterSteps.push(
-    `scale=${actionAnimatorFrameSizePx}:${actionAnimatorFrameSizePx}:force_original_aspect_ratio=decrease:flags=lanczos`,
-    `pad=${actionAnimatorFrameSizePx}:${actionAnimatorFrameSizePx}:(ow-iw)/2:(oh-ih)/2:color=${actionAnimatorBackgroundColor}`,
+    `scale=${frameSizePx}:${frameSizePx}:force_original_aspect_ratio=decrease:flags=lanczos`,
+    `pad=${frameSizePx}:${frameSizePx}:(ow-iw)/2:(oh-ih)/2:color=${actionAnimatorBackgroundColor}`,
     `chromakey=${actionAnimatorBackgroundColor}:0.22:0.06`,
     'colorkey=0xFFFFFF:0.18:0.05',
   )
 
   return [
     `[0:v]${filterSteps.join(',')}[subject]`,
-    `color=c=${actionAnimatorBackgroundColor}:s=${actionAnimatorFrameSizePx}x${actionAnimatorFrameSizePx}[background]`,
+    `color=c=${actionAnimatorBackgroundColor}:s=${frameSizePx}x${frameSizePx}[background]`,
     '[background][subject]overlay=format=auto,format=rgba[out]',
   ].join(';')
+}
+
+export function normalizeActionAnimatorFrameSize(value) {
+  return Number(value) === 1080 ? 1080 : defaultActionAnimatorFrameSizePx
 }
 
 function getAnimatorImageExtension(mimeType) {

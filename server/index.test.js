@@ -83,6 +83,34 @@ describe('API hardening', () => {
     expect(response.body.error.code).toBe('invalid_request')
   })
 
+  it('rejects invalid action animator strip payloads before attempting generation', async () => {
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/action-animator-strip')
+      .send({
+        actionType: 'hurt',
+        anchorImage: {
+          data: 'abc123',
+          mimeType: 'text/plain',
+        },
+        canvasImage: {
+          data: 'abc123',
+          mimeType: 'image/png',
+        },
+        chunkIndex: 0,
+        frameCount: 4,
+        fps: 8,
+        modelId: 'gemini-3-pro',
+        prompt: 'Hurt strip',
+      })
+
+    expect(response.status).toBe(400)
+    expect(response.body.error.code).toBe('invalid_request')
+  })
+
   it('rejects oversized inline media on forge requests', async () => {
     const app = await loadApp({
       GEMINI_API_KEY: 'test-key',

@@ -39,10 +39,10 @@ export const characterSheetSystemInstruction =
   'Provide the 5 dominant hex codes for this character at the end of the response.'
 
 const manifestPrefix =
-  'Lead Concept Artist Instruction: Design a character from scratch. Output a professional 16:9 composite character sheet. Requirements: Front A-pose, Profile, and Rear view aligned horizontally on a #808080 gray background. Style: Thick line art, cel-shaded.'
+  'Lead Concept Artist Instruction: Design a character from scratch. Output a professional 16:9 composite character sheet. Requirements: Front A-pose, Profile, and Rear view aligned horizontally on a #808080 gray background. Keep the full body silhouette readable in every view. Do not show weapons, shields, handheld props, or any item that obscures the character body. Preserve outfit and armor details without equipped items blocking the turnaround. Style: Thick line art, cel-shaded.'
 
 const referencePrefix =
-  'Lead Concept Artist Instruction: Output a professional 16:9 composite character sheet. Requirements: Front A-pose, Profile, and Rear view aligned horizontally on a #808080 gray background. Style: Thick line art, cel-shaded.'
+  'Lead Concept Artist Instruction: Output a professional 16:9 composite character sheet. Requirements: Front A-pose, Profile, and Rear view aligned horizontally on a #808080 gray background. Keep the full body silhouette readable in every view. Do not show weapons, shields, handheld props, or any item that obscures the character body. Preserve outfit and armor details without equipped items blocking the turnaround. Style: Thick line art, cel-shaded.'
 
 const characterReferenceRoleMap: Record<
   CharacterSheetReferenceSlot,
@@ -73,7 +73,7 @@ export function buildCharacterSheetPrompt(state: CharacterSheetState) {
     'Image 2: Clothing_Reference (Outfit/Armor).',
     'Image 3: Style_Reference (Line weight/Coloring).',
     userInput ? `Additional direction: ${userInput}` : '',
-    'Synthesize these references into a 3-view character sheet. Identity from Image 1 and Clothing from Image 2 must be pixel-perfect across all poses.',
+    'Synthesize these references into a 3-view character sheet. Identity from Image 1 and Clothing from Image 2 must be pixel-perfect across all poses. Exclude weapons, shields, handheld props, and other silhouette-blocking items from the final sheet.',
   ]
     .filter(Boolean)
     .join('\n\n')

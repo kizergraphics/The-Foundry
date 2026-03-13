@@ -31,6 +31,8 @@ export type UvLabAtlasSize = 1024 | 2048 | 4096
 export type GenerationCount = 1 | 2 | 3 | 4
 export type ForgeStatus = 'idle' | 'loading' | 'success' | 'error'
 export type ModelFormat = 'obj' | 'fbx'
+export type ActionAnimatorPipeline = 'sprite-strip' | 'veo-video'
+export type ActionAnimatorNormalizedSize = 64 | 128 | 256 | 512 | 1080
 export type ActionAnimatorActionType =
   | 'idle'
   | 'walk'
@@ -65,6 +67,8 @@ export type ActionAnimatorState = {
   customActionPrompt: string
   frameCount: number
   fps: number
+  normalizedSize: ActionAnimatorNormalizedSize
+  pipeline: ActionAnimatorPipeline
 }
 
 export type CharacterSheetState = {
@@ -130,6 +134,8 @@ export type ForgeAction =
   | { type: 'set-action-animator-custom-prompt'; prompt: string }
   | { type: 'set-action-animator-frame-count'; frameCount: number }
   | { type: 'set-action-animator-fps'; fps: number }
+  | { type: 'set-action-animator-normalized-size'; size: ActionAnimatorNormalizedSize }
+  | { type: 'set-action-animator-pipeline'; pipeline: ActionAnimatorPipeline }
   | { type: 'set-character-sheet-mode'; mode: CharacterSheetGenerationMode }
   | { type: 'set-character-sheet-manifest'; prompt: string }
   | { type: 'set-character-sheet-reference-prompt'; prompt: string }
@@ -245,9 +251,9 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     label: 'Action Animator',
     eyebrow: 'Motion',
     description:
-      'Turns a locked character image into a spritesheet-ready motion pass with evenly spaced frames.',
+      'Turns one approved sprite frame into a normalized motion strip, with Veo fallback for looser motion work.',
     instruction:
-      '2D sprite animation sheet, side profile, feet locked to the same horizon, consistent lighting',
+      '2D sprite strip from a seed frame, shared scale normalization, feet locked to the same horizon',
     surfaceClassName:
       'from-cyan-400/18 via-slate-950/80 to-slate-950/95 ring-cyan-300/20',
     previewAspectClassName: 'aspect-[8/1]',
@@ -312,6 +318,9 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
   },
 }
 
+export const actionAnimatorStripNormalizedSizes = [64, 128, 256, 512] as const
+export const actionAnimatorVideoFrameSizes = [512, 1080] as const
+
 export const initialState: ForgeState = {
   activeMode: 'armory',
   actionAnimator: {
@@ -320,6 +329,8 @@ export const initialState: ForgeState = {
     customActionPrompt: '',
     frameCount: 8,
     fps: 8,
+    normalizedSize: 64,
+    pipeline: 'sprite-strip',
   },
   generationCount: 3,
   lootLeveler: {
@@ -429,6 +440,29 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         actionAnimator: {
           ...state.actionAnimator,
           fps: clampActionAnimatorFps(action.fps),
+        },
+      }
+    case 'set-action-animator-normalized-size':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          normalizedSize: clampActionAnimatorNormalizedSize(
+            action.size,
+            state.actionAnimator.pipeline,
+          ),
+        },
+      }
+    case 'set-action-animator-pipeline':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          pipeline: action.pipeline,
+          normalizedSize: clampActionAnimatorNormalizedSize(
+            state.actionAnimator.normalizedSize,
+            action.pipeline,
+          ),
         },
       }
     case 'set-texture-lab-workflow':
@@ -641,6 +675,38 @@ export function clampActionAnimatorFps(value: number) {
   }
 
   return Math.round(value)
+}
+
+export function clampActionAnimatorNormalizedSize(
+  value: number,
+  pipeline: ActionAnimatorPipeline = 'sprite-strip',
+): ActionAnimatorNormalizedSize {
+  if (pipeline === 'veo-video') {
+    return Number(value) === 1080 ? 1080 : 512
+  }
+
+  const normalizedValue = Number.isFinite(value) ? value : 64
+  let nearestSize: ActionAnimatorNormalizedSize = actionAnimatorStripNormalizedSizes[0]
+  let nearestDistance = Math.abs(normalizedValue - nearestSize)
+
+  for (const candidate of actionAnimatorStripNormalizedSizes.slice(1)) {
+    const candidateDistance = Math.abs(normalizedValue - candidate)
+
+    if (candidateDistance < nearestDistance) {
+      nearestSize = candidate
+      nearestDistance = candidateDistance
+    }
+  }
+
+  return nearestSize
+}
+
+export function getActionAnimatorNormalizedSizeOptions(
+  pipeline: ActionAnimatorPipeline,
+): readonly ActionAnimatorNormalizedSize[] {
+  return pipeline === 'veo-video'
+    ? actionAnimatorVideoFrameSizes
+    : actionAnimatorStripNormalizedSizes
 }
 
 export function clampIntensity(value: number) {

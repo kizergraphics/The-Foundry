@@ -54,11 +54,14 @@ import {
 } from './lib/persistence'
 import {
   forgeReducer,
+  getActionAnimatorNormalizedSizeOptions,
   initialState,
   modeDefinitions,
 } from './lib/forge'
 import type {
   ActionAnimatorActionType,
+  ActionAnimatorNormalizedSize,
+  ActionAnimatorPipeline,
   CharacterSheetGenerationMode,
   CharacterSheetReferenceSlot,
   ForgeErrorInfo,
@@ -197,7 +200,7 @@ const telemetryRefreshIntervalMs = 10000
 
 const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
   armory: 'gemini-3-flash',
-  'action-animator': 'veo-3.1-fast',
+  'action-animator': 'gemini-3-pro',
   'character-sheet': 'gemini-3-pro',
   'loot-leveler': 'gemini-3-pro',
   'portrait-studio': 'gemini-3-pro',
@@ -209,7 +212,7 @@ const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
 
 const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
   armory: ['gemini-3-flash', 'gemini-2.5-flash-image'],
-  'action-animator': ['veo-3.1-fast'],
+  'action-animator': ['gemini-3-pro', 'gemini-2.5-flash-image', 'veo-3.1-fast'],
   'character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   'loot-leveler': ['gemini-3-pro'],
   'portrait-studio': ['gemini-3-pro'],
@@ -221,6 +224,32 @@ const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
 
 const defaultTextureExpansionPrompt =
   'Generatively expand this texture. Use the central pattern as a reference to fill the outer edges with a matching, seamless, high-resolution material. Maintain identical grain, lighting, and color.'
+
+function getActionAnimatorDefaultModel(pipeline: ActionAnimatorPipeline): ModelId {
+  return pipeline === 'veo-video' ? 'veo-3.1-fast' : 'gemini-3-pro'
+}
+
+function getModeDefaultModel(
+  mode: ForgeMode,
+  actionAnimatorPipeline: ActionAnimatorPipeline,
+): ModelId {
+  return mode === 'action-animator'
+    ? getActionAnimatorDefaultModel(actionAnimatorPipeline)
+    : smartDefaultModelByMode[mode]
+}
+
+function getAvailableModelsForMode(
+  mode: ForgeMode,
+  actionAnimatorPipeline: ActionAnimatorPipeline,
+): ModelId[] {
+  if (mode !== 'action-animator') {
+    return availableModelsByMode[mode]
+  }
+
+  return actionAnimatorPipeline === 'veo-video'
+    ? ['veo-3.1-fast']
+    : ['gemini-3-pro', 'gemini-2.5-flash-image']
+}
 
 function loadTelemetryWindowState(now = Date.now()): TelemetryWindowState {
   if (typeof window === 'undefined') {
@@ -475,7 +504,10 @@ function App() {
                     value: state.references.subject?.name ?? 'Not attached',
                   },
                 ]
-  const modeAvailableModels = availableModelsByMode[state.activeMode]
+  const modeAvailableModels = getAvailableModelsForMode(
+    state.activeMode,
+    state.actionAnimator.pipeline,
+  )
   const selectedModelSupported =
     isUvLabMode || modeAvailableModels.includes(activeModel)
   const selectedTelemetryModel = effectiveModel
@@ -558,6 +590,14 @@ function App() {
       dispatch({
         type: 'set-action-animator-fps',
         fps: storedState.settings.actionAnimator.fps,
+      })
+      dispatch({
+        type: 'set-action-animator-normalized-size',
+        size: storedState.settings.actionAnimator.normalizedSize,
+      })
+      dispatch({
+        type: 'set-action-animator-pipeline',
+        pipeline: storedState.settings.actionAnimator.pipeline,
       })
       dispatch({
         type: 'set-generation-count',
@@ -657,15 +697,23 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const modeDefault = smartDefaultModelByMode[state.activeMode]
+    const modeDefault = getModeDefaultModel(
+      state.activeMode,
+      state.actionAnimator.pipeline,
+    )
     const modeOverride = modelOverridesByMode[state.activeMode]
     const nextModel =
-      modeOverride && availableModelsByMode[state.activeMode].includes(modeOverride)
+      modeOverride && modeAvailableModels.includes(modeOverride)
         ? modeOverride
         : modeDefault
 
     setActiveModel(nextModel)
-  }, [modelOverridesByMode, state.activeMode])
+  }, [
+    modeAvailableModels,
+    modelOverridesByMode,
+    state.actionAnimator.pipeline,
+    state.activeMode,
+  ])
 
   const warmUvEngine = useEffectEvent(async () => {
     setUvEngineStatus((previousStatus) =>
@@ -755,7 +803,7 @@ function App() {
   }
 
   function handleModelSelect(nextModel: ModelId) {
-    if (!availableModelsByMode[state.activeMode].includes(nextModel)) {
+    if (!modeAvailableModels.includes(nextModel)) {
       setError({
         code: 'model_unsupported',
         message:
@@ -798,6 +846,8 @@ function App() {
           customActionPrompt: state.actionAnimator.customActionPrompt,
           frameCount: state.actionAnimator.frameCount,
           fps: state.actionAnimator.fps,
+          normalizedSize: state.actionAnimator.normalizedSize,
+          pipeline: state.actionAnimator.pipeline,
         },
         characterSheet: {
           consistencyEnabled: state.characterSheet.consistencyEnabled,
@@ -851,6 +901,8 @@ function App() {
     state.actionAnimator.customActionPrompt,
     state.actionAnimator.frameCount,
     state.actionAnimator.fps,
+    state.actionAnimator.normalizedSize,
+    state.actionAnimator.pipeline,
     state.characterSheet.consistencyEnabled,
     state.characterSheet.generationMode,
     state.characterSheet.manifestPrompt,
@@ -1038,7 +1090,9 @@ function App() {
           payload.results,
           payload.model,
           payload.prompt ?? promptPreview,
-          'Action Animator returned a sprite-sheet-ready motion strip.',
+          state.actionAnimator.pipeline === 'sprite-strip'
+            ? 'Action Animator returned a normalized sprite strip from the seed frame.'
+            : 'Action Animator returned a sprite-sheet-ready motion strip.',
           {
             runContext: null,
             telemetryModel: payload.model,
@@ -1685,7 +1739,9 @@ function App() {
                 : 'FORGE'
   const primaryActionDescription = isForging
     ? isActionAnimatorMode
-      ? 'Sending character image to Veo and building a spritesheet'
+      ? state.actionAnimator.pipeline === 'sprite-strip'
+        ? 'Generating strip chunks from the seed frame and normalizing the final spritesheet'
+        : 'Sending character image to Veo and building a spritesheet'
       : isCharacterSheetMode
         ? 'Sending character sheet request to Gemini'
         : isLootLevelerMode
@@ -1703,7 +1759,9 @@ function App() {
       ? 'Selected model is not supported for this tab'
       : isReadyForApi
         ? isActionAnimatorMode
-          ? 'Character image staged for Veo animation'
+          ? state.actionAnimator.pipeline === 'sprite-strip'
+            ? 'Seed frame staged for strip generation and normalization'
+            : 'Character image staged for Veo animation'
           : isLootLevelerMode
             ? 'Base asset staged for rarity upgrade'
             : isPortraitStudioMode
@@ -1718,7 +1776,9 @@ function App() {
         : isCharacterSheetMode
           ? 'Attach all required references or write a manifest'
           : isActionAnimatorMode
-            ? 'Attach a character image and choose an action'
+            ? state.actionAnimator.pipeline === 'sprite-strip'
+              ? 'Attach a seed frame and choose an action'
+              : 'Attach a character image and choose an action'
             : isLootLevelerMode
               ? 'Attach a base asset to begin rarity leveling'
               : isPortraitStudioMode
@@ -1919,6 +1979,8 @@ function App() {
                     customActionPrompt={state.actionAnimator.customActionPrompt}
                     frameCount={state.actionAnimator.frameCount}
                     fps={state.actionAnimator.fps}
+                    normalizedSize={state.actionAnimator.normalizedSize}
+                    pipeline={state.actionAnimator.pipeline}
                     spriteSheetDataUrl={
                       lastResultMode === 'action-animator' ? results[0]?.dataUrl ?? null : null
                     }
@@ -1939,6 +2001,12 @@ function App() {
                     }
                     onFpsChange={(fps) =>
                       dispatch({ type: 'set-action-animator-fps', fps })
+                    }
+                    onNormalizedSizeChange={(size) =>
+                      dispatch({ type: 'set-action-animator-normalized-size', size })
+                    }
+                    onPipelineChange={(pipeline) =>
+                      dispatch({ type: 'set-action-animator-pipeline', pipeline })
                     }
                     onUseLatestCharacterSheet={() =>
                       void hydrateLatestCharacterSheetInto({
@@ -3177,6 +3245,9 @@ function CharacterSheetPanel({
           <p className="mt-2 text-sm font-medium text-white">
             Switch between guided references and a full written manifest
           </p>
+          <p className="mt-2 text-xs leading-6 text-zinc-500">
+            Sheets are staged without weapons, shields, or handheld props so the full outfit and silhouette stay visible.
+          </p>
         </div>
         <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-xs text-zinc-400">
           {activePrompt.trim().length} chars
@@ -3310,11 +3381,15 @@ type ActionAnimatorPanelProps = {
   customActionPrompt: string
   frameCount: number
   fps: number
+  normalizedSize: ActionAnimatorNormalizedSize
+  pipeline: ActionAnimatorPipeline
   onActionTypeChange: (actionType: ActionAnimatorActionType) => void
   onCustomActionPromptChange: (prompt: string) => void
   onFileSelect: (asset: ReferenceAsset | null) => void
   onFrameCountChange: (frameCount: number) => void
   onFpsChange: (fps: number) => void
+  onNormalizedSizeChange: (size: ActionAnimatorNormalizedSize) => void
+  onPipelineChange: (pipeline: ActionAnimatorPipeline) => void
   onUseLatestCharacterSheet: () => void
   spriteSheetDataUrl: string | null
 }
@@ -3326,11 +3401,15 @@ function ActionAnimatorPanel({
   customActionPrompt,
   frameCount,
   fps,
+  normalizedSize,
+  pipeline,
   onActionTypeChange,
   onCustomActionPromptChange,
   onFileSelect,
   onFrameCountChange,
   onFpsChange,
+  onNormalizedSizeChange,
+  onPipelineChange,
   onUseLatestCharacterSheet,
   spriteSheetDataUrl,
 }: ActionAnimatorPanelProps) {
@@ -3338,6 +3417,7 @@ function ActionAnimatorPanel({
   const [isPlaying, setIsPlaying] = useState(false)
   const [previewIndex, setPreviewIndex] = useState(0)
   const animationSlug = actionType === 'custom' ? 'custom' : actionType
+  const normalizedSizeOptions = getActionAnimatorNormalizedSizeOptions(pipeline)
 
   useEffect(() => {
     let cancelled = false
@@ -3411,17 +3491,68 @@ function ActionAnimatorPanel({
             Action Animator
           </p>
           <p className="mt-2 text-sm font-medium text-white">
-            Turn a locked character image into a spritesheet-ready motion strip.
+            {pipeline === 'sprite-strip'
+              ? 'Turn one approved seed frame into normalized game-ready sprite frames.'
+              : 'Turn a locked character image into a Veo-driven motion strip.'}
           </p>
         </div>
         <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-xs text-zinc-400">
-          {frameCount} frames / {fps} fps
+          {frameCount} frames / {fps} fps / {normalizedSize}px
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Pipeline
+          </label>
+          <select
+            value={pipeline}
+            onChange={(event) => onPipelineChange(event.target.value as ActionAnimatorPipeline)}
+            className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition focus:border-sky-300/35"
+          >
+            <option value="sprite-strip">Sprite Strip</option>
+            <option value="veo-video">Veo Video</option>
+          </select>
+          <p className="mt-3 text-xs leading-6 text-zinc-500">
+            {pipeline === 'sprite-strip'
+              ? 'Best for pixel-art consistency. Generates four-slot strip chunks and normalizes them locally.'
+              : 'Best for looser motion. Uses Veo video generation and extracts frames into a sheet.'}
+          </p>
+        </div>
+
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            {pipeline === 'sprite-strip' ? 'Normalized Export Size' : 'Movie Frame Size'}
+          </label>
+          <select
+            value={normalizedSize}
+            onChange={(event) =>
+              onNormalizedSizeChange(Number(event.target.value) as ActionAnimatorNormalizedSize)
+            }
+            className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition focus:border-sky-300/35"
+          >
+            {normalizedSizeOptions.map((size) => (
+              <option key={size} value={size}>
+                {size} x {size}
+              </option>
+            ))}
+          </select>
+          <p className="mt-3 text-xs leading-6 text-zinc-500">
+            {pipeline === 'sprite-strip'
+              ? 'Sprite Strip normalizes the final export locally. Use 512 for larger square game frames.'
+              : 'Veo extracts true square movie frames at either 512 x 512 or 1080 x 1080 before building the sheet.'}
+          </p>
         </div>
       </div>
 
       <ImageUploadField
-        label="Character Image"
-        helper="Upload a character render or sheet. This image is sent to Veo as the animation source."
+        label={pipeline === 'sprite-strip' ? 'Seed Frame' : 'Character Image'}
+        helper={
+          pipeline === 'sprite-strip'
+            ? 'Upload one approved in-game frame. It becomes frame 01 and anchors the full strip.'
+            : 'Upload a character render or sheet. This image is sent to Veo as the animation source.'
+        }
         asset={asset}
         icon={ImagePlus}
         isRequired
@@ -3434,7 +3565,9 @@ function ActionAnimatorPanel({
         onClick={onUseLatestCharacterSheet}
         className="w-full rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3 text-left text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
       >
-        Use Latest Character Sheet Result
+        {pipeline === 'sprite-strip'
+          ? 'Use Latest Character Sheet Result As Seed'
+          : 'Use Latest Character Sheet Result'}
       </button>
 
       <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
@@ -3520,10 +3653,12 @@ function ActionAnimatorPanel({
             <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
               Frame Strip
             </p>
-            <p className="mt-2 text-sm text-zinc-400">
-              The returned spritesheet is sliced locally into preview frames. Use the tile download icons for full-size single PNG frames.
-            </p>
-          </div>
+          <p className="mt-2 text-sm text-zinc-400">
+              {pipeline === 'sprite-strip'
+                ? 'The final strip is normalized locally after chunk generation. Use the tile download icons for game-ready single PNG frames.'
+                : 'The returned spritesheet is sliced locally into preview frames. Use the tile download icons for full-size single PNG frames.'}
+          </p>
+        </div>
           <div className="flex flex-wrap gap-2 lg:max-w-[20rem] lg:justify-end">
             <button
               type="button"
@@ -4194,8 +4329,12 @@ function buildActionAnimatorBriefItems(
 ): ForgeBriefItem[] {
   return [
     {
-      label: 'Source',
+      label: state.actionAnimator.pipeline === 'sprite-strip' ? 'Seed' : 'Source',
       value: state.actionAnimator.characterImage?.name ?? 'Not attached',
+    },
+    {
+      label: 'Pipeline',
+      value: state.actionAnimator.pipeline === 'sprite-strip' ? 'Sprite Strip' : 'Veo Video',
     },
     {
       label: 'Action',
@@ -4211,6 +4350,10 @@ function buildActionAnimatorBriefItems(
     {
       label: 'FPS',
       value: String(state.actionAnimator.fps),
+    },
+    {
+      label: 'Export',
+      value: `${state.actionAnimator.normalizedSize}px`,
     },
   ]
 }

@@ -53,6 +53,19 @@ type TextureExpansionInput = {
   targetSize: number
 }
 
+type AnimatorStripCanvasInput = {
+  base64: string
+  canvasSize: number
+  mimeType: 'image/png'
+  slotCount: number
+  slotSize: number
+}
+
+type NormalizeAnimatorFramesResult = {
+  frameDataUrls: string[]
+  spriteSheetDataUrl: string
+}
+
 export async function buildTextureExpansionInput(
   file: Blob,
   options: TextureExpansionInputOptions = {},
@@ -204,6 +217,50 @@ export async function normalizeSquareTextureDataUrl(
   return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
 }
 
+export async function buildAnimatorStripCanvasInput(
+  source: string | Blob,
+  options: {
+    canvasSize?: number
+    slotCount?: number
+  } = {},
+): Promise<AnimatorStripCanvasInput> {
+  const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
+  const image = await loadImage(blob)
+  const canvasSize = Math.max(256, Math.round(options.canvasSize ?? 1024))
+  const slotCount = Math.max(1, Math.round(options.slotCount ?? 4))
+  const slotSize = Math.max(1, Math.floor(canvasSize / slotCount))
+  const canvas = document.createElement('canvas')
+  canvas.width = canvasSize
+  canvas.height = canvasSize
+
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  const slotY = Math.round((canvasSize - slotSize) / 2)
+  const drawScale = Math.min(slotSize / image.naturalWidth, slotSize / image.naturalHeight)
+  const drawWidth = Math.max(1, Math.round(image.naturalWidth * drawScale))
+  const drawHeight = Math.max(1, Math.round(image.naturalHeight * drawScale))
+  const drawX = Math.round((slotSize - drawWidth) / 2)
+  const drawY = slotY + Math.round((slotSize - drawHeight) / 2)
+
+  context.clearRect(0, 0, canvasSize, canvasSize)
+  context.imageSmoothingEnabled = false
+  context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
+
+  const outputBlob = await canvasToBlob(canvas, 'image/png')
+
+  return {
+    base64: await fileToBase64(outputBlob),
+    canvasSize,
+    mimeType: 'image/png',
+    slotCount,
+    slotSize,
+  }
+}
+
 export async function copyResultToClipboard(result: ForgeResult): Promise<void> {
   if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
     throw new Error('Image clipboard copy is not supported in this browser.')
@@ -248,6 +305,115 @@ export async function sliceSpriteSheetFrames(
 
     return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
   }))
+}
+
+export async function sliceAnimatorStripSlots(
+  source: string | Blob,
+  slotCount: number,
+  canvasSize = 1024,
+): Promise<string[]> {
+  const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
+  const image = await loadImage(blob)
+  const safeSlotCount = Math.max(1, Math.round(slotCount))
+  const slotSize = Math.max(1, Math.floor(canvasSize / safeSlotCount))
+  const slotY = Math.round((canvasSize - slotSize) / 2)
+  const outputCanvas = document.createElement('canvas')
+  outputCanvas.width = slotSize
+  outputCanvas.height = slotSize
+  const outputContext = outputCanvas.getContext('2d')
+
+  if (!outputContext) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  return Promise.all(Array.from({ length: safeSlotCount }, async (_, index) => {
+    outputContext.clearRect(0, 0, slotSize, slotSize)
+    outputContext.drawImage(
+      image,
+      index * slotSize,
+      slotY,
+      slotSize,
+      slotSize,
+      0,
+      0,
+      slotSize,
+      slotSize,
+    )
+
+    return blobToDataUrl(await canvasToBlob(outputCanvas, 'image/png'))
+  }))
+}
+
+export async function normalizeAnimatorSpriteFrames(
+  frames: Array<string | Blob>,
+  options: {
+    seedFrame: string | Blob
+    targetSize: number
+  },
+): Promise<NormalizeAnimatorFramesResult> {
+  const targetSize = Math.max(16, Math.round(options.targetSize))
+  const padding = Math.max(2, Math.round(targetSize * 0.0625))
+  const seedBlob =
+    typeof options.seedFrame === 'string'
+      ? await dataUrlToBlob(options.seedFrame)
+      : options.seedFrame
+  const seedImage = await loadImage(seedBlob)
+  const seedBounds = await measureImageBounds(seedImage)
+
+  if (!seedBounds) {
+    throw new Error('The seed frame did not contain readable sprite pixels.')
+  }
+
+  const frameImages = await Promise.all(
+    frames.map(async (frame) => {
+      const blob = typeof frame === 'string' ? await dataUrlToBlob(frame) : frame
+      const image = await loadImage(blob)
+      const bounds = await measureImageBounds(image)
+
+      return {
+        bounds,
+        image,
+      }
+    }),
+  )
+  const globalBounds = [
+    seedBounds,
+    ...frameImages
+      .map((frame) => frame.bounds)
+      .filter((bounds): bounds is SpriteSheetBounds => bounds !== null),
+  ]
+  const maxWidth = Math.max(...globalBounds.map((bounds) => bounds.right - bounds.left + 1))
+  const maxHeight = Math.max(...globalBounds.map((bounds) => bounds.bottom - bounds.top + 1))
+  const scale = Math.min(
+    (targetSize - padding * 2) / maxWidth,
+    (targetSize - padding * 2) / maxHeight,
+  )
+  const frameDataUrls = [
+    await renderNormalizedAnimatorFrame(seedImage, seedBounds, {
+      padding,
+      scale,
+      targetSize,
+    }),
+    ...(await Promise.all(
+      frameImages.slice(1).map(async (frame) => {
+        if (!frame.bounds) {
+          return createTransparentFrameDataUrl(targetSize)
+        }
+
+        return renderNormalizedAnimatorFrame(frame.image, frame.bounds, {
+          padding,
+          scale,
+          targetSize,
+        })
+      }),
+    )),
+  ].slice(0, frames.length)
+  const spriteSheetDataUrl = await composeHorizontalSpriteSheet(frameDataUrls, targetSize)
+
+  return {
+    frameDataUrls,
+    spriteSheetDataUrl,
+  }
 }
 
 type SpriteSheetBounds = {
@@ -455,6 +621,96 @@ async function loadImage(file: Blob): Promise<HTMLImageElement> {
   } finally {
     URL.revokeObjectURL(objectUrl)
   }
+}
+
+async function measureImageBounds(image: HTMLImageElement): Promise<SpriteSheetBounds | null> {
+  const canvas = document.createElement('canvas')
+  canvas.width = image.naturalWidth
+  canvas.height = image.naturalHeight
+  const context = canvas.getContext('2d', {
+    willReadFrequently: true,
+  })
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  context.drawImage(image, 0, 0)
+  const { data, width, height } = context.getImageData(0, 0, image.naturalWidth, image.naturalHeight)
+  return tightenSpriteBounds(data, width, height, 0, width - 1, 0, height - 1)
+}
+
+async function renderNormalizedAnimatorFrame(
+  image: HTMLImageElement,
+  bounds: SpriteSheetBounds,
+  options: {
+    padding: number
+    scale: number
+    targetSize: number
+  },
+): Promise<string> {
+  const canvas = document.createElement('canvas')
+  canvas.width = options.targetSize
+  canvas.height = options.targetSize
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  const sourceWidth = bounds.right - bounds.left + 1
+  const sourceHeight = bounds.bottom - bounds.top + 1
+  const drawWidth = Math.max(1, Math.round(sourceWidth * options.scale))
+  const drawHeight = Math.max(1, Math.round(sourceHeight * options.scale))
+  const drawX = Math.round((options.targetSize - drawWidth) / 2)
+  const drawY = options.targetSize - options.padding - drawHeight
+
+  context.clearRect(0, 0, options.targetSize, options.targetSize)
+  context.imageSmoothingEnabled = false
+  context.drawImage(
+    image,
+    bounds.left,
+    bounds.top,
+    sourceWidth,
+    sourceHeight,
+    drawX,
+    drawY,
+    drawWidth,
+    drawHeight,
+  )
+
+  return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
+}
+
+async function createTransparentFrameDataUrl(targetSize: number): Promise<string> {
+  const canvas = document.createElement('canvas')
+  canvas.width = targetSize
+  canvas.height = targetSize
+  return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
+}
+
+async function composeHorizontalSpriteSheet(
+  frames: string[],
+  targetSize: number,
+): Promise<string> {
+  const images = await Promise.all(
+    frames.map(async (frame) => loadImage(await dataUrlToBlob(frame))),
+  )
+  const canvas = document.createElement('canvas')
+  canvas.width = targetSize * images.length
+  canvas.height = targetSize
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height)
+  images.forEach((image, index) => {
+    context.drawImage(image, index * targetSize, 0, targetSize, targetSize)
+  })
+
+  return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
 }
 
 function countActivePixelsInRow(
