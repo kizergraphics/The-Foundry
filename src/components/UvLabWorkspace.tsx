@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { Bounds, Html, OrbitControls } from '@react-three/drei'
 import { Canvas } from '@react-three/fiber'
 import {
@@ -44,7 +44,7 @@ type ModelSource =
 
 const checkerTexture = buildCheckerTexture()
 
-export default function UvLabWorkspace({
+const UvLabWorkspace = memo(function UvLabWorkspace({
   activeModelName,
   job,
   sourceAsset,
@@ -240,7 +240,9 @@ export default function UvLabWorkspace({
       </section>
     </div>
   )
-}
+})
+
+export default UvLabWorkspace
 
 type ModelViewportSceneProps = {
   checkerEnabled: boolean

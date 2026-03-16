@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import {
   Clock3,
   Copy,
@@ -30,7 +31,11 @@ type GeneratedResultCardProps = {
   result: ForgeResult
 }
 
-export function PlaceholderCard({ index, mode, state }: PlaceholderCardProps) {
+export const PlaceholderCard = memo(function PlaceholderCard({
+  index,
+  mode,
+  state,
+}: PlaceholderCardProps) {
   const ModeIcon = mode.icon
   const isLoading = state === 'loading'
   const isWideStrip = mode.previewAspectClassName === 'aspect-[8/1]'
@@ -134,9 +139,9 @@ export function PlaceholderCard({ index, mode, state }: PlaceholderCardProps) {
       </div>
     </article>
   )
-}
+})
 
-export function GeneratedResultCard({
+export const GeneratedResultCard = memo(function GeneratedResultCard({
   canRepairSeams = false,
   extraActionLabel,
   index,
@@ -232,4 +237,4 @@ export function GeneratedResultCard({
       </div>
     </article>
   )
-}
+})

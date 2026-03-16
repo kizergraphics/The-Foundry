@@ -125,6 +125,7 @@ export type ForgeState = {
 }
 
 export type ForgeAction =
+  | { type: 'hydrate'; state: ForgeState }
   | { type: 'set-mode'; mode: ForgeMode }
   | { type: 'set-generation-count'; count: number }
   | { type: 'set-prompt'; prompt: string }
@@ -379,6 +380,8 @@ export const initialState: ForgeState = {
 
 export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState {
   switch (action.type) {
+    case 'hydrate':
+      return action.state
     case 'set-mode':
       return {
         ...state,

@@ -1,4 +1,14 @@
-import { lazy, Suspense, useEffect, useEffectEvent, useReducer, useRef, useState } from 'react'
+import {
+  lazy,
+  startTransition,
+  Suspense,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useReducer,
+  useRef,
+  useState,
+} from 'react'
 import {
   AlertCircle,
   Box,
@@ -316,6 +326,108 @@ function persistTelemetryWindowState(state: TelemetryWindowState) {
   window.localStorage.setItem(telemetryWindowStorageKey, JSON.stringify(state))
 }
 
+function buildHydratedForgeState(
+  storedState: NonNullable<ReturnType<typeof loadStoredState>>,
+) {
+  return {
+    ...initialState,
+    activeMode: storedState.settings.activeMode,
+    actionAnimator: {
+      ...initialState.actionAnimator,
+      ...storedState.settings.actionAnimator,
+    },
+    characterSheet: {
+      ...initialState.characterSheet,
+      ...storedState.settings.characterSheet,
+    },
+    generationCount: storedState.settings.generationCount,
+    lootLeveler: {
+      ...initialState.lootLeveler,
+      ...storedState.settings.lootLeveler,
+    },
+    portraitStudio: {
+      ...initialState.portraitStudio,
+      ...storedState.settings.portraitStudio,
+    },
+    prompt: storedState.settings.prompt,
+    textureLab: {
+      ...initialState.textureLab,
+      ...storedState.settings.textureLab,
+    },
+    uvLab: {
+      ...initialState.uvLab,
+      ...storedState.settings.uvLab,
+    },
+    vfxForge: {
+      ...initialState.vfxForge,
+      ...storedState.settings.vfxForge,
+    },
+  }
+}
+
+function buildStoredStateSnapshot(
+  state: typeof initialState,
+  recentPrompts: string[],
+  lastSavedAt: string | null,
+  lastResultMode: ForgeMode | null,
+  serverModel: string | null,
+  serverPrompt: string | null,
+): Parameters<typeof persistStoredState>[0] {
+  return {
+    recentPrompts,
+    settings: {
+      activeMode: state.activeMode,
+      actionAnimator: {
+        actionType: state.actionAnimator.actionType,
+        customActionPrompt: state.actionAnimator.customActionPrompt,
+        frameCount: state.actionAnimator.frameCount,
+        fps: state.actionAnimator.fps,
+        normalizedSize: state.actionAnimator.normalizedSize,
+        pipeline: state.actionAnimator.pipeline,
+      },
+      characterSheet: {
+        consistencyEnabled: state.characterSheet.consistencyEnabled,
+        generationMode: state.characterSheet.generationMode,
+        manifestPrompt: state.characterSheet.manifestPrompt,
+        parentId: state.characterSheet.parentId,
+        referencePrompt: state.characterSheet.referencePrompt,
+      },
+      generationCount: state.generationCount,
+      lootLeveler: {
+        rarity: state.lootLeveler.rarity,
+      },
+      portraitStudio: {
+        prompt: state.portraitStudio.prompt,
+      },
+      prompt: state.prompt,
+      textureLab: {
+        expansionTargetSize: state.textureLab.expansionTargetSize,
+        seamlessMode: state.textureLab.seamlessMode,
+        workflow: state.textureLab.workflow,
+      },
+      uvLab: {
+        atlasSize: state.uvLab.atlasSize,
+        paddingPx: state.uvLab.paddingPx,
+      },
+      vfxForge: {
+        frameCount: state.vfxForge.frameCount,
+        intensity: state.vfxForge.intensity,
+        prompt: state.vfxForge.prompt,
+        projectileType: state.vfxForge.projectileType,
+      },
+    },
+    session:
+      lastSavedAt
+        ? {
+            mode: lastResultMode,
+            serverModel,
+            serverPrompt,
+            savedAt: lastSavedAt,
+          }
+        : null,
+  }
+}
+
 function App() {
   const [state, dispatch] = useReducer(forgeReducer, initialState)
   const [status, setStatus] = useState<ForgeStatus>('idle')
@@ -340,10 +452,6 @@ function App() {
   const [lastTextureLabRun, setLastTextureLabRun] =
     useState<TextureLabRunContext | null>(null)
   const [serviceHealth, setServiceHealth] = useState<ServiceHealth | null>(null)
-  const [telemetrySnapshot, setTelemetrySnapshot] = useState<TelemetrySnapshot | null>(
-    null,
-  )
-  const [telemetryError, setTelemetryError] = useState<string | null>(null)
   const [modelOverridesByMode, setModelOverridesByMode] = useState<
     Partial<Record<ForgeMode, ModelId>>
   >({})
@@ -354,6 +462,10 @@ function App() {
     smartDefaultModelByMode[initialState.activeMode],
   )
   const forgeRunInFlightRef = useRef(false)
+  const persistTimeoutRef = useRef<number | null>(null)
+  const pendingPersistStateRef = useRef<Parameters<typeof persistStoredState>[0] | null>(
+    null,
+  )
   const [sessionCountsByModel, setSessionCountsByModel] = useState<
     Record<string, number>
   >({})
@@ -517,7 +629,7 @@ function App() {
   const currentSessionCount = sessionCountsByModel[telemetryModelKey] ?? 0
   const sessionMax = sessionMaxByModel[telemetryModelKey] ?? 0
 
-  async function refreshHealth(cancelState?: { cancelled: boolean }) {
+  const refreshHealth = useCallback(async (cancelState?: { cancelled: boolean }) => {
     await fetch('/api/health')
       .then(async (response) => {
         if (!response.ok) {
@@ -536,137 +648,15 @@ function App() {
           setServiceHealth(null)
         }
       })
-  }
-
-  async function refreshTelemetry(cancelState?: { cancelled: boolean }) {
-    await fetch('/api/usage/telemetry', { cache: 'no-store' })
-      .then(async (response) => {
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => null)) as
-            | {
-                error?: {
-                  message?: string
-                }
-              }
-            | null
-          throw new Error(payload?.error?.message || 'Telemetry endpoint failed.')
-        }
-
-        return (await response.json()) as TelemetrySnapshot
-      })
-      .then((payload) => {
-        if (!cancelState?.cancelled) {
-          setTelemetrySnapshot(payload)
-          setTelemetryError(payload.error?.message ?? null)
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelState?.cancelled) {
-          setTelemetrySnapshot(null)
-          setTelemetryError(
-            error instanceof Error ? error.message : 'Telemetry is unavailable right now.',
-          )
-        }
-      })
-  }
+  }, [])
 
   useEffect(() => {
     const storedState = loadStoredState()
 
     if (storedState) {
-      dispatch({ type: 'set-mode', mode: storedState.settings.activeMode })
       dispatch({
-        type: 'set-action-animator-action',
-        actionType: storedState.settings.actionAnimator.actionType,
-      })
-      dispatch({
-        type: 'set-action-animator-custom-prompt',
-        prompt: storedState.settings.actionAnimator.customActionPrompt,
-      })
-      dispatch({
-        type: 'set-action-animator-frame-count',
-        frameCount: storedState.settings.actionAnimator.frameCount,
-      })
-      dispatch({
-        type: 'set-action-animator-fps',
-        fps: storedState.settings.actionAnimator.fps,
-      })
-      dispatch({
-        type: 'set-action-animator-normalized-size',
-        size: storedState.settings.actionAnimator.normalizedSize,
-      })
-      dispatch({
-        type: 'set-action-animator-pipeline',
-        pipeline: storedState.settings.actionAnimator.pipeline,
-      })
-      dispatch({
-        type: 'set-generation-count',
-        count: storedState.settings.generationCount,
-      })
-      dispatch({
-        type: 'set-loot-leveler-rarity',
-        rarity: storedState.settings.lootLeveler.rarity,
-      })
-      dispatch({
-        type: 'set-portrait-studio-prompt',
-        prompt: storedState.settings.portraitStudio.prompt,
-      })
-      dispatch({ type: 'set-prompt', prompt: storedState.settings.prompt })
-      dispatch({
-        type: 'set-vfx-intensity',
-        intensity: storedState.settings.vfxForge.intensity,
-      })
-      dispatch({
-        type: 'set-vfx-frame-count',
-        frameCount: storedState.settings.vfxForge.frameCount,
-      })
-      dispatch({
-        type: 'set-vfx-prompt',
-        prompt: storedState.settings.vfxForge.prompt,
-      })
-      dispatch({
-        type: 'set-vfx-projectile-type',
-        projectileType: storedState.settings.vfxForge.projectileType,
-      })
-      dispatch({
-        type: 'set-character-sheet-mode',
-        mode: storedState.settings.characterSheet.generationMode,
-      })
-      dispatch({
-        type: 'set-character-sheet-manifest',
-        prompt: storedState.settings.characterSheet.manifestPrompt,
-      })
-      dispatch({
-        type: 'set-character-sheet-reference-prompt',
-        prompt: storedState.settings.characterSheet.referencePrompt,
-      })
-      dispatch({
-        type: 'set-character-sheet-consistency',
-        enabled: storedState.settings.characterSheet.consistencyEnabled,
-      })
-      dispatch({
-        type: 'set-character-sheet-parent-id',
-        parentId: storedState.settings.characterSheet.parentId,
-      })
-      dispatch({
-        type: 'set-texture-lab-workflow',
-        workflow: storedState.settings.textureLab.workflow,
-      })
-      dispatch({
-        type: 'set-texture-expansion-target-size',
-        size: storedState.settings.textureLab.expansionTargetSize,
-      })
-      dispatch({
-        type: 'set-texture-lab-seamless-mode',
-        enabled: storedState.settings.textureLab.seamlessMode,
-      })
-      dispatch({
-        type: 'set-uv-lab-atlas-size',
-        size: storedState.settings.uvLab.atlasSize,
-      })
-      dispatch({
-        type: 'set-uv-lab-padding-px',
-        paddingPx: storedState.settings.uvLab.paddingPx,
+        type: 'hydrate',
+        state: buildHydratedForgeState(storedState),
       })
       setRecentPrompts(storedState.recentPrompts)
       setServerModel(storedState.session?.serverModel ?? null)
@@ -683,18 +673,12 @@ function App() {
 
   useEffect(() => {
     const cancelState = { cancelled: false }
-    const intervalId = window.setInterval(() => {
-      void refreshTelemetry(cancelState)
-    }, telemetryRefreshIntervalMs)
-
     void refreshHealth(cancelState)
-    void refreshTelemetry(cancelState)
 
     return () => {
       cancelState.cancelled = true
-      window.clearInterval(intervalId)
     }
-  }, [])
+  }, [refreshHealth])
 
   useEffect(() => {
     const modeDefault = getModeDefaultModel(
@@ -761,7 +745,7 @@ function App() {
     }
   }, [uvJob])
 
-  function registerSuccessfulApiCall(modelName?: string | null) {
+  const registerSuccessfulApiCall = useCallback((modelName?: string | null) => {
     const telemetryKey =
       typeof modelName === 'string' && modelName.trim().length > 0
         ? modelName
@@ -798,11 +782,9 @@ function App() {
         [telemetryKey]: nextCount,
       }
     })
+  }, [])
 
-    void refreshTelemetry()
-  }
-
-  function handleModelSelect(nextModel: ModelId) {
+  const handleModelSelect = useCallback((nextModel: ModelId) => {
     if (!modeAvailableModels.includes(nextModel)) {
       setError({
         code: 'model_unsupported',
@@ -822,75 +804,50 @@ function App() {
     setNotice(
       `Model override set to ${MODEL_LABELS[nextModel]} for ${activeMode.label}.`,
     )
-    void refreshTelemetry()
-  }
+  }, [activeMode.label, modeAvailableModels, state.activeMode])
 
-  function handleStyleInputChange(nextValue: string) {
+  const handleStyleInputChange = useCallback((nextValue: string) => {
     setStyleInputByMode((previousState) => ({
       ...previousState,
       [state.activeMode]: nextValue,
     }))
-  }
+  }, [state.activeMode])
+
+  const flushPendingPersist = useCallback(() => {
+    if (persistTimeoutRef.current !== null) {
+      window.clearTimeout(persistTimeoutRef.current)
+      persistTimeoutRef.current = null
+    }
+
+    if (pendingPersistStateRef.current) {
+      persistStoredState(pendingPersistStateRef.current)
+      pendingPersistStateRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
     if (!hasRestoredState) {
       return
     }
 
-    persistStoredState({
+    pendingPersistStateRef.current = buildStoredStateSnapshot(
+      state,
       recentPrompts,
-      settings: {
-        activeMode: state.activeMode,
-        actionAnimator: {
-          actionType: state.actionAnimator.actionType,
-          customActionPrompt: state.actionAnimator.customActionPrompt,
-          frameCount: state.actionAnimator.frameCount,
-          fps: state.actionAnimator.fps,
-          normalizedSize: state.actionAnimator.normalizedSize,
-          pipeline: state.actionAnimator.pipeline,
-        },
-        characterSheet: {
-          consistencyEnabled: state.characterSheet.consistencyEnabled,
-          generationMode: state.characterSheet.generationMode,
-          manifestPrompt: state.characterSheet.manifestPrompt,
-          parentId: state.characterSheet.parentId,
-          referencePrompt: state.characterSheet.referencePrompt,
-        },
-        generationCount: state.generationCount,
-        lootLeveler: {
-          rarity: state.lootLeveler.rarity,
-        },
-        portraitStudio: {
-          prompt: state.portraitStudio.prompt,
-        },
-        prompt: state.prompt,
-        textureLab: {
-          expansionTargetSize: state.textureLab.expansionTargetSize,
-          seamlessMode: state.textureLab.seamlessMode,
-          workflow: state.textureLab.workflow,
-        },
-        uvLab: {
-          atlasSize: state.uvLab.atlasSize,
-          paddingPx: state.uvLab.paddingPx,
-        },
-        vfxForge: {
-          frameCount: state.vfxForge.frameCount,
-          intensity: state.vfxForge.intensity,
-          prompt: state.vfxForge.prompt,
-          projectileType: state.vfxForge.projectileType,
-        },
-      },
-      session:
-        lastSavedAt
-          ? {
-              mode: lastResultMode,
-              serverModel,
-              serverPrompt,
-              savedAt: lastSavedAt ?? new Date().toISOString(),
-            }
-          : null,
-    })
+      lastSavedAt,
+      lastResultMode,
+      serverModel,
+      serverPrompt,
+    )
+
+    if (persistTimeoutRef.current !== null) {
+      window.clearTimeout(persistTimeoutRef.current)
+    }
+
+    persistTimeoutRef.current = window.setTimeout(() => {
+      flushPendingPersist()
+    }, 300)
   }, [
+    flushPendingPersist,
     hasRestoredState,
     lastSavedAt,
     recentPrompts,
@@ -923,6 +880,21 @@ function App() {
     state.vfxForge.projectileType,
     lastResultMode,
   ])
+
+  useEffect(() => {
+    function flushOnPageExit() {
+      flushPendingPersist()
+    }
+
+    window.addEventListener('pagehide', flushOnPageExit)
+    window.addEventListener('beforeunload', flushOnPageExit)
+
+    return () => {
+      window.removeEventListener('pagehide', flushOnPageExit)
+      window.removeEventListener('beforeunload', flushOnPageExit)
+      flushPendingPersist()
+    }
+  }, [flushPendingPersist])
 
   function finalizeForgeRun(
     nextResults: ForgeResult[],
@@ -1458,16 +1430,16 @@ function App() {
     }
   }
 
-  async function handleCopy(result: ForgeResult) {
+  const handleCopy = useCallback(async (result: ForgeResult) => {
     try {
       await copyResultToClipboard(result)
       setNotice('Image copied to the clipboard.')
     } catch (copyError) {
       setError(toForgeError(copyError, 'Clipboard Action Failed'))
     }
-  }
+  }, [])
 
-  function handleDownload(result: ForgeResult, index: number) {
+  const handleDownload = useCallback((result: ForgeResult, index: number) => {
     const extension = result.mimeType.includes('svg')
       ? 'svg'
       : result.mimeType.includes('png')
@@ -1475,9 +1447,12 @@ function App() {
         : 'jpg'
     downloadResult(result, `kizer-forge-${state.activeMode}-${index + 1}.${extension}`)
     setNotice(`Downloaded candidate ${index + 1}.`)
-  }
+  }, [state.activeMode])
 
-  async function handleDownloadPortraitFaces(result: ForgeResult, index: number) {
+  const handleDownloadPortraitFaces = useCallback(async (
+    result: ForgeResult,
+    index: number,
+  ) => {
     try {
       const faceDataUrls = await slicePortraitStudioFaces(result.dataUrl)
 
@@ -1497,9 +1472,12 @@ function App() {
     } catch (downloadError) {
       setError(toForgeError(downloadError, 'Portrait Face Download Failed'))
     }
-  }
+  }, [])
 
-  async function handleDownloadVfxFrames(result: ForgeResult, index: number) {
+  const handleDownloadVfxFrames = useCallback(async (
+    result: ForgeResult,
+    index: number,
+  ) => {
     try {
       const frameDataUrls = await sliceSpriteSheetFramesByContent(
         result.dataUrl,
@@ -1525,7 +1503,7 @@ function App() {
     } catch (downloadError) {
       setError(toForgeError(downloadError, 'VFX Frame Download Failed'))
     }
-  }
+  }, [state.vfxForge.frameCount, state.vfxForge.projectileType])
 
   async function hydrateLatestCharacterSheetInto(
     action:
@@ -1561,7 +1539,7 @@ function App() {
     }
   }
 
-  async function handleRepairSeams(result: ForgeResult) {
+  const handleRepairSeams = useCallback(async (result: ForgeResult) => {
     const repairContext = lastTextureLabRun
 
     if (!repairContext || repairContext.workflow !== 'generate' || !repairContext.seamlessMode) {
@@ -1647,7 +1625,7 @@ function App() {
     } finally {
       setRepairingResultId(null)
     }
-  }
+  }, [lastTextureLabRun, registerSuccessfulApiCall, serverModel, serverPrompt])
 
   async function handleMockForge() {
     const rawMockResults = buildMockResults({
@@ -1850,8 +1828,6 @@ function App() {
                 inputLabel={headerInputLabel}
                 promptLoaded={isReadyForApi}
                 sessionMax={sessionMax}
-                telemetryError={telemetryError}
-                telemetrySnapshot={telemetrySnapshot}
               />
               <nav className="flex flex-wrap gap-3">
                 {(Object.entries(modeDefinitions) as [ForgeMode, ModeDefinition][]).map(
@@ -1863,7 +1839,11 @@ function App() {
                       <button
                         key={modeKey}
                         type="button"
-                        onClick={() => dispatch({ type: 'set-mode', mode: modeKey })}
+                        onClick={() =>
+                          startTransition(() => {
+                            dispatch({ type: 'set-mode', mode: modeKey })
+                          })
+                        }
                         className={`inline-flex min-w-[13rem] items-center gap-3 rounded-full border px-4 py-3 text-left transition duration-200 ${
                           isActive
                             ? 'border-sky-300/35 bg-sky-400/12 text-white shadow-[0_10px_30px_rgba(56,189,248,0.14)]'
@@ -2381,8 +2361,6 @@ type HeaderSummaryProps = {
   inputLabel: string
   promptLoaded: boolean
   sessionMax: number
-  telemetryError: string | null
-  telemetrySnapshot: TelemetrySnapshot | null
 }
 
 function HeaderSummary({
@@ -2393,9 +2371,58 @@ function HeaderSummary({
   inputLabel,
   promptLoaded,
   sessionMax,
-  telemetryError,
-  telemetrySnapshot,
 }: HeaderSummaryProps) {
+  const [telemetrySnapshot, setTelemetrySnapshot] = useState<TelemetrySnapshot | null>(
+    null,
+  )
+  const [telemetryError, setTelemetryError] = useState<string | null>(null)
+
+  const refreshTelemetry = useEffectEvent(async (cancelState?: { cancelled: boolean }) => {
+    await fetch('/api/usage/telemetry', { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as
+            | {
+                error?: {
+                  message?: string
+                }
+              }
+            | null
+          throw new Error(payload?.error?.message || 'Telemetry endpoint failed.')
+        }
+
+        return (await response.json()) as TelemetrySnapshot
+      })
+      .then((payload) => {
+        if (!cancelState?.cancelled) {
+          setTelemetrySnapshot(payload)
+          setTelemetryError(payload.error?.message ?? null)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelState?.cancelled) {
+          setTelemetrySnapshot(null)
+          setTelemetryError(
+            error instanceof Error ? error.message : 'Telemetry is unavailable right now.',
+          )
+        }
+      })
+  })
+
+  useEffect(() => {
+    const cancelState = { cancelled: false }
+    const intervalId = window.setInterval(() => {
+      void refreshTelemetry(cancelState)
+    }, telemetryRefreshIntervalMs)
+
+    void refreshTelemetry(cancelState)
+
+    return () => {
+      cancelState.cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [refreshTelemetry])
+
   return (
     <div className="flex flex-col gap-5">
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,420px)] xl:items-start">
