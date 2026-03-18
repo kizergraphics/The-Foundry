@@ -65,8 +65,12 @@ import {
 import {
   forgeReducer,
   getActionAnimatorNormalizedSizeOptions,
+  getVariantForgeEnabledPresets,
+  getVariantForgeOptionState,
   initialState,
   modeDefinitions,
+  variantForgeFamilies,
+  variantForgePresetCatalog,
 } from './lib/forge'
 import type {
   ActionAnimatorActionType,
@@ -78,7 +82,6 @@ import type {
   ForgeMode,
   ForgeResult,
   ForgeStatus,
-  LootLevelerRarity,
   ModelAsset,
   ModeDefinition,
   ReferenceAsset,
@@ -86,6 +89,9 @@ import type {
   TextureExpansionTargetSize,
   TextureLabWorkflow,
   UvLabAtlasSize,
+  VariantForgeFamily,
+  VariantForgeOptionStateMap,
+  VariantForgePreset,
 } from './lib/forge'
 import type { UvJobStatusResponse } from './lib/uvLab'
 import {
@@ -100,6 +106,7 @@ import {
   primeUvEngine,
   runLocalUvJob,
 } from './lib/uvEngine'
+import { formatVariantForgeLabel } from '../shared/variantForgeCatalog.js'
 
 type ServiceHealth = {
   ok: boolean
@@ -212,10 +219,10 @@ const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
   armory: 'gemini-3-flash',
   'action-animator': 'gemini-3-pro',
   'character-sheet': 'gemini-3-pro',
-  'loot-leveler': 'gemini-3-pro',
   'portrait-studio': 'gemini-3-pro',
   'texture-lab': 'gemini-3-flash',
   'uv-lab': 'browser-uv-engine',
+  'variant-forge': 'gemini-3-flash',
   'vfx-forge': 'gemini-3-flash',
   visualizer: 'gemini-3-flash',
 }
@@ -224,10 +231,10 @@ const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
   armory: ['gemini-3-flash', 'gemini-2.5-flash-image'],
   'action-animator': ['gemini-3-pro', 'gemini-2.5-flash-image', 'veo-3.1-fast'],
   'character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
-  'loot-leveler': ['gemini-3-pro'],
   'portrait-studio': ['gemini-3-pro'],
   'texture-lab': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
   'uv-lab': ['browser-uv-engine'],
+  'variant-forge': ['gemini-3-flash', 'gemini-2.5-flash-image', 'gemini-3-pro'],
   'vfx-forge': ['gemini-3-flash'],
   visualizer: ['gemini-3-flash', 'gemini-2.5-flash-image'],
 }
@@ -341,10 +348,6 @@ function buildHydratedForgeState(
       ...storedState.settings.characterSheet,
     },
     generationCount: storedState.settings.generationCount,
-    lootLeveler: {
-      ...initialState.lootLeveler,
-      ...storedState.settings.lootLeveler,
-    },
     portraitStudio: {
       ...initialState.portraitStudio,
       ...storedState.settings.portraitStudio,
@@ -357,6 +360,10 @@ function buildHydratedForgeState(
     uvLab: {
       ...initialState.uvLab,
       ...storedState.settings.uvLab,
+    },
+    variantForge: {
+      ...initialState.variantForge,
+      ...storedState.settings.variantForge,
     },
     vfxForge: {
       ...initialState.vfxForge,
@@ -393,9 +400,6 @@ function buildStoredStateSnapshot(
         referencePrompt: state.characterSheet.referencePrompt,
       },
       generationCount: state.generationCount,
-      lootLeveler: {
-        rarity: state.lootLeveler.rarity,
-      },
       portraitStudio: {
         prompt: state.portraitStudio.prompt,
       },
@@ -408,6 +412,15 @@ function buildStoredStateSnapshot(
       uvLab: {
         atlasSize: state.uvLab.atlasSize,
         paddingPx: state.uvLab.paddingPx,
+      },
+      variantForge: {
+        customDirection: state.variantForge.customDirection,
+        intensity: state.variantForge.intensity,
+        optionStates: state.variantForge.optionStates,
+        preservePalette: state.variantForge.preservePalette,
+        preserveSilhouette: state.variantForge.preserveSilhouette,
+        variantFamily: state.variantForge.variantFamily,
+        variantPreset: state.variantForge.variantPreset,
       },
       vfxForge: {
         frameCount: state.vfxForge.frameCount,
@@ -475,10 +488,10 @@ function App() {
   const activeMode = modeDefinitions[state.activeMode]
   const isActionAnimatorMode = state.activeMode === 'action-animator'
   const isCharacterSheetMode = state.activeMode === 'character-sheet'
-  const isLootLevelerMode = state.activeMode === 'loot-leveler'
   const isPortraitStudioMode = state.activeMode === 'portrait-studio'
   const isTextureLabMode = state.activeMode === 'texture-lab'
   const isUvLabMode = state.activeMode === 'uv-lab'
+  const isVariantForgeMode = state.activeMode === 'variant-forge'
   const isTextureExpansionMode =
     isTextureLabMode && state.textureLab.workflow === 'expand'
   const isTextureGenerateMode =
@@ -492,8 +505,8 @@ function App() {
     ? characterReferenceCount
     : isActionAnimatorMode
       ? Number(Boolean(state.actionAnimator.characterImage))
-      : isLootLevelerMode
-        ? Number(Boolean(state.lootLeveler.baseAsset))
+      : isVariantForgeMode
+        ? Number(Boolean(state.variantForge.baseAsset))
         : isPortraitStudioMode
           ? Number(Boolean(state.portraitStudio.heroImage))
           : isUvLabMode
@@ -508,8 +521,8 @@ function App() {
     ? buildCharacterSheetPrompt(state.characterSheet)
     : isActionAnimatorMode
       ? buildActionAnimatorPrompt(state.actionAnimator)
-      : isLootLevelerMode
-        ? buildLootLevelerPromptPreview(state.lootLeveler.rarity)
+      : isVariantForgeMode
+        ? buildVariantForgePromptPreview(state.variantForge)
         : isPortraitStudioMode
           ? buildPortraitStudioPromptPreview(state.portraitStudio.prompt)
           : isUvLabMode
@@ -535,8 +548,8 @@ function App() {
       ? state.actionAnimator.actionType === 'custom'
         ? state.actionAnimator.customActionPrompt
         : buildActionAnimatorPrompt(state.actionAnimator)
-      : isLootLevelerMode
-        ? buildLootLevelerPromptPreview(state.lootLeveler.rarity)
+      : isVariantForgeMode
+        ? buildVariantForgePromptPreview(state.variantForge)
         : isPortraitStudioMode
           ? state.portraitStudio.prompt
           : isUvLabMode
@@ -561,8 +574,8 @@ function App() {
       ? Boolean(state.actionAnimator.characterImage) &&
         (state.actionAnimator.actionType !== 'custom' ||
           state.actionAnimator.customActionPrompt.trim().length > 0)
-      : isLootLevelerMode
-        ? Boolean(state.lootLeveler.baseAsset)
+      : isVariantForgeMode
+        ? Boolean(state.variantForge.baseAsset)
         : isPortraitStudioMode
           ? Boolean(state.portraitStudio.heroImage)
           : isUvLabMode
@@ -577,10 +590,10 @@ function App() {
   const isSingleResultMode =
     isActionAnimatorMode ||
     isCharacterSheetMode ||
-    isLootLevelerMode ||
     isPortraitStudioMode ||
     isTextureExpansionMode ||
     isUvLabMode ||
+    isVariantForgeMode ||
     isVfxForgeMode
   const activeGenerationCount =
     isSingleResultMode ? 1 : state.generationCount
@@ -594,8 +607,8 @@ function App() {
     ? buildCharacterSheetBriefItems(state)
     : isActionAnimatorMode
         ? buildActionAnimatorBriefItems(state)
-      : isLootLevelerMode
-        ? buildLootLevelerBriefItems(state)
+      : isVariantForgeMode
+        ? buildVariantForgeBriefItems(state)
         : isPortraitStudioMode
           ? buildPortraitStudioBriefItems(state)
           : isUvLabMode
@@ -866,7 +879,6 @@ function App() {
     state.characterSheet.parentId,
     state.characterSheet.referencePrompt,
     state.generationCount,
-    state.lootLeveler.rarity,
     state.portraitStudio.prompt,
     state.prompt,
     state.textureLab.expansionTargetSize,
@@ -874,6 +886,13 @@ function App() {
     state.textureLab.workflow,
     state.uvLab.atlasSize,
     state.uvLab.paddingPx,
+    state.variantForge.customDirection,
+    state.variantForge.intensity,
+    state.variantForge.optionStates,
+    state.variantForge.preservePalette,
+    state.variantForge.preserveSilhouette,
+    state.variantForge.variantFamily,
+    state.variantForge.variantPreset,
     state.vfxForge.frameCount,
     state.vfxForge.intensity,
     state.vfxForge.prompt,
@@ -1095,11 +1114,12 @@ function App() {
         return
       }
 
-      if (isLootLevelerMode) {
-        const baseAsset = state.lootLeveler.baseAsset
+      if (isVariantForgeMode) {
+        const baseAsset = state.variantForge.baseAsset
+        const activeVariantOptions = buildActiveVariantForgeOptions(state.variantForge)
 
         if (!baseAsset) {
-          throw new Error('Attach a base asset before running Loot Leveler.')
+          throw new Error('Attach a base asset before running Variant Forge.')
         }
 
         const response = await fetch('/api/forge', {
@@ -1109,10 +1129,13 @@ function App() {
           },
           body: JSON.stringify({
             generationCount: 1,
-            mode: 'loot-leveler',
+            mode: 'variant-forge',
             modelId: activeModel,
             prompt: '',
-            rarity: state.lootLeveler.rarity,
+            customDirection: state.variantForge.customDirection.trim(),
+            preservePalette: state.variantForge.preservePalette,
+            preserveSilhouette: state.variantForge.preserveSilhouette,
+            variantOptions: activeVariantOptions,
             references: [
               {
                 data: await fileToBase64(baseAsset.file),
@@ -1122,6 +1145,9 @@ function App() {
               },
             ],
             styleText: activeStyleInput.trim(),
+            variantFamily: state.variantForge.variantFamily,
+            variantIntensity: state.variantForge.intensity,
+            variantPreset: state.variantForge.variantPreset,
           }),
         })
 
@@ -1140,7 +1166,9 @@ function App() {
           })),
           payload.model ?? null,
           payload.prompt ?? promptPreview,
-          `Loot Leveler created a ${formatRarityLabel(state.lootLeveler.rarity)} variant.`,
+          activeVariantOptions.length > 0
+            ? `Variant Forge created a ${formatVariantForgeLabel(state.variantForge.variantPreset)} variant.`
+            : `Variant Forge created a ${formatVariantForgeLabel(state.variantForge.variantFamily)} family variant with no preset toggles enabled.`,
           {
             runContext: null,
             telemetryModel: payload.model,
@@ -1664,7 +1692,7 @@ function App() {
 
   const headerInputLabel = isTextureExpansionMode
     ? 'Source'
-    : isActionAnimatorMode || isLootLevelerMode || isPortraitStudioMode
+    : isActionAnimatorMode || isPortraitStudioMode || isVariantForgeMode
       ? 'Image'
       : isUvLabMode
         ? 'Mesh'
@@ -1675,13 +1703,13 @@ function App() {
     ? 'Sheet settings'
     : isActionAnimatorMode
       ? 'Animator settings'
-      : isLootLevelerMode
-        ? 'Leveler settings'
+      : isVariantForgeMode
+        ? 'Variant settings'
         : isPortraitStudioMode
           ? 'Portrait settings'
           : isUvLabMode
             ? 'UV settings'
-          : isVfxForgeMode
+            : isVfxForgeMode
             ? 'VFX settings'
             : 'Forge settings'
   const primaryActionLabel = isForging
@@ -1689,8 +1717,8 @@ function App() {
       ? 'ANIMATING'
       : isCharacterSheetMode
         ? 'BUILDING SHEET'
-        : isLootLevelerMode
-          ? 'LEVELING LOOT'
+        : isVariantForgeMode
+          ? 'FORGING VARIANT'
           : isPortraitStudioMode
             ? 'BUILDING PORTRAITS'
             : isUvLabMode
@@ -1704,8 +1732,8 @@ function App() {
       ? 'ANIMATE'
       : isCharacterSheetMode
         ? 'BUILD SHEET'
-        : isLootLevelerMode
-          ? 'LEVEL LOOT'
+        : isVariantForgeMode
+          ? 'FORGE VARIANT'
           : isPortraitStudioMode
             ? 'BUILD PORTRAITS'
             : isUvLabMode
@@ -1722,8 +1750,8 @@ function App() {
         : 'Sending character image to Veo and building a spritesheet'
       : isCharacterSheetMode
         ? 'Sending character sheet request to Gemini'
-        : isLootLevelerMode
-          ? 'Applying rarity upgrade pass to the base asset'
+        : isVariantForgeMode
+          ? 'Applying the selected transformation pass to the base asset'
           : isPortraitStudioMode
             ? 'Generating a locked five-expression portrait sheet'
             : isUvLabMode
@@ -1740,8 +1768,8 @@ function App() {
           ? state.actionAnimator.pipeline === 'sprite-strip'
             ? 'Seed frame staged for strip generation and normalization'
             : 'Character image staged for Veo animation'
-          : isLootLevelerMode
-            ? 'Base asset staged for rarity upgrade'
+          : isVariantForgeMode
+            ? 'Base asset staged for single-variant transformation'
             : isPortraitStudioMode
               ? 'Hero image staged for expression pack generation'
               : isUvLabMode
@@ -1753,12 +1781,12 @@ function App() {
                     : 'Request staged for API execution'
         : isCharacterSheetMode
           ? 'Attach all required references or write a manifest'
-          : isActionAnimatorMode
-            ? state.actionAnimator.pipeline === 'sprite-strip'
-              ? 'Attach a seed frame and choose an action'
-              : 'Attach a character image and choose an action'
-            : isLootLevelerMode
-              ? 'Attach a base asset to begin rarity leveling'
+        : isActionAnimatorMode
+          ? state.actionAnimator.pipeline === 'sprite-strip'
+            ? 'Attach a seed frame and choose an action'
+            : 'Attach a character image and choose an action'
+            : isVariantForgeMode
+              ? 'Attach a base asset to begin forging a variant'
               : isPortraitStudioMode
                 ? 'Attach a hero portrait or reuse the latest character sheet'
                 : isUvLabMode
@@ -1788,19 +1816,19 @@ function App() {
             : 'Prompt ready'
       : isTextureExpansionMode
         ? 'Source required'
-        : isActionAnimatorMode || isLootLevelerMode || isPortraitStudioMode
+        : isActionAnimatorMode || isPortraitStudioMode || isVariantForgeMode
           ? 'Image required'
           : isUvLabMode
             ? 'Mesh required'
-          : isVfxForgeMode
+            : isVfxForgeMode
             ? 'Config required'
             : 'Prompt required'
   const resultGridTitle = isCharacterSheetMode
     ? 'Character sheet output slot'
     : isActionAnimatorMode
       ? 'Action Animator sprite sheet'
-      : isLootLevelerMode
-      ? 'Loot Leveler output slot'
+      : isVariantForgeMode
+      ? 'Variant Forge output slot'
       : isPortraitStudioMode
         ? 'Portrait Studio contact sheet'
         : isUvLabMode
@@ -1808,6 +1836,11 @@ function App() {
         : isVfxForgeMode
           ? 'VFX Forge spritesheet output'
           : 'Output slots for the current forge pass'
+  const useWideControlGrid = !isActionAnimatorMode && !isCharacterSheetMode
+  const controlPanelLayoutClassName = useWideControlGrid
+    ? 'mt-6 grid gap-5 2xl:grid-cols-2 2xl:items-start'
+    : 'mt-6 space-y-5'
+  const controlPanelFullSpanClassName = useWideControlGrid ? '2xl:col-span-2' : ''
 
   return (
     <div className="min-h-screen bg-[var(--surface-0)] text-zinc-100">
@@ -1816,7 +1849,7 @@ function App() {
         <div className="absolute bottom-[-18%] right-[-8%] size-[34rem] rounded-full bg-cyan-400/6 blur-[160px]" />
       </div>
 
-      <main className="relative mx-auto flex min-h-screen max-w-[1720px] flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
+      <main className="relative mx-auto flex min-h-screen max-w-[2160px] flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
         <div className="flex flex-1 flex-col overflow-hidden rounded-[34px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.015))] shadow-[0_40px_140px_rgba(0,0,0,0.55)] backdrop-blur-xl">
           <header className="border-b border-white/10 px-5 py-5 sm:px-6 lg:px-8">
             <div className="flex flex-col gap-6">
@@ -1829,51 +1862,53 @@ function App() {
                 promptLoaded={isReadyForApi}
                 sessionMax={sessionMax}
               />
-              <nav className="flex flex-wrap gap-3">
-                {(Object.entries(modeDefinitions) as [ForgeMode, ModeDefinition][]).map(
-                  ([modeKey, mode]) => {
-                    const TabIcon = mode.icon
-                    const isActive = state.activeMode === modeKey
+              <nav className="overflow-x-auto pb-1">
+                <div className="flex min-w-max gap-3">
+                  {(Object.entries(modeDefinitions) as [ForgeMode, ModeDefinition][]).map(
+                    ([modeKey, mode]) => {
+                      const TabIcon = mode.icon
+                      const isActive = state.activeMode === modeKey
 
-                    return (
-                      <button
-                        key={modeKey}
-                        type="button"
-                        onClick={() =>
-                          startTransition(() => {
-                            dispatch({ type: 'set-mode', mode: modeKey })
-                          })
-                        }
-                        className={`inline-flex min-w-[13rem] items-center gap-3 rounded-full border px-4 py-3 text-left transition duration-200 ${
-                          isActive
-                            ? 'border-sky-300/35 bg-sky-400/12 text-white shadow-[0_10px_30px_rgba(56,189,248,0.14)]'
-                            : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:border-white/20 hover:bg-white/[0.055] hover:text-zinc-200'
-                        }`}
-                      >
-                        <span
-                          className={`rounded-full border p-2 ${
+                      return (
+                        <button
+                          key={modeKey}
+                          type="button"
+                          onClick={() =>
+                            startTransition(() => {
+                              dispatch({ type: 'set-mode', mode: modeKey })
+                            })
+                          }
+                          className={`inline-flex min-w-[11rem] shrink-0 items-center gap-3 rounded-full border px-4 py-3 text-left transition duration-200 xl:min-w-[11.75rem] ${
                             isActive
-                              ? 'border-sky-300/30 bg-sky-300/12 text-sky-200'
-                              : 'border-white/10 bg-black/20 text-zinc-400'
+                              ? 'border-sky-300/35 bg-sky-400/12 text-white shadow-[0_10px_30px_rgba(56,189,248,0.14)]'
+                              : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:border-white/20 hover:bg-white/[0.055] hover:text-zinc-200'
                           }`}
                         >
-                          <TabIcon className="size-4" strokeWidth={1.8} />
-                        </span>
-                        <span>
-                          <span className="block text-sm font-medium">{mode.label}</span>
-                          <span className="block font-mono text-[10px] uppercase tracking-[0.28em] opacity-70">
-                            {mode.eyebrow}
+                          <span
+                            className={`rounded-full border p-2 ${
+                              isActive
+                                ? 'border-sky-300/30 bg-sky-300/12 text-sky-200'
+                                : 'border-white/10 bg-black/20 text-zinc-400'
+                            }`}
+                          >
+                            <TabIcon className="size-4" strokeWidth={1.8} />
                           </span>
-                        </span>
-                      </button>
-                    )
-                  },
-                )}
+                          <span>
+                            <span className="block text-sm font-medium">{mode.label}</span>
+                            <span className="block font-mono text-[10px] uppercase tracking-[0.28em] opacity-70">
+                              {mode.eyebrow}
+                            </span>
+                          </span>
+                        </button>
+                      )
+                    },
+                  )}
+                </div>
               </nav>
             </div>
           </header>
 
-          <div className="grid flex-1 gap-5 p-4 lg:grid-cols-[400px_minmax(0,1fr)] lg:p-6">
+          <div className="grid flex-1 items-start gap-5 p-4 xl:grid-cols-[minmax(540px,0.88fr)_minmax(0,1.22fr)] 2xl:grid-cols-[minmax(620px,0.92fr)_minmax(0,1.28fr)] lg:p-6">
             <aside className="rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-6">
               <div className="flex items-center gap-3">
                 <div className="rounded-[18px] border border-white/10 bg-black/20 p-3 text-zinc-200">
@@ -1889,19 +1924,21 @@ function App() {
                 </div>
               </div>
 
-              <div className="mt-6 space-y-5">
+              <div className={controlPanelLayoutClassName}>
                 {!isUvLabMode ? (
-                  <ModelSelector
-                    activeModel={activeModel}
-                    availableModels={modeAvailableModels}
-                    onSelect={handleModelSelect}
-                  />
+                  <div className={controlPanelFullSpanClassName}>
+                    <ModelSelector
+                      activeModel={activeModel}
+                      availableModels={modeAvailableModels}
+                      onSelect={handleModelSelect}
+                    />
+                  </div>
                 ) : null}
 
                 {!(isActionAnimatorMode ||
-                  isLootLevelerMode ||
                   isPortraitStudioMode ||
                   isUvLabMode ||
+                  isVariantForgeMode ||
                   isVfxForgeMode) ? (
                   <StyleInputPanel
                     value={activeStyleInput}
@@ -1910,101 +1947,149 @@ function App() {
                 ) : null}
 
                 {!isUvLabMode && !selectedModelSupported ? (
-                  <div className="rounded-[20px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
-                    {MODEL_LABELS[activeModel]} is not supported in {activeMode.label}.
-                    Choose one of the available models to continue.
+                  <div className={controlPanelFullSpanClassName}>
+                    <div className="rounded-[20px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                      {MODEL_LABELS[activeModel]} is not supported in {activeMode.label}.
+                      Choose one of the available models to continue.
+                    </div>
                   </div>
                 ) : null}
 
                 {isCharacterSheetMode ? (
-                  <CharacterSheetPanel
-                    generationMode={state.characterSheet.generationMode}
-                    manifestPrompt={state.characterSheet.manifestPrompt}
-                    parentId={state.characterSheet.parentId}
-                    recentPrompts={recentPrompts}
-                    referencePrompt={state.characterSheet.referencePrompt}
-                    references={state.characterSheet.references}
-                    consistencyEnabled={state.characterSheet.consistencyEnabled}
-                    onConsistencyChange={(enabled) =>
-                      dispatch({
-                        type: 'set-character-sheet-consistency',
-                        enabled,
-                      })
-                    }
-                    onGenerationModeChange={(mode) =>
-                      dispatch({ type: 'set-character-sheet-mode', mode })
-                    }
-                    onManifestChange={(prompt) =>
-                      dispatch({ type: 'set-character-sheet-manifest', prompt })
-                    }
-                    onReferenceChange={(slot, asset) =>
-                      dispatch({
-                        type: 'set-character-sheet-reference',
-                        slot,
-                        asset,
-                      })
-                    }
-                    onReferencePromptChange={(prompt) =>
-                      dispatch({
-                        type: 'set-character-sheet-reference-prompt',
-                        prompt,
-                      })
-                    }
-                  />
+                  <div className={controlPanelFullSpanClassName}>
+                    <CharacterSheetPanel
+                      generationMode={state.characterSheet.generationMode}
+                      manifestPrompt={state.characterSheet.manifestPrompt}
+                      parentId={state.characterSheet.parentId}
+                      recentPrompts={recentPrompts}
+                      referencePrompt={state.characterSheet.referencePrompt}
+                      references={state.characterSheet.references}
+                      consistencyEnabled={state.characterSheet.consistencyEnabled}
+                      onConsistencyChange={(enabled) =>
+                        dispatch({
+                          type: 'set-character-sheet-consistency',
+                          enabled,
+                        })
+                      }
+                      onGenerationModeChange={(mode) =>
+                        dispatch({ type: 'set-character-sheet-mode', mode })
+                      }
+                      onManifestChange={(prompt) =>
+                        dispatch({ type: 'set-character-sheet-manifest', prompt })
+                      }
+                      onReferenceChange={(slot, asset) =>
+                        dispatch({
+                          type: 'set-character-sheet-reference',
+                          slot,
+                          asset,
+                        })
+                      }
+                      onReferencePromptChange={(prompt) =>
+                        dispatch({
+                          type: 'set-character-sheet-reference-prompt',
+                          prompt,
+                        })
+                      }
+                    />
+                  </div>
                 ) : isActionAnimatorMode ? (
-                  <ActionAnimatorPanel
-                    actionType={state.actionAnimator.actionType}
-                    asset={state.actionAnimator.characterImage}
-                    canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
-                    customActionPrompt={state.actionAnimator.customActionPrompt}
-                    frameCount={state.actionAnimator.frameCount}
-                    fps={state.actionAnimator.fps}
-                    normalizedSize={state.actionAnimator.normalizedSize}
-                    pipeline={state.actionAnimator.pipeline}
-                    spriteSheetDataUrl={
-                      lastResultMode === 'action-animator' ? results[0]?.dataUrl ?? null : null
-                    }
-                    onActionTypeChange={(actionType) =>
-                      dispatch({ type: 'set-action-animator-action', actionType })
-                    }
-                    onCustomActionPromptChange={(prompt) =>
-                      dispatch({
-                        type: 'set-action-animator-custom-prompt',
-                        prompt,
-                      })
-                    }
-                    onFileSelect={(asset) =>
-                      dispatch({ type: 'set-action-animator-image', asset })
-                    }
-                    onFrameCountChange={(frameCount) =>
-                      dispatch({ type: 'set-action-animator-frame-count', frameCount })
-                    }
-                    onFpsChange={(fps) =>
-                      dispatch({ type: 'set-action-animator-fps', fps })
-                    }
-                    onNormalizedSizeChange={(size) =>
-                      dispatch({ type: 'set-action-animator-normalized-size', size })
-                    }
-                    onPipelineChange={(pipeline) =>
-                      dispatch({ type: 'set-action-animator-pipeline', pipeline })
-                    }
-                    onUseLatestCharacterSheet={() =>
-                      void hydrateLatestCharacterSheetInto({
-                        type: 'set-action-animator-image',
-                      })
-                    }
-                  />
-                ) : isLootLevelerMode ? (
-                  <LootLevelerPanel
-                    asset={state.lootLeveler.baseAsset}
-                    rarity={state.lootLeveler.rarity}
-                    onFileSelect={(asset) =>
-                      dispatch({ type: 'set-loot-leveler-asset', asset })
-                    }
-                    onRarityChange={(rarity) =>
-                      dispatch({ type: 'set-loot-leveler-rarity', rarity })
-                    }
-                  />
+                  <div className={controlPanelFullSpanClassName}>
+                    <ActionAnimatorPanel
+                      actionType={state.actionAnimator.actionType}
+                      asset={state.actionAnimator.characterImage}
+                      canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
+                      customActionPrompt={state.actionAnimator.customActionPrompt}
+                      frameCount={state.actionAnimator.frameCount}
+                      fps={state.actionAnimator.fps}
+                      normalizedSize={state.actionAnimator.normalizedSize}
+                      pipeline={state.actionAnimator.pipeline}
+                      spriteSheetDataUrl={
+                        lastResultMode === 'action-animator' ? results[0]?.dataUrl ?? null : null
+                      }
+                      onActionTypeChange={(actionType) =>
+                        dispatch({ type: 'set-action-animator-action', actionType })
+                      }
+                      onCustomActionPromptChange={(prompt) =>
+                        dispatch({
+                          type: 'set-action-animator-custom-prompt',
+                          prompt,
+                        })
+                      }
+                      onFileSelect={(asset) =>
+                        dispatch({ type: 'set-action-animator-image', asset })
+                      }
+                      onFrameCountChange={(frameCount) =>
+                        dispatch({ type: 'set-action-animator-frame-count', frameCount })
+                      }
+                      onFpsChange={(fps) =>
+                        dispatch({ type: 'set-action-animator-fps', fps })
+                      }
+                      onNormalizedSizeChange={(size) =>
+                        dispatch({ type: 'set-action-animator-normalized-size', size })
+                      }
+                      onPipelineChange={(pipeline) =>
+                        dispatch({ type: 'set-action-animator-pipeline', pipeline })
+                      }
+                      onUseLatestCharacterSheet={() =>
+                        void hydrateLatestCharacterSheetInto({
+                          type: 'set-action-animator-image',
+                        })
+                      }
+                    />
+                  </div>
+                ) : isVariantForgeMode ? (
+                  <div className={controlPanelFullSpanClassName}>
+                    <VariantForgePanel
+                      asset={state.variantForge.baseAsset}
+                      customDirection={state.variantForge.customDirection}
+                      family={state.variantForge.variantFamily}
+                      intensity={state.variantForge.intensity}
+                      optionStates={state.variantForge.optionStates}
+                      preservePalette={state.variantForge.preservePalette}
+                      preserveSilhouette={state.variantForge.preserveSilhouette}
+                      preset={state.variantForge.variantPreset}
+                      onFileSelect={(asset) =>
+                        dispatch({ type: 'set-variant-forge-asset', asset })
+                      }
+                      onCustomDirectionChange={(customDirection) =>
+                        dispatch({
+                          type: 'set-variant-forge-custom-direction',
+                          customDirection,
+                        })
+                      }
+                      onFamilyChange={(family) =>
+                        dispatch({ type: 'set-variant-forge-family', family })
+                      }
+                      onIntensityChange={(intensity) =>
+                        dispatch({ type: 'set-variant-forge-intensity', intensity })
+                      }
+                      onPreservePaletteChange={(enabled) =>
+                        dispatch({
+                          type: 'set-variant-forge-preserve-palette',
+                          enabled,
+                        })
+                      }
+                      onPreserveSilhouetteChange={(enabled) =>
+                        dispatch({
+                          type: 'set-variant-forge-preserve-silhouette',
+                          enabled,
+                        })
+                      }
+                      onPresetChange={(preset) =>
+                        dispatch({ type: 'set-variant-forge-preset', preset })
+                      }
+                      onPresetCustomSettingChange={(preset, customSetting) =>
+                        dispatch({
+                          type: 'set-variant-forge-preset-custom-setting',
+                          customSetting,
+                          preset,
+                        })
+                      }
+                      onPresetToggle={(preset) =>
+                        dispatch({ type: 'toggle-variant-forge-preset', preset })
+                      }
+                    />
+                  </div>
                 ) : isPortraitStudioMode ? (
                   <>
                     <PortraitStudioPanel
@@ -2032,51 +2117,55 @@ function App() {
                     />
                   </>
                 ) : isUvLabMode ? (
-                  <UvLabPanel
-                    asset={state.uvLab.mesh}
-                    atlasSize={state.uvLab.atlasSize}
-                    errorMessage={uvUploadError}
-                    latestJob={uvJob}
-                    paddingPx={state.uvLab.paddingPx}
-                    onAtlasSizeChange={(size) =>
-                      dispatch({ type: 'set-uv-lab-atlas-size', size })
-                    }
-                    onFileSelect={(asset) => {
-                      dispatch({ type: 'set-uv-lab-mesh', asset })
-                      setUvJob(null)
-                      setUvUploadError(null)
-                    }}
-                    onInvalidSelection={(message) => {
-                      setUvUploadError(message)
-                      setError({
-                        message,
-                        title: 'Mesh Upload Rejected',
-                      })
-                    }}
-                    onPaddingChange={(paddingPx) =>
-                      dispatch({ type: 'set-uv-lab-padding-px', paddingPx })
-                    }
-                    uvEngineStatus={uvEngineStatus}
-                  />
+                  <div className={controlPanelFullSpanClassName}>
+                    <UvLabPanel
+                      asset={state.uvLab.mesh}
+                      atlasSize={state.uvLab.atlasSize}
+                      errorMessage={uvUploadError}
+                      latestJob={uvJob}
+                      paddingPx={state.uvLab.paddingPx}
+                      onAtlasSizeChange={(size) =>
+                        dispatch({ type: 'set-uv-lab-atlas-size', size })
+                      }
+                      onFileSelect={(asset) => {
+                        dispatch({ type: 'set-uv-lab-mesh', asset })
+                        setUvJob(null)
+                        setUvUploadError(null)
+                      }}
+                      onInvalidSelection={(message) => {
+                        setUvUploadError(message)
+                        setError({
+                          message,
+                          title: 'Mesh Upload Rejected',
+                        })
+                      }}
+                      onPaddingChange={(paddingPx) =>
+                        dispatch({ type: 'set-uv-lab-padding-px', paddingPx })
+                      }
+                      uvEngineStatus={uvEngineStatus}
+                    />
+                  </div>
                 ) : isVfxForgeMode ? (
-                  <VfxForgePanel
-                    frameCount={state.vfxForge.frameCount}
-                    intensity={state.vfxForge.intensity}
-                    onFrameCountChange={(frameCount) =>
-                      dispatch({ type: 'set-vfx-frame-count', frameCount })
-                    }
-                    projectileType={state.vfxForge.projectileType}
-                    onIntensityChange={(intensity) =>
-                      dispatch({ type: 'set-vfx-intensity', intensity })
-                    }
-                    onPromptChange={(prompt) =>
-                      dispatch({ type: 'set-vfx-prompt', prompt })
-                    }
-                    onProjectileTypeChange={(projectileType) =>
-                      dispatch({ type: 'set-vfx-projectile-type', projectileType })
-                    }
-                    prompt={state.vfxForge.prompt}
-                  />
+                  <div className={controlPanelFullSpanClassName}>
+                    <VfxForgePanel
+                      frameCount={state.vfxForge.frameCount}
+                      intensity={state.vfxForge.intensity}
+                      onFrameCountChange={(frameCount) =>
+                        dispatch({ type: 'set-vfx-frame-count', frameCount })
+                      }
+                      projectileType={state.vfxForge.projectileType}
+                      onIntensityChange={(intensity) =>
+                        dispatch({ type: 'set-vfx-intensity', intensity })
+                      }
+                      onPromptChange={(prompt) =>
+                        dispatch({ type: 'set-vfx-prompt', prompt })
+                      }
+                      onProjectileTypeChange={(projectileType) =>
+                        dispatch({ type: 'set-vfx-projectile-type', projectileType })
+                      }
+                      prompt={state.vfxForge.prompt}
+                    />
+                  </div>
                 ) : (
                   <>
                     {isTextureLabMode ? (
@@ -2099,38 +2188,42 @@ function App() {
                       />
                     ) : null}
 
-                    <PromptPanel
-                      activeMode={state.activeMode}
-                      description={
-                        isTextureExpansionMode
-                          ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
-                          : isTextureGenerateMode && state.textureLab.seamlessMode
-                            ? 'Describe the material. Seamless Mode converts this into a tile-safe semantic tiling prompt at the selected texture size.'
-                            : isTextureGenerateMode
-                              ? 'Describe the material texture to generate at the selected texture size.'
-                              : 'Describe the asset or scene you want generated'
-                      }
-                      placeholder={
-                        isTextureExpansionMode
-                          ? 'Ex: weathered brick with subtle mortar variation and dry, neutral lighting.'
-                          : undefined
-                      }
-                      prompt={state.prompt}
-                      recentPrompts={recentPrompts}
-                      title={
-                        isTextureExpansionMode ? 'Expansion Notes' : 'Forge Prompt'
-                      }
-                      onChange={(prompt) => dispatch({ type: 'set-prompt', prompt })}
-                    />
+                    <div className={controlPanelFullSpanClassName}>
+                      <PromptPanel
+                        activeMode={state.activeMode}
+                        description={
+                          isTextureExpansionMode
+                            ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
+                            : isTextureGenerateMode && state.textureLab.seamlessMode
+                              ? 'Describe the material. Seamless Mode converts this into a tile-safe semantic tiling prompt at the selected texture size.'
+                              : isTextureGenerateMode
+                                ? 'Describe the material texture to generate at the selected texture size.'
+                                : 'Describe the asset or scene you want generated'
+                        }
+                        placeholder={
+                          isTextureExpansionMode
+                            ? 'Ex: weathered brick with subtle mortar variation and dry, neutral lighting.'
+                            : undefined
+                        }
+                        prompt={state.prompt}
+                        recentPrompts={recentPrompts}
+                        title={
+                          isTextureExpansionMode ? 'Expansion Notes' : 'Forge Prompt'
+                        }
+                        onChange={(prompt) => dispatch({ type: 'set-prompt', prompt })}
+                      />
+                    </div>
 
                     {isTextureExpansionMode ? (
-                      <TextureExpansionPanel
-                        asset={state.textureLab.expansionSource}
-                        targetSize={state.textureLab.expansionTargetSize}
-                        onFileSelect={(asset) =>
-                          dispatch({ type: 'set-texture-expansion-source', asset })
-                        }
-                      />
+                      <div className={controlPanelFullSpanClassName}>
+                        <TextureExpansionPanel
+                          asset={state.textureLab.expansionSource}
+                          targetSize={state.textureLab.expansionTargetSize}
+                          onFileSelect={(asset) =>
+                            dispatch({ type: 'set-texture-expansion-source', asset })
+                          }
+                        />
+                      </div>
                     ) : (
                       <>
                         <ImageUploadField
@@ -2164,35 +2257,37 @@ function App() {
                   </>
                 )}
 
-                <button
-                  type="button"
-                  onClick={() => void handleForge()}
-                  disabled={
-                    !isReadyForApi ||
-                    isForging ||
-                    !selectedModelSupported
-                  }
-                  className="inline-flex w-full items-center justify-between rounded-[24px] border border-sky-300/20 bg-[linear-gradient(135deg,rgba(56,189,248,0.2),rgba(10,14,20,0.92))] px-5 py-4 text-left shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)] transition duration-200 hover:border-sky-200/30 hover:shadow-[0_0_0_1px_rgba(125,211,252,0.12),0_28px_80px_rgba(14,165,233,0.24)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-sky-300/20 disabled:hover:shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)]"
-                >
-                  <span className="flex items-center gap-3">
-                    <span className="rounded-full border border-sky-200/20 bg-sky-300/12 p-2 text-sky-100">
-                      {isForging ? (
-                        <LoaderCircle className="size-4 animate-spin" strokeWidth={1.9} />
-                      ) : (
-                        <Sparkles className="size-4" strokeWidth={1.9} />
-                      )}
-                    </span>
-                    <span>
-                      <span className="block text-sm font-medium tracking-[0.18em] text-sky-50">
-                        {primaryActionLabel}
+                <div className={controlPanelFullSpanClassName}>
+                  <button
+                    type="button"
+                    onClick={() => void handleForge()}
+                    disabled={
+                      !isReadyForApi ||
+                      isForging ||
+                      !selectedModelSupported
+                    }
+                    className="inline-flex w-full items-center justify-between rounded-[24px] border border-sky-300/20 bg-[linear-gradient(135deg,rgba(56,189,248,0.2),rgba(10,14,20,0.92))] px-5 py-4 text-left shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)] transition duration-200 hover:border-sky-200/30 hover:shadow-[0_0_0_1px_rgba(125,211,252,0.12),0_28px_80px_rgba(14,165,233,0.24)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-sky-300/20 disabled:hover:shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)]"
+                  >
+                    <span className="flex items-center gap-3">
+                      <span className="rounded-full border border-sky-200/20 bg-sky-300/12 p-2 text-sky-100">
+                        {isForging ? (
+                          <LoaderCircle className="size-4 animate-spin" strokeWidth={1.9} />
+                        ) : (
+                          <Sparkles className="size-4" strokeWidth={1.9} />
+                        )}
                       </span>
-                      <span className="block text-xs text-sky-100/70">
-                        {primaryActionDescription}
+                      <span>
+                        <span className="block text-sm font-medium tracking-[0.18em] text-sky-50">
+                          {primaryActionLabel}
+                        </span>
+                        <span className="block text-xs text-sky-100/70">
+                          {primaryActionDescription}
+                        </span>
                       </span>
                     </span>
-                  </span>
-                  <ChevronRight className="size-5 text-sky-100/80" strokeWidth={1.9} />
-                </button>
+                    <ChevronRight className="size-5 text-sky-100/80" strokeWidth={1.9} />
+                  </button>
+                </div>
               </div>
             </aside>
 
@@ -2424,33 +2519,35 @@ function HeaderSummary({
   }, [refreshTelemetry])
 
   return (
-    <div className="flex flex-col gap-5">
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,420px)] xl:items-start">
-        <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4 text-sky-300 shadow-[0_16px_30px_rgba(14,165,233,0.12)]">
-          <div className="flex items-start gap-4">
-            <Hammer className="size-6" strokeWidth={1.7} />
-            <div>
-              <p className="font-mono text-[11px] uppercase tracking-[0.42em] text-sky-300/70">
-                Workspace
-              </p>
-              <h1 className="mt-3 max-w-5xl text-4xl font-semibold tracking-[-0.04em] text-white sm:text-5xl xl:text-[3.75rem] xl:leading-[1.02]">
-                The Foundry
-              </h1>
+    <div className="grid gap-5 xl:grid-cols-[minmax(320px,0.72fr)_minmax(0,1.28fr)] xl:items-start">
+      <div className="flex flex-col gap-5">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(340px,420px)] xl:items-start">
+          <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4 text-sky-300 shadow-[0_16px_30px_rgba(14,165,233,0.12)]">
+            <div className="flex items-start gap-4">
+              <Hammer className="size-6" strokeWidth={1.7} />
+              <div>
+                <p className="font-mono text-[11px] uppercase tracking-[0.42em] text-sky-300/70">
+                  Workspace
+                </p>
+                <h1 className="mt-3 max-w-5xl text-4xl font-semibold tracking-[-0.04em] text-white sm:text-5xl xl:text-[3.35rem] xl:leading-[1.02]">
+                  The Foundry
+                </h1>
+              </div>
             </div>
           </div>
+          <TelemetryStatusCard
+            currentSessionCount={currentSessionCount}
+            sessionMax={sessionMax}
+            telemetryError={telemetryError}
+            telemetrySnapshot={telemetrySnapshot}
+          />
         </div>
-        <TelemetryStatusCard
-          currentSessionCount={currentSessionCount}
-          sessionMax={sessionMax}
-          telemetryError={telemetryError}
-          telemetrySnapshot={telemetrySnapshot}
-        />
-      </div>
 
-      <div className="grid gap-3 sm:grid-cols-3">
-        <MetricCard label="Mode" value={activeMode.label} />
-        <MetricCard label={inputLabel} value={promptLoaded ? 'Loaded' : 'Missing'} />
-        <MetricCard label="Batch Count" value={`${generationCount} outputs`} />
+        <div className="grid gap-3 sm:grid-cols-3">
+          <MetricCard label="Mode" value={activeMode.label} />
+          <MetricCard label={inputLabel} value={promptLoaded ? 'Loaded' : 'Missing'} />
+          <MetricCard label="Batch Count" value={`${generationCount} outputs`} />
+        </div>
       </div>
 
       <TelemetryTableCard
@@ -2851,7 +2948,7 @@ function UvLabPanel({
   uvEngineStatus,
 }: UvLabPanelProps) {
   return (
-    <>
+    <div className="space-y-4">
       <ModelUploadField
         asset={asset}
         error={errorMessage}
@@ -2861,85 +2958,87 @@ function UvLabPanel({
         onInvalidSelection={onInvalidSelection}
       />
 
-      <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-              Atlas Size
-            </p>
-            <p className="mt-2 text-sm font-medium text-white">
-              Choose the output UV layout resolution.
-            </p>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
+                Atlas Size
+              </p>
+              <p className="mt-2 text-sm font-medium text-white">
+                Choose the output UV layout resolution.
+              </p>
+            </div>
+            <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-400">
+              PNG Export
+            </span>
           </div>
-          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-400">
-            PNG Export
-          </span>
-        </div>
 
-        <div className="mt-4 grid gap-2 sm:grid-cols-3">
-          {([1024, 2048, 4096] as UvLabAtlasSize[]).map((size) => (
-            <ModeToggleButton
-              key={size}
-              icon={Box}
-              isActive={atlasSize === size}
-              label={`${size}px`}
-              onClick={() => onAtlasSizeChange(size)}
-            />
-          ))}
-        </div>
-      </section>
+          <div className="mt-4 grid gap-2 sm:grid-cols-3">
+            {([1024, 2048, 4096] as UvLabAtlasSize[]).map((size) => (
+              <ModeToggleButton
+                key={size}
+                icon={Box}
+                isActive={atlasSize === size}
+                label={`${size}px`}
+                onClick={() => onAtlasSizeChange(size)}
+              />
+            ))}
+          </div>
+        </section>
 
-      <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-              Packing Margin
-            </p>
-            <p className="mt-2 text-sm font-medium text-white">
-              Control the island padding used during pack.
-            </p>
+        <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
+                Packing Margin
+              </p>
+              <p className="mt-2 text-sm font-medium text-white">
+                Control the island padding used during pack.
+              </p>
+            </div>
+            <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-300">
+              {paddingPx}px
+            </span>
           </div>
-          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-300">
-            {paddingPx}px
-          </span>
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={64}
-          step={1}
-          value={paddingPx}
-          onChange={(event) => onPaddingChange(Number(event.target.value))}
-          className="mt-4 w-full"
-        />
-        <p className="mt-3 text-sm leading-6 text-zinc-400">
-          Higher padding reduces texture bleeding risk at the cost of atlas coverage.
-        </p>
-      </section>
+          <input
+            type="range"
+            min={0}
+            max={64}
+            step={1}
+            value={paddingPx}
+            onChange={(event) => onPaddingChange(Number(event.target.value))}
+            className="mt-4 w-full"
+          />
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Higher padding reduces texture bleeding risk at the cost of atlas coverage.
+          </p>
+        </section>
 
-      <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-        <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-          Engine Status
-        </p>
-        <div className="mt-4 space-y-3 text-sm text-zinc-300">
-          <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
-            Built-in UV engine: {uvEngineStatus.state}.
+        <section className="rounded-[24px] border border-white/10 bg-black/20 p-4 xl:col-span-2">
+          <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
+            Engine Status
+          </p>
+          <div className="mt-4 grid gap-3 text-sm text-zinc-300 xl:grid-cols-2">
+            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
+              Built-in UV engine: {uvEngineStatus.state}.
+            </div>
+            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
+              Latest job:{' '}
+              {latestJob
+                ? `${latestJob.status} (${formatUvStep(latestJob.step).toLowerCase()})`
+                : 'none yet.'}
+            </div>
+            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3 xl:col-span-2">
+              {uvEngineStatus.message ?? 'Waiting to initialize the local UV engine.'}
+            </div>
+            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
+              Output format: {asset ? asset.format.toUpperCase() : 'staged mesh required.'}
+            </div>
           </div>
-          <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
-            Latest job:{' '}
-            {latestJob
-              ? `${latestJob.status} (${formatUvStep(latestJob.step).toLowerCase()})`
-              : 'none yet.'}
-          </div>
-          <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
-            {uvEngineStatus.message ?? 'Waiting to initialize the local UV engine.'}
-          </div>
-          <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
-            Output format: {asset ? asset.format.toUpperCase() : 'staged mesh required.'}
-          </div>
-        </div>
-      </section>
-    </>
+        </section>
+      </div>
+    </div>
   )
 }
 
@@ -3210,7 +3309,7 @@ function PromptPanel({
           value={prompt}
           onChange={(event) => onChange(event.target.value)}
           placeholder={placeholder}
-          rows={6}
+          rows={5}
           className="w-full resize-none rounded-[22px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35 focus:bg-white/[0.05]"
         />
 
@@ -3330,7 +3429,7 @@ function CharacterSheetPanel({
       </button>
 
       {generationMode === 'reference' ? (
-        <div className="space-y-4">
+        <div className="grid gap-4 xl:grid-cols-2">
           <ImageUploadField
             label="Face"
             helper="Subject identity reference. Keeps face shape and primary identity locked."
@@ -3765,31 +3864,84 @@ function ActionAnimatorPanel({
   )
 }
 
-type LootLevelerPanelProps = {
+type VariantForgePanelProps = {
   asset: ReferenceAsset | null
+  customDirection: string
+  family: VariantForgeFamily
+  intensity: number
   onFileSelect: (asset: ReferenceAsset | null) => void
-  onRarityChange: (rarity: LootLevelerRarity) => void
-  rarity: LootLevelerRarity
+  onCustomDirectionChange: (customDirection: string) => void
+  onFamilyChange: (family: VariantForgeFamily) => void
+  onIntensityChange: (intensity: number) => void
+  onPreservePaletteChange: (enabled: boolean) => void
+  onPreserveSilhouetteChange: (enabled: boolean) => void
+  onPresetChange: (preset: VariantForgePreset) => void
+  onPresetCustomSettingChange: (
+    preset: VariantForgePreset,
+    customSetting: string,
+  ) => void
+  onPresetToggle: (preset: VariantForgePreset) => void
+  optionStates: VariantForgeOptionStateMap
+  preservePalette: boolean
+  preserveSilhouette: boolean
+  preset: VariantForgePreset
 }
 
-function LootLevelerPanel({
+function VariantForgePanel({
   asset,
+  customDirection,
+  family,
+  intensity,
   onFileSelect,
-  onRarityChange,
-  rarity,
-}: LootLevelerPanelProps) {
-  const rarityDescriptions: Record<LootLevelerRarity, string> = {
-    common: 'Preserve the clean baseline asset without adding rarity effects.',
-    rare: 'Minor engravings, subtle shine, and restrained premium detail.',
-    epic: 'Glow treatment, material shift, and bold premium accents.',
-    legendary: 'Elemental aura language, floating shards, and dramatic VFX.',
+  onCustomDirectionChange,
+  onFamilyChange,
+  onIntensityChange,
+  onPreservePaletteChange,
+  onPreserveSilhouetteChange,
+  onPresetChange,
+  onPresetCustomSettingChange,
+  onPresetToggle,
+  optionStates,
+  preservePalette,
+  preserveSilhouette,
+  preset,
+}: VariantForgePanelProps) {
+  const familyDescriptions: Record<VariantForgeFamily, string> = {
+    alignment: 'Push the asset toward holy or corrupted story reads.',
+    boss: 'Create elevated encounter variants with elite or boss-tier presence.',
+    damage: 'Control wear and structural condition while keeping the same item class.',
+    elemental: 'Infuse the asset with elemental material and energy cues.',
+    rarity: 'Stay close to the original Loot Leveler rarity-upgrade behavior.',
+    tech: 'Shift the build language toward low-tech, industrial, or arcane-tech.',
   }
+  const presetDescriptions: Record<VariantForgePreset, string> = {
+    'arcane-tech': 'Mystic circuitry, runic engineering, and controlled powered components.',
+    'boss-tier': 'Dramatic encounter-grade treatment with commanding premium detail.',
+    broken: 'Heavy structural failure, exposed wear, and hard-use damage.',
+    burning: 'Heat-scorched materials, ember glow, and combustion residue.',
+    common: 'Keep the asset grounded and close to the base production read.',
+    corrupted: 'Blighted materials, ominous glow, and invasive dark influence.',
+    damaged: 'Noticeable wear, chipped surfaces, and moderate structural stress.',
+    elite: 'Sharper premium treatment suited for higher-threat encounters.',
+    epic: 'Bolder premium materials, glow accents, and stronger rarity language.',
+    frozen: 'Icy buildup, cold sheen, and frost-bound material treatment.',
+    holy: 'Sanctified metals, clean radiance, and reverent finishing cues.',
+    industrial: 'Reinforced hardware, fabricated plating, and pragmatic machine details.',
+    legendary: 'Dramatic premium upgrade cues while keeping the item identity locked.',
+    'low-tech': 'Raw, improvised, or stripped-down fabrication with simpler materials.',
+    'no-damage': 'Keep the asset intact, clean, and free of visible wear or breakage.',
+    rare: 'Minor engravings, restrained shine, and subtle premium detail.',
+    stormcharged: 'Electrical bloom, charged edges, and storm-reactive surface energy.',
+    worn: 'Light weathering, softened finish, and believable production wear.',
+  }
+  const presetOptions = variantForgePresetCatalog[family]
+  const activePresetCount = getVariantForgeEnabledPresets(family, optionStates).length
 
   return (
     <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
       <ImageUploadField
         label="Base Asset"
-        helper="Upload the common or baseline item to evolve through rarity tiers."
+        helper="Upload one baseline item or prop. Variant Forge transforms this single source into one controlled variant."
         asset={asset}
         icon={Gem}
         isRequired
@@ -3798,31 +3950,183 @@ function LootLevelerPanel({
 
       <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
         <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-          Rarity Selector
+          Variant Family
         </p>
-        <div className="mt-4 grid grid-cols-2 gap-2">
-          {(['common', 'rare', 'epic', 'legendary'] as LootLevelerRarity[]).map(
-            (option) => (
-              <button
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {variantForgeFamilies.map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => onFamilyChange(option)}
+              className={`rounded-[18px] border px-3 py-3 text-left transition ${
+                family === option
+                  ? 'border-amber-300/35 bg-amber-400/12 text-amber-50'
+                  : 'border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-black/30'
+              }`}
+            >
+              <span className="block text-sm font-medium">
+                {formatVariantForgeLabel(option)}
+              </span>
+              <span className="mt-1 block text-xs leading-5 text-current/70">
+                {familyDescriptions[option]}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <div className="flex items-center justify-between gap-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Variant Preset
+          </p>
+          <span className="text-xs text-zinc-500">
+            {activePresetCount} active
+          </span>
+        </div>
+        <p className="mt-2 text-sm leading-6 text-zinc-400">
+          Click a preset to make it the lead treatment. Toggle presets on or off to blend them, and add per-preset notes when you need more control. You can also leave every preset off and drive the variation with the family, intensity, and custom direction alone.
+        </p>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          {presetOptions.map((option) => {
+            const optionState = getVariantForgeOptionState(optionStates, option)
+            const isEnabled = optionState.enabled
+            const isLead = preset === option
+
+            return (
+              <div
                 key={option}
-                type="button"
-                onClick={() => onRarityChange(option)}
-                className={`rounded-[18px] border px-3 py-3 text-left transition ${
-                  rarity === option
-                    ? 'border-amber-300/35 bg-amber-400/12 text-amber-50'
-                    : 'border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-black/30'
+                className={`rounded-[18px] border px-3 py-3 transition ${
+                  isEnabled
+                    ? isLead
+                      ? 'border-amber-300/35 bg-amber-400/12 text-amber-50'
+                      : 'border-amber-300/20 bg-amber-400/8 text-zinc-100'
+                    : 'border-white/10 bg-black/20 text-zinc-300'
                 }`}
               >
-                <span className="block text-sm font-medium">
-                  {formatRarityLabel(option)}
-                </span>
-                <span className="mt-1 block text-xs leading-5 text-current/70">
-                  {rarityDescriptions[option]}
-                </span>
-              </button>
-            ),
-          )}
+                <div className="flex items-start justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => onPresetChange(option)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <span className="block text-sm font-medium">
+                      {formatVariantForgeLabel(option)}
+                      {isLead ? ' Lead' : ''}
+                    </span>
+                    <span className="mt-1 block text-xs leading-5 text-current/70">
+                      {presetDescriptions[option]}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onPresetToggle(option)}
+                    className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-mono uppercase tracking-[0.24em] transition ${
+                      isEnabled
+                        ? 'border-emerald-300/30 bg-emerald-400/12 text-emerald-50'
+                        : 'border-white/10 bg-black/30 text-zinc-400 hover:border-white/20 hover:text-zinc-200'
+                    }`}
+                  >
+                    {isEnabled ? 'On' : 'Off'}
+                  </button>
+                </div>
+                {(isEnabled || optionState.customSetting.trim()) && (
+                  <div className="mt-3">
+                    <label className="block font-mono text-[10px] uppercase tracking-[0.24em] text-current/60">
+                      Custom Setting
+                    </label>
+                    <textarea
+                      value={optionState.customSetting}
+                      onChange={(event) =>
+                        onPresetCustomSettingChange(option, event.target.value)
+                      }
+                      placeholder={`Optional note for ${formatVariantForgeLabel(option).toLowerCase()}.`}
+                      rows={3}
+                      className="mt-2 w-full resize-none rounded-[16px] border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-amber-300/35 focus:bg-black/30"
+                    />
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <div className="flex items-center justify-between">
+          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Intensity
+          </p>
+          <span className="text-xs text-zinc-400">{intensity}</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={intensity}
+          onChange={(event) => onIntensityChange(Number(event.target.value))}
+          className="mt-4 w-full cursor-pointer accent-amber-300"
+        />
+        <p className="mt-3 text-sm leading-6 text-zinc-400">
+          Strengthens the selected transformation without switching to a different workflow.
+        </p>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => onPreserveSilhouetteChange(!preserveSilhouette)}
+          className={`rounded-[20px] border px-4 py-4 text-left transition ${
+            preserveSilhouette
+              ? 'border-emerald-300/30 bg-emerald-400/10 text-emerald-50'
+              : 'border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-black/30'
+          }`}
+        >
+          <span className="block font-mono text-[10px] uppercase tracking-[0.28em] text-current/70">
+            Preserve Silhouette
+          </span>
+          <span className="mt-2 block text-sm leading-6">
+            {preserveSilhouette
+              ? 'Keeps the outline and proportions locked as closely as possible.'
+              : 'Allows stronger silhouette drift if the preset benefits from it.'}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onPreservePaletteChange(!preservePalette)}
+          className={`rounded-[20px] border px-4 py-4 text-left transition ${
+            preservePalette
+              ? 'border-sky-300/30 bg-sky-400/10 text-sky-50'
+              : 'border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-black/30'
+          }`}
+        >
+          <span className="block font-mono text-[10px] uppercase tracking-[0.28em] text-current/70">
+            Preserve Palette
+          </span>
+          <span className="mt-2 block text-sm leading-6">
+            {preservePalette
+              ? 'Holds the core color family close to the source asset.'
+              : 'Allows the preset to push into new material and color treatment.'}
+          </span>
+        </button>
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Custom Direction
+        </label>
+        <p className="mt-2 text-sm text-zinc-400">
+          Optional additive guidance. Use this to nudge finish, story cues, or mood without overriding the preset.
+        </p>
+        <textarea
+          value={customDirection}
+          onChange={(event) => onCustomDirectionChange(event.target.value)}
+          placeholder="Ex: keep the grip wrapped in faded red cloth, add age cracks near the guard, and make the metal feel damp and cold."
+          rows={5}
+          className="mt-4 w-full resize-none rounded-[20px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-amber-300/35 focus:bg-black/30"
+        />
       </div>
     </section>
   )
@@ -3891,76 +4195,78 @@ function VfxForgePanel({
   projectileType,
 }: VfxForgePanelProps) {
   return (
-    <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
-      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-          Projectile Type
-        </label>
-        <input
-          type="text"
-          value={projectileType}
-          onChange={(event) => onProjectileTypeChange(event.target.value)}
-          placeholder="Ex: Fireball, Plasma Lance, Frost Bolt"
-          className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
-        />
-      </div>
-
-      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-          Behavior Steering
-        </label>
-        <p className="mt-2 text-sm text-zinc-400">
-          Optional guidance for timing, arc shape, bursts, trail behavior, charge-up, or dissipation.
-        </p>
-        <textarea
-          value={prompt}
-          onChange={(event) => onPromptChange(event.target.value)}
-          placeholder="Ex: slow charge-up, tight corkscrew trail, bright core at frame 5, then embers breaking apart by the final frame."
-          rows={5}
-          className="mt-4 w-full resize-none rounded-[20px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35 focus:bg-black/30"
-        />
-      </div>
-
-      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <div className="flex items-center justify-between">
-          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-            Frames
-          </p>
-          <span className="text-xs text-zinc-400">{frameCount}</span>
+    <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+      <div className="grid gap-4 xl:grid-cols-2">
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Projectile Type
+          </label>
+          <input
+            type="text"
+            value={projectileType}
+            onChange={(event) => onProjectileTypeChange(event.target.value)}
+            placeholder="Ex: Fireball, Plasma Lance, Frost Bolt"
+            className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
+          />
         </div>
-        <input
-          type="range"
-          min={4}
-          max={30}
-          step={1}
-          value={frameCount}
-          onChange={(event) => onFrameCountChange(Number(event.target.value))}
-          className="mt-4 w-full cursor-pointer accent-sky-400"
-        />
-        <p className="mt-3 text-sm leading-6 text-zinc-400">
-          Controls the width of the returned horizontal strip. Higher counts give smoother timing but wider sheets.
-        </p>
-      </div>
 
-      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <div className="flex items-center justify-between">
-          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-            Intensity
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Behavior Steering
+          </label>
+          <p className="mt-2 text-sm text-zinc-400">
+            Optional guidance for timing, arc shape, bursts, trail behavior, charge-up, or dissipation.
           </p>
-          <span className="text-xs text-zinc-400">{intensity}</span>
+          <textarea
+            value={prompt}
+            onChange={(event) => onPromptChange(event.target.value)}
+            placeholder="Ex: slow charge-up, tight corkscrew trail, bright core at frame 5, then embers breaking apart by the final frame."
+            rows={5}
+            className="mt-4 w-full resize-none rounded-[20px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35 focus:bg-black/30"
+          />
         </div>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          step={1}
-          value={intensity}
-          onChange={(event) => onIntensityChange(Number(event.target.value))}
-          className="mt-4 w-full cursor-pointer accent-sky-400"
-        />
-        <p className="mt-3 text-sm leading-6 text-zinc-400">
-          Output is constrained to a {frameCount}-frame horizontal strip on a pure black background for additive blending.
-        </p>
+
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex items-center justify-between">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Frames
+            </p>
+            <span className="text-xs text-zinc-400">{frameCount}</span>
+          </div>
+          <input
+            type="range"
+            min={4}
+            max={30}
+            step={1}
+            value={frameCount}
+            onChange={(event) => onFrameCountChange(Number(event.target.value))}
+            className="mt-4 w-full cursor-pointer accent-sky-400"
+          />
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Controls the width of the returned horizontal strip. Higher counts give smoother timing but wider sheets.
+          </p>
+        </div>
+
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex items-center justify-between">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Intensity
+            </p>
+            <span className="text-xs text-zinc-400">{intensity}</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={intensity}
+            onChange={(event) => onIntensityChange(Number(event.target.value))}
+            className="mt-4 w-full cursor-pointer accent-sky-400"
+          />
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Output is constrained to a {frameCount}-frame horizontal strip on a pure black background for additive blending.
+          </p>
+        </div>
       </div>
     </section>
   )
@@ -4058,17 +4364,19 @@ function RecentPromptChips({
       <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
         Recent Prompts
       </p>
-      <div className="flex flex-wrap gap-2">
-        {recentPrompts.map((recentPrompt) => (
-          <button
-            key={recentPrompt}
-            type="button"
-            onClick={() => onSelect(recentPrompt)}
-            className="max-w-full rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.04]"
-          >
-            <span className="block max-w-[15rem] truncate">{recentPrompt}</span>
-          </button>
-        ))}
+      <div className="overflow-x-auto pb-1">
+        <div className="flex min-w-max gap-2">
+          {recentPrompts.map((recentPrompt) => (
+            <button
+              key={recentPrompt}
+              type="button"
+              onClick={() => onSelect(recentPrompt)}
+              className="max-w-full shrink-0 rounded-full border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.04]"
+            >
+              <span className="block max-w-[15rem] truncate">{recentPrompt}</span>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   )
@@ -4147,31 +4455,33 @@ function TopPanel({
     <div
       className={`rounded-[30px] border border-white/10 bg-gradient-to-br ${activeMode.surfaceClassName} p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] sm:p-6`}
     >
-      <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
-        <div className="max-w-3xl">
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-400">
-            <ModeIcon className="size-3.5" strokeWidth={1.8} />
-            {activeMode.eyebrow}
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(320px,1.1fr)] xl:items-start">
+        <div className="space-y-6">
+          <div className="max-w-3xl">
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-400">
+              <ModeIcon className="size-3.5" strokeWidth={1.8} />
+              {activeMode.eyebrow}
+            </div>
+            <h2 className="mt-4 text-2xl font-semibold tracking-[-0.03em] text-white sm:text-[2rem]">
+              {activeMode.label} {profileLabel}
+            </h2>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-300">
+              {activeMode.description}
+            </p>
           </div>
-          <h2 className="mt-4 text-2xl font-semibold tracking-[-0.03em] text-white sm:text-[2rem]">
-            {activeMode.label} {profileLabel}
-          </h2>
-          <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-300">
-            {activeMode.description}
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <MetricCard label="Focus" value={activeMode.focus} />
+            <MetricCard label="Readiness" value={readinessLabel} />
+          </div>
+        </div>
+
+        <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+          <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
+            {previewLabel}
           </p>
+          <p className="mt-3 font-mono text-sm leading-7 text-zinc-200">{prompt}</p>
         </div>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <MetricCard label="Focus" value={activeMode.focus} />
-          <MetricCard label="Readiness" value={readinessLabel} />
-        </div>
-      </div>
-
-      <div className="mt-6 rounded-[24px] border border-white/10 bg-black/20 p-4">
-        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-          {previewLabel}
-        </p>
-        <p className="mt-3 font-mono text-sm leading-7 text-zinc-200">{prompt}</p>
       </div>
     </div>
   )
@@ -4240,7 +4550,7 @@ function ForgeBrief({
             <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
               Prompt
             </p>
-            <p className="mt-2 text-sm text-zinc-100">
+            <p className="mt-2 line-clamp-4 text-sm text-zinc-100">
               {prompt || 'No prompt entered yet'}
             </p>
           </div>
@@ -4385,17 +4695,40 @@ function buildActionAnimatorBriefItems(
   ]
 }
 
-function buildLootLevelerBriefItems(
+function buildActiveVariantForgeOptions(state: typeof initialState.variantForge) {
+  return getVariantForgeEnabledPresets(state.variantFamily, state.optionStates).map((preset) => ({
+    customSetting: getVariantForgeOptionState(state.optionStates, preset).customSetting.trim(),
+    preset,
+  }))
+}
+
+function buildVariantForgeBriefItems(
   state: typeof initialState,
 ): ForgeBriefItem[] {
+  const activeOptions = buildActiveVariantForgeOptions(state.variantForge)
+
   return [
     {
       label: 'Base Asset',
-      value: state.lootLeveler.baseAsset?.name ?? 'Not attached',
+      value: state.variantForge.baseAsset?.name ?? 'Not attached',
     },
     {
-      label: 'Rarity',
-      value: formatRarityLabel(state.lootLeveler.rarity),
+      label: 'Family',
+      value: formatVariantForgeLabel(state.variantForge.variantFamily),
+    },
+    {
+      label: 'Lead Preset',
+      value: formatVariantForgeLabel(state.variantForge.variantPreset),
+    },
+    {
+      label: 'Active Options',
+      value: activeOptions.length
+        ? activeOptions.map((option) => formatVariantForgeLabel(option.preset)).join(', ')
+        : 'None selected',
+    },
+    {
+      label: 'Intensity',
+      value: `${state.variantForge.intensity}/100`,
     },
   ]
 }
@@ -4507,11 +4840,35 @@ function buildVfxForgeBriefItems(
   ]
 }
 
-function buildLootLevelerPromptPreview(rarity: LootLevelerRarity) {
+function buildVariantForgePromptPreview(state: typeof initialState.variantForge) {
+  const activeOptions = buildActiveVariantForgeOptions(state)
+
   return [
-    'Maintain the silhouette and core geometry of the input image.',
-    `Apply ${formatRarityLabel(rarity)} visual upgrades while keeping the weapon type identical.`,
-  ].join(' ')
+    activeOptions.length > 0
+      ? `Transform the base asset using the ${formatVariantForgeLabel(state.variantFamily)} family with a ${formatVariantForgeLabel(state.variantPreset)} preset.`
+      : `Transform the base asset using the ${formatVariantForgeLabel(state.variantFamily)} family with no preset toggles enabled.`,
+    activeOptions.length > 1
+      ? `Blend these active options: ${activeOptions.map((option) => formatVariantForgeLabel(option.preset)).join(', ')}.`
+      : null,
+    ...activeOptions
+      .filter((option) => option.customSetting)
+      .map(
+        (option) =>
+          `${formatVariantForgeLabel(option.preset)} custom setting: ${option.customSetting}.`,
+      ),
+    state.preserveSilhouette
+      ? 'Preserve the silhouette and core item class.'
+      : 'Keep the item class and subject identity intact while allowing modest silhouette drift.',
+    state.preservePalette
+      ? 'Stay close to the original palette while changing finish and material cues.'
+      : 'Palette shifts are allowed when the preset benefits from them.',
+    `Intensity: ${state.intensity}/100.`,
+    state.customDirection.trim()
+      ? `Additional direction: ${state.customDirection.trim()}.`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
 }
 
 function buildPortraitStudioPromptPreview(prompt: string) {
@@ -4565,10 +4922,6 @@ function buildVfxForgePromptPreview(
   ]
     .filter(Boolean)
     .join(' ')
-}
-
-function formatRarityLabel(rarity: LootLevelerRarity) {
-  return rarity.charAt(0).toUpperCase() + rarity.slice(1)
 }
 
 function slugifyFileSegment(value: string, fallback: string) {
@@ -4628,9 +4981,9 @@ const starterPromptByMode: Record<ForgeMode, string> = {
   armory: 'forged steel warhammer with a readable silhouette',
   'action-animator': 'side-profile walk cycle for a 2D game sprite',
   'texture-lab': 'weathered basalt floor tile with subtle lava seams',
-  'loot-leveler': 'legendary upgrade pass for a sword while keeping the silhouette identical',
   'portrait-studio': 'hero portrait expression sheet with locked identity',
   'uv-lab': 'OBJ character mesh prepared for automatic UV unwrap and packing',
+  'variant-forge': 'stormcharged boss-tier hammer variant while keeping the item class intact',
   visualizer: 'battle-worn ranger portrait with layered leather armor',
   'vfx-forge': 'fireball projectile spritesheet with soft glowing edges',
   'character-sheet':
@@ -4736,7 +5089,7 @@ const archetypeKeywordMap: Record<
       keywords: ['walk', 'run', 'attack', 'jump', 'idle', 'sprite', 'animation'],
     },
   ],
-  'loot-leveler': [
+  'variant-forge': [
     {
       archetype: 'blade',
       keywords: ['sword', 'blade', 'katana', 'dagger', 'axe', 'weapon', 'shield'],
@@ -5027,7 +5380,7 @@ function buildPromptVariant({
   const profilesByMode =
     activeMode === 'armory'
       ? armoryProfiles
-      : activeMode === 'loot-leveler'
+      : activeMode === 'variant-forge'
         ? armoryProfiles
         : activeMode === 'texture-lab'
           ? textureProfiles
@@ -5087,16 +5440,16 @@ const modeEndings: Record<ForgeMode, Record<PromptVariant, string[]>> = {
       'fresh environment texture direction',
     ],
   },
-  'loot-leveler': {
+  'variant-forge': {
     enhance: [
-      'rarity upgrade pass',
-      'silhouette-preserving enhancement',
-      'premium material accents',
+      'identity-preserving variant pass',
+      'controlled transformation treatment',
+      'single-asset finish evolution',
     ],
     remix: [
-      'different rarity treatment',
-      'alternate material finish',
-      'fresh loot pass',
+      'alternate variant treatment',
+      'different material finish',
+      'fresh transformation pass',
     ],
   },
   'portrait-studio': {

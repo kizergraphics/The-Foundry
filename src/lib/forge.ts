@@ -10,11 +10,28 @@ import {
   Palette,
   ScanFace,
 } from 'lucide-react'
+import {
+  getVariantForgePresetOptions,
+  isVariantForgePresetForFamily,
+  variantForgeDefaultPresetByFamily,
+  variantForgeFamilies,
+  variantForgePresetCatalog,
+} from '../../shared/variantForgeCatalog.js'
+import type {
+  VariantForgeFamily,
+  VariantForgePreset,
+  VariantForgeRarityPreset,
+} from '../../shared/variantForgeCatalog.js'
+export type {
+  VariantForgeFamily,
+  VariantForgePreset,
+  VariantForgeRarityPreset,
+} from '../../shared/variantForgeCatalog.js'
 
 export type ForgeMode =
   | 'armory'
   | 'action-animator'
-  | 'loot-leveler'
+  | 'variant-forge'
   | 'portrait-studio'
   | 'texture-lab'
   | 'uv-lab'
@@ -40,7 +57,14 @@ export type ActionAnimatorActionType =
   | 'attack'
   | 'jump'
   | 'custom'
-export type LootLevelerRarity = 'common' | 'rare' | 'epic' | 'legendary'
+export type LootLevelerRarity = VariantForgeRarityPreset
+export type VariantForgeOptionState = {
+  customSetting: string
+  enabled: boolean
+}
+export type VariantForgeOptionStateMap = Partial<
+  Record<VariantForgePreset, VariantForgeOptionState>
+>
 
 export type ReferenceAsset = {
   file: File
@@ -87,9 +111,15 @@ export type TextureLabState = {
   workflow: TextureLabWorkflow
 }
 
-export type LootLevelerState = {
+export type VariantForgeState = {
   baseAsset: ReferenceAsset | null
-  rarity: LootLevelerRarity
+  customDirection: string
+  intensity: number
+  optionStates: VariantForgeOptionStateMap
+  preservePalette: boolean
+  preserveSilhouette: boolean
+  variantFamily: VariantForgeFamily
+  variantPreset: VariantForgePreset
 }
 
 export type PortraitStudioState = {
@@ -115,12 +145,12 @@ export type ForgeState = {
   actionAnimator: ActionAnimatorState
   characterSheet: CharacterSheetState
   generationCount: GenerationCount
-  lootLeveler: LootLevelerState
   portraitStudio: PortraitStudioState
   prompt: string
   references: Record<ReferenceSlot, ReferenceAsset | null>
   textureLab: TextureLabState
   uvLab: UvLabState
+  variantForge: VariantForgeState
   vfxForge: VfxForgeState
 }
 
@@ -154,8 +184,19 @@ export type ForgeAction =
       type: 'set-texture-expansion-target-size'
       size: TextureExpansionTargetSize
     }
-  | { type: 'set-loot-leveler-asset'; asset: ReferenceAsset | null }
-  | { type: 'set-loot-leveler-rarity'; rarity: LootLevelerRarity }
+  | { type: 'set-variant-forge-asset'; asset: ReferenceAsset | null }
+  | { type: 'set-variant-forge-family'; family: VariantForgeFamily }
+  | { type: 'set-variant-forge-preset'; preset: VariantForgePreset }
+  | { type: 'toggle-variant-forge-preset'; preset: VariantForgePreset }
+  | {
+      type: 'set-variant-forge-preset-custom-setting'
+      preset: VariantForgePreset
+      customSetting: string
+    }
+  | { type: 'set-variant-forge-intensity'; intensity: number }
+  | { type: 'set-variant-forge-preserve-silhouette'; enabled: boolean }
+  | { type: 'set-variant-forge-preserve-palette'; enabled: boolean }
+  | { type: 'set-variant-forge-custom-direction'; customDirection: string }
   | { type: 'set-portrait-studio-image'; asset: ReferenceAsset | null }
   | { type: 'set-portrait-studio-prompt'; prompt: string }
   | { type: 'set-vfx-frame-count'; frameCount: number }
@@ -262,19 +303,19 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     icon: Clapperboard,
     focus: 'Sprite sheets, motion loops, frame timing',
   },
-  'loot-leveler': {
-    label: 'Loot Leveler',
+  'variant-forge': {
+    label: 'Variant Forge',
     eyebrow: 'Progression',
     description:
-      'Applies controlled rarity upgrades while keeping the original asset silhouette and weapon identity intact.',
+      'Applies controlled single-asset transformations while keeping the base item identity intact.',
     instruction:
-      'Maintain silhouette and core geometry, apply rarity-driven upgrades without changing the weapon type',
+      'Maintain silhouette and core geometry, transform finish, material, and story cues without changing the item type',
     surfaceClassName:
       'from-amber-300/18 via-slate-950/80 to-slate-950/95 ring-amber-200/20',
     previewAspectClassName: 'aspect-[4/5]',
     previewImageClassName: 'object-cover',
     icon: Gem,
-    focus: 'Rarity tiers, upgrades, identity-preserving variants',
+    focus: 'Damage, elemental, tech, rarity, and boss-tier variants',
   },
   'portrait-studio': {
     label: 'Portrait Studio',
@@ -322,6 +363,56 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
 export const actionAnimatorStripNormalizedSizes = [64, 128, 256, 512] as const
 export const actionAnimatorVideoFrameSizes = [512, 1080] as const
 
+function buildVariantForgeOptionState(enabled = false, customSetting = ''): VariantForgeOptionState {
+  return {
+    customSetting,
+    enabled,
+  }
+}
+
+function ensureVariantForgeFamilyHasActivePreset(
+  family: VariantForgeFamily,
+  optionStates: VariantForgeOptionStateMap,
+  preferredPreset: VariantForgePreset = variantForgeDefaultPresetByFamily[family],
+) {
+  const enabledPresets = getVariantForgePresetOptions(family).filter(
+    (preset) => optionStates[preset]?.enabled,
+  )
+
+  if (enabledPresets.length > 0) {
+    return {
+      optionStates,
+      variantPreset: enabledPresets.includes(preferredPreset) ? preferredPreset : enabledPresets[0],
+    }
+  }
+
+  return {
+    optionStates,
+    variantPreset: preferredPreset,
+  }
+}
+
+export function getVariantForgeOptionState(
+  optionStates: VariantForgeOptionStateMap,
+  preset: VariantForgePreset,
+): VariantForgeOptionState {
+  return optionStates[preset] ?? buildVariantForgeOptionState(false)
+}
+
+export function getVariantForgeEnabledPresets(
+  family: VariantForgeFamily,
+  optionStates: VariantForgeOptionStateMap,
+): VariantForgePreset[] {
+  return getVariantForgePresetOptions(family).filter((preset) => optionStates[preset]?.enabled)
+}
+
+export {
+  getVariantForgePresetOptions,
+  variantForgeDefaultPresetByFamily,
+  variantForgeFamilies,
+  variantForgePresetCatalog,
+}
+
 export const initialState: ForgeState = {
   activeMode: 'armory',
   actionAnimator: {
@@ -334,10 +425,6 @@ export const initialState: ForgeState = {
     pipeline: 'sprite-strip',
   },
   generationCount: 3,
-  lootLeveler: {
-    baseAsset: null,
-    rarity: 'common',
-  },
   portraitStudio: {
     heroImage: null,
     prompt: '',
@@ -357,6 +444,18 @@ export const initialState: ForgeState = {
     atlasSize: 2048,
     mesh: null,
     paddingPx: 8,
+  },
+  variantForge: {
+    baseAsset: null,
+    customDirection: '',
+    intensity: 60,
+    optionStates: {
+      worn: buildVariantForgeOptionState(true),
+    },
+    preservePalette: false,
+    preserveSilhouette: true,
+    variantFamily: 'damage',
+    variantPreset: 'worn',
   },
   characterSheet: {
     consistencyEnabled: false,
@@ -500,20 +599,124 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           expansionTargetSize: clampTextureLabOutputSize(action.size),
         },
       }
-    case 'set-loot-leveler-asset':
+    case 'set-variant-forge-asset':
       return {
         ...state,
-        lootLeveler: {
-          ...state.lootLeveler,
+        variantForge: {
+          ...state.variantForge,
           baseAsset: action.asset,
         },
       }
-    case 'set-loot-leveler-rarity':
+    case 'set-variant-forge-family':
       return {
         ...state,
-        lootLeveler: {
-          ...state.lootLeveler,
-          rarity: action.rarity,
+        variantForge: {
+          ...state.variantForge,
+          ...ensureVariantForgeFamilyHasActivePreset(
+            action.family,
+            state.variantForge.optionStates,
+            variantForgeDefaultPresetByFamily[action.family],
+          ),
+          variantFamily: action.family,
+        },
+      }
+    case 'set-variant-forge-preset':
+      if (!isVariantForgePresetForFamily(state.variantForge.variantFamily, action.preset)) {
+        return {
+          ...state,
+          variantForge: {
+            ...state.variantForge,
+            variantPreset: variantForgeDefaultPresetByFamily[state.variantForge.variantFamily],
+          },
+        }
+      }
+
+      return {
+        ...state,
+        variantForge: {
+          ...state.variantForge,
+          optionStates: {
+            ...state.variantForge.optionStates,
+            [action.preset]: buildVariantForgeOptionState(
+              true,
+              state.variantForge.optionStates[action.preset]?.customSetting ?? '',
+            ),
+          },
+          variantPreset: action.preset,
+        },
+      }
+    case 'toggle-variant-forge-preset':
+      if (!isVariantForgePresetForFamily(state.variantForge.variantFamily, action.preset)) {
+        return state
+      }
+
+      return {
+        ...state,
+        variantForge: {
+          ...state.variantForge,
+          ...ensureVariantForgeFamilyHasActivePreset(
+            state.variantForge.variantFamily,
+            {
+              ...state.variantForge.optionStates,
+              [action.preset]: buildVariantForgeOptionState(
+                !state.variantForge.optionStates[action.preset]?.enabled,
+                state.variantForge.optionStates[action.preset]?.customSetting ?? '',
+              ),
+            },
+            state.variantForge.variantPreset === action.preset
+              ? variantForgeDefaultPresetByFamily[state.variantForge.variantFamily]
+              : state.variantForge.variantPreset,
+          ),
+        },
+      }
+    case 'set-variant-forge-preset-custom-setting':
+      if (!isVariantForgePresetForFamily(state.variantForge.variantFamily, action.preset)) {
+        return state
+      }
+
+      return {
+        ...state,
+        variantForge: {
+          ...state.variantForge,
+          optionStates: {
+            ...state.variantForge.optionStates,
+            [action.preset]: buildVariantForgeOptionState(
+              state.variantForge.optionStates[action.preset]?.enabled ?? false,
+              action.customSetting,
+            ),
+          },
+        },
+      }
+    case 'set-variant-forge-intensity':
+      return {
+        ...state,
+        variantForge: {
+          ...state.variantForge,
+          intensity: clampIntensity(action.intensity),
+        },
+      }
+    case 'set-variant-forge-preserve-silhouette':
+      return {
+        ...state,
+        variantForge: {
+          ...state.variantForge,
+          preserveSilhouette: action.enabled,
+        },
+      }
+    case 'set-variant-forge-preserve-palette':
+      return {
+        ...state,
+        variantForge: {
+          ...state.variantForge,
+          preservePalette: action.enabled,
+        },
+      }
+    case 'set-variant-forge-custom-direction':
+      return {
+        ...state,
+        variantForge: {
+          ...state.variantForge,
+          customDirection: action.customDirection,
         },
       }
     case 'set-portrait-studio-image':

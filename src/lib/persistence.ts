@@ -5,19 +5,30 @@ import type {
   CharacterSheetGenerationMode,
   ForgeMode,
   GenerationCount,
-  LootLevelerRarity,
   TextureExpansionTargetSize,
   TextureLabWorkflow,
   UvLabAtlasSize,
+  VariantForgeFamily,
+  VariantForgeOptionStateMap,
+  VariantForgePreset,
 } from './forge'
 import {
   clampActionAnimatorFps,
   clampActionAnimatorNormalizedSize,
   clampFrameCount,
+  clampIntensity,
   clampTextureLabOutputSize,
   clampUvAtlasSize,
   clampUvPaddingPx,
+  getVariantForgePresetOptions,
+  variantForgeDefaultPresetByFamily,
+  variantForgeFamilies,
+  type LootLevelerRarity,
 } from './forge'
+import {
+  isVariantForgeFamily,
+  isVariantForgePresetForFamily,
+} from '../../shared/variantForgeCatalog.js'
 
 type StoredActionAnimatorSettings = {
   actionType: ActionAnimatorActionType
@@ -36,8 +47,14 @@ type StoredCharacterSheetSettings = {
   referencePrompt: string
 }
 
-type StoredLootLevelerSettings = {
-  rarity: LootLevelerRarity
+type StoredVariantForgeSettings = {
+  customDirection: string
+  intensity: number
+  optionStates: VariantForgeOptionStateMap
+  preservePalette: boolean
+  preserveSilhouette: boolean
+  variantFamily: VariantForgeFamily
+  variantPreset: VariantForgePreset
 }
 
 type StoredPortraitStudioSettings = {
@@ -49,7 +66,6 @@ type StoredSettings = {
   actionAnimator: StoredActionAnimatorSettings
   characterSheet: StoredCharacterSheetSettings
   generationCount: GenerationCount
-  lootLeveler: StoredLootLevelerSettings
   portraitStudio: StoredPortraitStudioSettings
   prompt: string
   textureLab: {
@@ -61,6 +77,7 @@ type StoredSettings = {
     atlasSize: UvLabAtlasSize
     paddingPx: number
   }
+  variantForge: StoredVariantForgeSettings
   vfxForge: {
     frameCount: number
     intensity: number
@@ -85,6 +102,64 @@ type StoredState = {
 const storageKey = 'kizer-forge-state'
 const maxRecentPrompts = 6
 
+function normalizeStoredMode(value: unknown): ForgeMode {
+  if (value === 'loot-leveler') {
+    return 'variant-forge'
+  }
+
+  return value === 'action-animator' ||
+    value === 'portrait-studio' ||
+    value === 'texture-lab' ||
+    value === 'uv-lab' ||
+    value === 'vfx-forge' ||
+    value === 'visualizer' ||
+    value === 'character-sheet' ||
+    value === 'variant-forge' ||
+    value === 'armory'
+    ? value
+    : 'armory'
+}
+
+function readLegacyLootLevelerRarity(
+  value: unknown,
+): LootLevelerRarity | undefined {
+  return value === 'common' ||
+    value === 'rare' ||
+    value === 'epic' ||
+    value === 'legendary'
+    ? value
+    : undefined
+}
+
+function readStoredVariantForgeOptionStates(value: unknown): VariantForgeOptionStateMap {
+  if (!value || typeof value !== 'object') {
+    return {}
+  }
+
+  const rawValue = value as Record<string, unknown>
+  const normalizedStates: VariantForgeOptionStateMap = {}
+
+  for (const family of variantForgeFamilies) {
+    for (const preset of getVariantForgePresetOptions(family)) {
+      const entry = rawValue[preset]
+
+      if (!entry || typeof entry !== 'object') {
+        continue
+      }
+
+      normalizedStates[preset] = {
+        customSetting:
+          typeof (entry as { customSetting?: unknown }).customSetting === 'string'
+            ? (entry as { customSetting: string }).customSetting
+            : '',
+        enabled: Boolean((entry as { enabled?: unknown }).enabled),
+      }
+    }
+  }
+
+  return normalizedStates
+}
+
 export function loadStoredState(): StoredState | null {
   if (typeof window === 'undefined') {
     return null
@@ -102,6 +177,37 @@ export function loadStoredState(): StoredState | null {
       parsed.settings?.actionAnimator?.pipeline === 'veo-video'
         ? 'veo-video'
         : 'sprite-strip'
+    const legacyLootLevelerRarity = readLegacyLootLevelerRarity(
+      (parsed.settings as { lootLeveler?: { rarity?: unknown } } | undefined)?.lootLeveler
+        ?.rarity,
+    )
+    const storedVariantFamily = isVariantForgeFamily(parsed.settings?.variantForge?.variantFamily)
+      ? parsed.settings.variantForge.variantFamily
+      : legacyLootLevelerRarity
+        ? 'rarity'
+        : 'damage'
+    const storedVariantPreset = isVariantForgePresetForFamily(
+      storedVariantFamily,
+      parsed.settings?.variantForge?.variantPreset,
+    )
+      ? parsed.settings.variantForge.variantPreset
+      : legacyLootLevelerRarity && storedVariantFamily === 'rarity'
+        ? legacyLootLevelerRarity
+        : variantForgeDefaultPresetByFamily[storedVariantFamily]
+    const storedVariantOptionStates = readStoredVariantForgeOptionStates(
+      parsed.settings?.variantForge?.optionStates,
+    )
+    const shouldHydrateLegacyVariantPreset =
+      parsed.settings?.variantForge?.optionStates === undefined
+    const hydratedVariantOptionStates = shouldHydrateLegacyVariantPreset
+      ? {
+          ...storedVariantOptionStates,
+          [storedVariantPreset]: {
+            customSetting: storedVariantOptionStates[storedVariantPreset]?.customSetting ?? '',
+            enabled: true,
+          },
+        }
+      : storedVariantOptionStates
 
     return {
       recentPrompts: Array.isArray(parsed.recentPrompts)
@@ -111,18 +217,7 @@ export function loadStoredState(): StoredState | null {
           )
         : [],
       settings: {
-        activeMode:
-          parsed.settings?.activeMode === 'action-animator' ||
-          parsed.settings?.activeMode === 'loot-leveler' ||
-          parsed.settings?.activeMode === 'portrait-studio' ||
-          parsed.settings?.activeMode === 'texture-lab' ||
-          parsed.settings?.activeMode === 'uv-lab' ||
-          parsed.settings?.activeMode === 'vfx-forge' ||
-          parsed.settings?.activeMode === 'visualizer' ||
-          parsed.settings?.activeMode === 'character-sheet' ||
-          parsed.settings?.activeMode === 'armory'
-            ? parsed.settings.activeMode
-            : 'armory',
+        activeMode: normalizeStoredMode(parsed.settings?.activeMode),
         actionAnimator: {
           actionType:
             parsed.settings?.actionAnimator?.actionType === 'walk' ||
@@ -185,14 +280,6 @@ export function loadStoredState(): StoredState | null {
           parsed.settings?.generationCount === 4
             ? parsed.settings.generationCount
             : 3,
-        lootLeveler: {
-          rarity:
-            parsed.settings?.lootLeveler?.rarity === 'rare' ||
-            parsed.settings?.lootLeveler?.rarity === 'epic' ||
-            parsed.settings?.lootLeveler?.rarity === 'legendary'
-              ? parsed.settings.lootLeveler.rarity
-              : 'common',
-        },
         portraitStudio: {
           prompt:
             typeof parsed.settings?.portraitStudio?.prompt === 'string'
@@ -214,6 +301,25 @@ export function loadStoredState(): StoredState | null {
         uvLab: {
           atlasSize: clampUvAtlasSize(parsed.settings?.uvLab?.atlasSize ?? 2048),
           paddingPx: clampUvPaddingPx(parsed.settings?.uvLab?.paddingPx ?? 8),
+        },
+        variantForge: {
+          customDirection:
+            typeof parsed.settings?.variantForge?.customDirection === 'string'
+              ? parsed.settings.variantForge.customDirection
+              : '',
+          intensity:
+            typeof parsed.settings?.variantForge?.intensity === 'number' &&
+            Number.isFinite(parsed.settings.variantForge.intensity)
+              ? clampIntensity(parsed.settings.variantForge.intensity)
+              : 60,
+          optionStates: hydratedVariantOptionStates,
+          preservePalette: Boolean(parsed.settings?.variantForge?.preservePalette),
+          preserveSilhouette:
+            typeof parsed.settings?.variantForge?.preserveSilhouette === 'boolean'
+              ? parsed.settings.variantForge.preserveSilhouette
+              : true,
+          variantFamily: storedVariantFamily,
+          variantPreset: storedVariantPreset,
         },
         vfxForge: {
           frameCount:
@@ -239,23 +345,17 @@ export function loadStoredState(): StoredState | null {
       },
       session:
         parsed.session &&
-        (parsed.session.mode === null ||
-          parsed.session.mode === 'action-animator' ||
-          parsed.session.mode === 'loot-leveler' ||
-          parsed.session.mode === 'portrait-studio' ||
-          parsed.session.mode === 'texture-lab' ||
-          parsed.session.mode === 'uv-lab' ||
-          parsed.session.mode === 'vfx-forge' ||
-          parsed.session.mode === 'visualizer' ||
-          parsed.session.mode === 'character-sheet' ||
-          parsed.session.mode === 'armory') &&
+        (parsed.session.mode === null || typeof parsed.session.mode === 'string') &&
         (parsed.session.serverModel === null ||
           typeof parsed.session.serverModel === 'string') &&
         (parsed.session.serverPrompt === null ||
           typeof parsed.session.serverPrompt === 'string') &&
           typeof parsed.session.savedAt === 'string'
           ? {
-              mode: parsed.session.mode ?? null,
+              mode:
+                typeof parsed.session.mode === 'string'
+                  ? normalizeStoredMode(parsed.session.mode)
+                  : null,
               serverModel: parsed.session.serverModel,
               serverPrompt: parsed.session.serverPrompt,
               savedAt: parsed.session.savedAt,

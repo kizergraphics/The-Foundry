@@ -31,6 +31,12 @@ import {
   getGoogleTelemetrySnapshot,
   isGoogleTelemetryConfigured,
 } from './googleQuotaTelemetry.js'
+import {
+  formatVariantForgeLabel,
+  isVariantForgeFamily,
+  isVariantForgePresetForFamily,
+  variantForgeDefaultPresetByFamily,
+} from '../shared/variantForgeCatalog.js'
 
 dotenv.config()
 
@@ -74,9 +80,9 @@ const routeModelAllowlist = {
 }
 const supportedForgeModes = [
   'armory',
-  'loot-leveler',
   'portrait-studio',
   'texture-lab',
+  'variant-forge',
   'vfx-forge',
   'visualizer',
 ]
@@ -87,6 +93,11 @@ const forgeGenerationTimeoutMs = clampTimeoutMs(
   Number(process.env.FORGE_GENERATION_TIMEOUT_MS ?? 90000),
   90000,
 )
+const variantForgeGenerationTimeoutMs = clampTimeoutMs(
+  Number(process.env.VARIANT_FORGE_GENERATION_TIMEOUT_MS ?? 45000),
+  45000,
+)
+const variantForgeMaxAttemptsPerImage = 2
 const forgeBatchInterRequestDelayMs = 250
 const forgeBatchRetryDelayMs = 1200
 const maxPromptOrchestrationWordCount = 24
@@ -204,14 +215,16 @@ app.post(
   }
 
   const {
+    customDirection,
     mode,
     modelId,
     prompt,
+    preservePalette,
+    preserveSilhouette,
     generationCount,
     intensity,
     projectileType,
     frameCount,
-    rarity,
     references = [],
     styleId,
     styleText,
@@ -220,6 +233,10 @@ app.post(
     seamlessMode,
     textureSize,
     textureExpansion,
+    variantFamily,
+    variantIntensity,
+    variantOptions,
+    variantPreset,
     workflow,
   } = validatedRequest
 
@@ -240,7 +257,7 @@ app.post(
   if (
     requestedWorkflow === 'generate' &&
     !normalizedPrompt &&
-    mode !== 'loot-leveler' &&
+    mode !== 'variant-forge' &&
     mode !== 'portrait-studio' &&
     mode !== 'vfx-forge'
   ) {
@@ -309,10 +326,16 @@ app.post(
               prompt: normalizedPrompt,
               styleText: providedStyleText,
             })
-        : mode === 'loot-leveler'
-          ? buildLootLevelerPrompt({
-              rarity,
+        : mode === 'variant-forge'
+          ? buildVariantForgePrompt({
+              customDirection,
+              preservePalette,
+              preserveSilhouette,
               styleText: providedStyleText,
+              variantFamily,
+              variantIntensity,
+              variantOptions,
+              variantPreset,
             })
         : mode === 'portrait-studio'
           ? buildPortraitStudioPrompt({
@@ -346,8 +369,15 @@ app.post(
         ? resolveTextureExpansionSystemInstruction(systemInstruction)
         : requestedWorkflow === 'repair-seams'
           ? resolveSeamRepairSystemInstruction(systemInstruction)
-        : mode === 'loot-leveler'
-          ? resolveLootLevelerSystemInstruction(systemInstruction, { rarity })
+        : mode === 'variant-forge'
+          ? resolveVariantForgeSystemInstruction(systemInstruction, {
+              preservePalette,
+              preserveSilhouette,
+              variantFamily,
+              variantIntensity,
+              variantOptions,
+              variantPreset,
+            })
         : mode === 'portrait-studio'
           ? resolvePortraitStudioSystemInstruction(systemInstruction)
         : mode === 'vfx-forge'
@@ -514,6 +544,7 @@ app.post(
     const normalizedErrors = []
     const noImageTexts = []
     const batchWorkerCount = Math.min(candidateCount, forgeBatchMaxParallelRequests)
+    const attemptPolicy = resolveForgeAttemptPolicy(mode)
     const attemptBatchSlotGeneration = async ({
       phase,
       slotIndex,
@@ -525,7 +556,7 @@ app.post(
 
       for (
         let attempt = 1;
-        attempt <= forgeBatchMaxAttemptsPerImage;
+        attempt <= attemptPolicy.maxAttemptsPerImage;
         attempt += 1
       ) {
         try {
@@ -563,9 +594,9 @@ app.post(
                     systemInstruction: resolvedSystemInstruction,
                   },
             }),
-            forgeGenerationTimeoutMs,
+            attemptPolicy.timeoutMs,
             `Gemini image generation timed out after ${Math.round(
-              forgeGenerationTimeoutMs / 1000,
+              attemptPolicy.timeoutMs / 1000,
             )} seconds.`,
           )
 
@@ -608,7 +639,7 @@ app.post(
             worker: workerLabel,
           })
 
-          if (attempt < forgeBatchMaxAttemptsPerImage) {
+          if (attempt < attemptPolicy.maxAttemptsPerImage) {
             await sleep(forgeBatchInterRequestDelayMs)
           }
         } catch (requestError) {
@@ -1702,22 +1733,114 @@ function buildSeamRepairPrompt({ prompt, styleText }) {
     .join(' ')
 }
 
-function buildLootLevelerPrompt({ rarity, styleText }) {
-  const normalizedRarity = normalizeLootRarity(rarity)
-  const rarityEffects = {
-    common: 'Keep the asset grounded and production clean.',
-    rare: 'Add minor engravings, subtle shine, and restrained rarity cues.',
-    epic: 'Introduce glow accents, premium materials, and a bolder rarity read.',
-    legendary:
-      'Add elemental aura language, floating shards, and dramatic premium VFX accents.',
+export function buildVariantForgePrompt({
+  customDirection,
+  preservePalette,
+  preserveSilhouette,
+  styleText,
+  variantFamily,
+  variantIntensity,
+  variantOptions,
+  variantPreset,
+}) {
+  const normalizedFamily = normalizeVariantForgeFamily(variantFamily)
+  const normalizedPreset = normalizeVariantForgePreset(normalizedFamily, variantPreset)
+  const normalizedOptions = normalizeVariantForgeOptions(normalizedFamily, variantOptions)
+  const normalizedIntensity = clampPercentage(variantIntensity, 60)
+  const normalizedStyleText =
+    typeof styleText === 'string' && styleText.trim() ? styleText.trim() : ''
+  const normalizedCustomDirection =
+    typeof customDirection === 'string' && customDirection.trim()
+      ? customDirection.trim()
+      : ''
+
+  if (normalizedFamily === 'rarity') {
+    const normalizedRarity = normalizeLootRarity(normalizedPreset)
+    const rarityEffects = {
+      common: 'Keep the asset grounded and production clean.',
+      rare: 'Add minor engravings, subtle shine, and restrained rarity cues.',
+      epic: 'Introduce glow accents, premium materials, and a bolder rarity read.',
+      legendary:
+        'Add elemental aura language, floating shards, and dramatic premium VFX accents.',
+    }
+
+    return [
+      normalizedOptions.length > 0
+        ? 'Upgrade the attached base asset into a higher-rarity game item render.'
+        : 'Upgrade the attached base asset using broad rarity-family upgrade language without locking to a specific rarity tier.',
+      preserveSilhouette
+        ? 'Preserve the original silhouette, proportions, and core weapon or item type exactly.'
+        : 'Keep the core weapon or item type identical to the source asset and allow only slight silhouette drift.',
+      normalizedOptions.length > 0 ? `Rarity target: ${normalizedRarity}.` : null,
+      normalizedOptions.length > 0 ? rarityEffects[normalizedRarity] : null,
+      normalizedOptions.length > 1
+        ? `Active rarity options: ${normalizedOptions.map((option) => formatVariantForgeLabel(option.preset)).join(', ')}.`
+        : null,
+      ...normalizedOptions
+        .filter((option) => option.customSetting)
+        .map(
+          (option) =>
+            `${formatVariantForgeLabel(option.preset)} custom setting: ${option.customSetting}.`,
+        ),
+      `Apply the upgrade at ${normalizedIntensity} out of 100 strength as a single controlled transformation.`,
+      preservePalette ? 'Keep the original palette close while applying the rarity pass.' : null,
+      normalizedCustomDirection ? `Additional direction: ${normalizedCustomDirection}.` : null,
+      normalizedStyleText ? `Style guidance: ${normalizedStyleText}.` : null,
+    ]
+      .filter(Boolean)
+      .join(' ')
+  }
+
+  const familyGuidance = {
+    alignment: 'Shift the asset through belief, blessing, or corruption cues without changing what the item is.',
+    boss: 'Elevate the asset into a high-threat encounter variant with stronger premium storytelling.',
+    damage: 'Control wear, repair state, and structural condition while keeping the item class and identity intact.',
+    elemental: 'Infuse the asset with elemental material behavior and energy cues tied to the selected preset.',
+    tech: 'Rebuild the finish language around fabrication, machinery, or arcane engineering without changing the prop type.',
+  }
+  const presetGuidance = {
+    'arcane-tech': 'Blend occult engineering, runic circuitry, and powered components into the finish.',
+    'boss-tier': 'Use dramatic encounter-grade materials, command presence, and premium detailing.',
+    broken: 'Show major wear, structural failure, and hard-use breakage.',
+    burning: 'Introduce heat bloom, ember residue, soot, and active burn treatment.',
+    corrupted: 'Add blighted materials, invasive dark influence, and ominous energy traces.',
+    damaged: 'Show moderate wear, chipped edges, and visible stress to the structure.',
+    elite: 'Push the base design toward a sharper elite encounter read with controlled premium treatment.',
+    frozen: 'Apply frost growth, icy material shift, and cold crystalline accumulation.',
+    holy: 'Add sanctified polish, clean radiant cues, and ceremonial premium treatment.',
+    industrial: 'Use fabricated plating, bolts, utility reinforcement, and rugged machine finishing.',
+    'low-tech': 'Use simpler fabrication, improvised materials, and stripped-down construction details.',
+    'no-damage': 'Keep the asset structurally intact, clean, and free of visible damage or wear.',
+    stormcharged: 'Apply charged edges, electric bloom, and storm-reactive energy language.',
+    worn: 'Add light weathering, softened finish, and believable production wear.',
   }
 
   return [
-    'Upgrade the attached base asset into a higher-rarity game item render.',
-    'Preserve the original silhouette, proportions, and core weapon or item type exactly.',
-    `Rarity target: ${normalizedRarity}.`,
-    rarityEffects[normalizedRarity],
-    styleText ? `Style guidance: ${styleText}.` : null,
+    'Transform the attached base asset into a controlled single-image variant.',
+    preserveSilhouette
+      ? 'Preserve the original silhouette, proportions, and item class.'
+      : 'Keep the original item class and subject identity intact while allowing only minor silhouette drift.',
+    'Never convert the asset into a different weapon, tool, or prop type.',
+    `Variant family: ${formatVariantForgeLabel(normalizedFamily)}.`,
+    normalizedOptions.length > 0
+      ? `Variant preset: ${formatVariantForgeLabel(normalizedPreset)}.`
+      : 'Variant preset toggles: none enabled.',
+    normalizedOptions.length > 1
+      ? `Active option blend: ${normalizedOptions.map((option) => formatVariantForgeLabel(option.preset)).join(', ')}.`
+      : null,
+    familyGuidance[normalizedFamily],
+    normalizedOptions.length > 0 ? presetGuidance[normalizedPreset] : null,
+    ...normalizedOptions.map((option) =>
+      option.customSetting
+        ? `${formatVariantForgeLabel(option.preset)} custom setting: ${option.customSetting}.`
+        : null,
+    ),
+    preservePalette
+      ? 'Keep the source palette family close while changing finish and story cues.'
+      : 'Palette shifts are allowed if they support the selected variant.',
+    `Variant intensity: ${normalizedIntensity} out of 100. Treat intensity as transformation strength only.`,
+    normalizedCustomDirection ? `Additional direction: ${normalizedCustomDirection}.` : null,
+    normalizedStyleText ? `Style guidance: ${normalizedStyleText}.` : null,
   ]
     .filter(Boolean)
     .join(' ')
@@ -1738,6 +1861,20 @@ function buildPortraitStudioPrompt({ prompt, styleText }) {
   ]
     .filter(Boolean)
     .join(' ')
+}
+
+function resolveForgeAttemptPolicy(mode) {
+  if (mode === 'variant-forge') {
+    return {
+      maxAttemptsPerImage: variantForgeMaxAttemptsPerImage,
+      timeoutMs: variantForgeGenerationTimeoutMs,
+    }
+  }
+
+  return {
+    maxAttemptsPerImage: forgeBatchMaxAttemptsPerImage,
+    timeoutMs: forgeGenerationTimeoutMs,
+  }
 }
 
 function buildVfxForgePrompt({ frameCount, intensity, prompt, projectileType, styleText }) {
@@ -1786,21 +1923,80 @@ function resolveTextureExpansionSystemInstruction(customInstruction) {
     .join('\n')
 }
 
-function resolveLootLevelerSystemInstruction(customInstruction, { rarity }) {
-  const normalizedRarity = normalizeLootRarity(rarity)
-  const strengthGuidance = {
-    common: 'Keep changes minimal and close to the original base asset.',
-    rare: 'Apply a low-strength upgrade pass comparable to a 0.2 variation.',
-    epic: 'Apply a medium-strength upgrade pass comparable to a 0.5 variation.',
-    legendary: 'Apply a high-strength upgrade pass comparable to a 0.8 variation.',
+export function resolveVariantForgeSystemInstruction(
+  customInstruction,
+  {
+    preservePalette,
+    preserveSilhouette,
+    variantFamily,
+    variantIntensity,
+    variantOptions,
+    variantPreset,
+  },
+) {
+  const normalizedFamily = normalizeVariantForgeFamily(variantFamily)
+  const normalizedPreset = normalizeVariantForgePreset(normalizedFamily, variantPreset)
+  const normalizedOptions = normalizeVariantForgeOptions(normalizedFamily, variantOptions)
+  const normalizedIntensity = clampPercentage(variantIntensity, 60)
+
+  if (normalizedFamily === 'rarity') {
+    const normalizedRarity = normalizeLootRarity(normalizedPreset)
+    const strengthGuidance = {
+      common: 'Keep changes minimal and close to the original base asset.',
+      rare: 'Apply a low-strength rarity upgrade pass.',
+      epic: 'Apply a medium-strength rarity upgrade pass.',
+      legendary: 'Apply a high-strength rarity upgrade pass.',
+    }
+
+    return [
+      coreSystemRules.join('\n'),
+      preserveSilhouette
+        ? 'Maintain the silhouette and core geometry of the input image.'
+        : 'Keep the original item type identical and allow only minimal silhouette drift.',
+      'Keep the weapon or item type identical to the source asset.',
+      normalizedOptions.length > 0
+        ? `Apply ${normalizedRarity} visual upgrades only.`
+        : 'Apply broad rarity-family upgrade cues only and do not lock to a named rarity tier unless the custom instruction asks for it.',
+      normalizedOptions.length > 0 ? strengthGuidance[normalizedRarity] : null,
+      normalizedOptions.length > 1
+        ? `Blend these active rarity options: ${normalizedOptions.map((option) => formatVariantForgeLabel(option.preset)).join(', ')}.`
+        : null,
+      ...normalizedOptions
+        .filter((option) => option.customSetting)
+        .map(
+          (option) =>
+            `${formatVariantForgeLabel(option.preset)} custom setting: ${option.customSetting}.`,
+        ),
+      `Treat ${normalizedIntensity} out of 100 only as the strength of the rarity pass.`,
+      preservePalette ? 'Keep the palette close to the source item.' : null,
+      customInstruction,
+    ]
+      .filter((value) => typeof value === 'string' && value.trim())
+      .join('\n')
   }
 
   return [
     coreSystemRules.join('\n'),
-    'Maintain the silhouette and core geometry of the input image.',
-    'Keep the weapon or item type identical to the source asset.',
-    `Apply ${normalizedRarity} visual upgrades only.`,
-    strengthGuidance[normalizedRarity],
+    preserveSilhouette
+      ? 'Maintain the silhouette and core geometry of the input image.'
+      : 'Keep the original item class intact and allow only limited silhouette drift.',
+    'Preserve the subject identity and never change the asset into a different weapon or prop type.',
+    normalizedOptions.length > 0
+      ? `Use ${normalizedFamily} family cues and ${normalizedPreset} preset cues to alter finish, material, wear, and story detail only.`
+      : `Use ${normalizedFamily} family cues to alter finish, material, wear, and story detail only, without applying any named preset cues.`,
+    normalizedOptions.length > 1
+      ? `Blend these active options: ${normalizedOptions.map((option) => formatVariantForgeLabel(option.preset)).join(', ')}.`
+      : null,
+    ...normalizedOptions
+      .filter((option) => option.customSetting)
+      .map(
+        (option) =>
+          `${formatVariantForgeLabel(option.preset)} custom setting: ${option.customSetting}.`,
+      ),
+    preservePalette
+      ? 'Keep the source palette family close to the original image.'
+      : 'Palette shifts are allowed when they support the selected variant.',
+    `Treat ${normalizedIntensity} out of 100 as a strength modifier, not a separate workflow.`,
     customInstruction,
   ]
     .filter((value) => typeof value === 'string' && value.trim())
@@ -2776,6 +2972,38 @@ function normalizeLootRarity(rarity) {
   }
 
   return 'common'
+}
+
+function normalizeVariantForgeFamily(variantFamily) {
+  return isVariantForgeFamily(variantFamily) ? variantFamily : 'damage'
+}
+
+function normalizeVariantForgePreset(variantFamily, variantPreset) {
+  return isVariantForgePresetForFamily(variantFamily, variantPreset)
+    ? variantPreset
+    : variantForgeDefaultPresetByFamily[variantFamily]
+}
+
+function normalizeVariantForgeOptions(variantFamily, variantOptions) {
+  const normalizedOptions = Array.isArray(variantOptions)
+    ? variantOptions.filter(
+        (option, index, entries) =>
+          isVariantForgePresetForFamily(variantFamily, option?.preset) &&
+          entries.findIndex((entry) => entry?.preset === option?.preset) === index,
+      )
+    : []
+
+  if (normalizedOptions.length > 0) {
+    return normalizedOptions.map((option) => ({
+      customSetting:
+        typeof option.customSetting === 'string' && option.customSetting.trim()
+          ? option.customSetting.trim()
+          : '',
+      preset: option.preset,
+    }))
+  }
+
+  return []
 }
 
 function clampPercentage(value, fallback) {

@@ -1,3 +1,10 @@
+import {
+  getVariantForgePresetOptions,
+  isVariantForgePresetForFamily,
+  variantForgeDefaultPresetByFamily,
+  variantForgeFamilies,
+} from '../shared/variantForgeCatalog.js'
+
 const maxPromptLength = 4000
 const maxStyleTextLength = 400
 const maxSystemInstructionLength = 4000
@@ -11,12 +18,13 @@ const allowedImageMimeTypes = new Set([
 ])
 const supportedForgeModes = new Set([
   'armory',
-  'loot-leveler',
   'portrait-studio',
   'texture-lab',
+  'variant-forge',
   'vfx-forge',
   'visualizer',
 ])
+const allowedVariantForgeFamilies = new Set(variantForgeFamilies)
 const allowedCharacterSheetModes = new Set(['reference', 'manifest'])
 const allowedCharacterReferenceRoles = new Set([
   'Identity_Reference',
@@ -100,6 +108,55 @@ function readInteger(value, fieldName, { min, max, fallback }) {
   }
 
   return roundedValue
+}
+
+function readBoolean(value, fieldName, fallback) {
+  if (value === undefined || value === null || value === '') {
+    return fallback
+  }
+
+  if (typeof value !== 'boolean') {
+    throw buildValidationError(`${fieldName} must be a boolean.`)
+  }
+
+  return value
+}
+
+function readVariantForgeOptions(value, variantFamily) {
+  if (value === undefined || value === null || value === '') {
+    return []
+  }
+
+  if (!Array.isArray(value)) {
+    throw buildValidationError('variantOptions must be an array.')
+  }
+
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw buildValidationError(`variantOptions[${index}] must be an object.`)
+    }
+
+    const preset = readOptionalTrimmedString(
+      entry.preset,
+      `variantOptions[${index}].preset`,
+      40,
+    )
+
+    if (!preset || !isVariantForgePresetForFamily(variantFamily, preset)) {
+      throw buildValidationError(`variantOptions[${index}].preset contains an unsupported value.`, [
+        `Allowed values for ${variantFamily}: ${getVariantForgePresetOptions(variantFamily).join(', ')}`,
+      ])
+    }
+
+    return {
+      customSetting: readOptionalTrimmedString(
+        entry.customSetting,
+        `variantOptions[${index}].customSetting`,
+        240,
+      ),
+      preset,
+    }
+  })
 }
 
 function readActionAnimatorFrameSize(value, fieldName) {
@@ -222,6 +279,30 @@ export function validateForgeRequest(body) {
       : body?.workflow === 'repair-seams'
         ? 'repair-seams'
         : 'generate'
+  const variantFamily =
+    body?.variantFamily !== undefined || mode === 'variant-forge'
+      ? readOptionalEnum(body?.variantFamily, 'variantFamily', allowedVariantForgeFamilies) ??
+        'damage'
+      : undefined
+  const variantPreset =
+    body?.variantPreset !== undefined || mode === 'variant-forge'
+      ? readOptionalTrimmedString(body?.variantPreset, 'variantPreset', 40) ||
+        variantForgeDefaultPresetByFamily[variantFamily ?? 'damage']
+      : undefined
+  const variantOptions =
+    mode === 'variant-forge'
+      ? readVariantForgeOptions(body?.variantOptions, variantFamily ?? 'damage')
+      : undefined
+
+  if (
+    variantFamily &&
+    variantPreset &&
+    !isVariantForgePresetForFamily(variantFamily, variantPreset)
+  ) {
+    throw buildValidationError('variantPreset contains an unsupported value.', [
+      `Allowed values for ${variantFamily}: ${getVariantForgePresetOptions(variantFamily).join(', ')}`,
+    ])
+  }
 
   return {
     frameCount: readInteger(body?.frameCount, 'frameCount', {
@@ -241,6 +322,18 @@ export function validateForgeRequest(body) {
     }),
     mode,
     modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
+    customDirection:
+      body?.customDirection !== undefined || mode === 'variant-forge'
+        ? readOptionalTrimmedString(body?.customDirection, 'customDirection', 400)
+        : undefined,
+    preservePalette:
+      body?.preservePalette !== undefined || mode === 'variant-forge'
+        ? readBoolean(body?.preservePalette, 'preservePalette', false)
+        : undefined,
+    preserveSilhouette:
+      body?.preserveSilhouette !== undefined || mode === 'variant-forge'
+        ? readBoolean(body?.preserveSilhouette, 'preserveSilhouette', true)
+        : undefined,
     projectileType: readOptionalTrimmedString(body?.projectileType, 'projectileType', 120),
     prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
     rarity: readOptionalTrimmedString(body?.rarity, 'rarity', 40),
@@ -269,6 +362,17 @@ export function validateForgeRequest(body) {
       'systemInstruction',
       maxSystemInstructionLength,
     ),
+    variantFamily,
+    variantIntensity:
+      body?.variantIntensity !== undefined || mode === 'variant-forge'
+        ? readInteger(body?.variantIntensity, 'variantIntensity', {
+            fallback: 60,
+            max: 100,
+            min: 0,
+          })
+        : undefined,
+    variantOptions,
+    variantPreset,
     textureExpansion: body?.textureExpansion
       ? {
           canvasImage: validateInlineImage(

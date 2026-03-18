@@ -23,4 +23,68 @@ describe('forgeReducer', () => {
       hydratedState,
     )
   })
+
+  it('switches variant forge families to that family’s default preset', () => {
+    const rarityState = forgeReducer(initialState, {
+      type: 'set-variant-forge-family',
+      family: 'rarity',
+    })
+
+    expect(rarityState.variantForge).toMatchObject({
+      variantFamily: 'rarity',
+      variantPreset: 'common',
+    })
+
+    const bossState = forgeReducer(rarityState, {
+      type: 'set-variant-forge-family',
+      family: 'boss',
+    })
+
+    expect(bossState.variantForge).toMatchObject({
+      variantFamily: 'boss',
+      variantPreset: 'elite',
+    })
+  })
+
+  it('keeps variant preset toggles and custom settings in sync', () => {
+    const withBrokenEnabled = forgeReducer(initialState, {
+      type: 'toggle-variant-forge-preset',
+      preset: 'broken',
+    })
+
+    expect(withBrokenEnabled.variantForge.optionStates.broken).toMatchObject({
+      customSetting: '',
+      enabled: true,
+    })
+
+    const withBrokenLead = forgeReducer(withBrokenEnabled, {
+      type: 'set-variant-forge-preset',
+      preset: 'broken',
+    })
+
+    expect(withBrokenLead.variantForge.variantPreset).toBe('broken')
+
+    const withCustomSetting = forgeReducer(withBrokenLead, {
+      type: 'set-variant-forge-preset-custom-setting',
+      customSetting: 'Expose the cracked core.',
+      preset: 'broken',
+    })
+
+    expect(withCustomSetting.variantForge.optionStates.broken).toMatchObject({
+      customSetting: 'Expose the cracked core.',
+      enabled: true,
+    })
+  })
+
+  it('allows every preset in a family to be turned off', () => {
+    const withNoActivePresets = forgeReducer(initialState, {
+      type: 'toggle-variant-forge-preset',
+      preset: 'worn',
+    })
+
+    expect(withNoActivePresets.variantForge.variantPreset).toBe('worn')
+    expect(withNoActivePresets.variantForge.optionStates.worn).toMatchObject({
+      enabled: false,
+    })
+  })
 })

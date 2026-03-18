@@ -25,10 +25,10 @@ const modeAccents: Record<
     accentSoft: '#064e3b',
     label: 'Texture Lab',
   },
-  'loot-leveler': {
+  'variant-forge': {
     accent: '#f59e0b',
     accentSoft: '#78350f',
-    label: 'Loot Leveler',
+    label: 'Variant Forge',
   },
   'portrait-studio': {
     accent: '#f472b6',
