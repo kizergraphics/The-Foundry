@@ -10,6 +10,7 @@ import {
   Palette,
   ScanFace,
 } from 'lucide-react'
+import type { ForgeMode } from '../../shared/modeCatalog.js'
 import {
   getVariantForgePresetOptions,
   isVariantForgePresetForFamily,
@@ -22,22 +23,12 @@ import type {
   VariantForgePreset,
   VariantForgeRarityPreset,
 } from '../../shared/variantForgeCatalog.js'
+export type { ForgeMode } from '../../shared/modeCatalog.js'
 export type {
   VariantForgeFamily,
   VariantForgePreset,
   VariantForgeRarityPreset,
 } from '../../shared/variantForgeCatalog.js'
-
-export type ForgeMode =
-  | 'armory'
-  | 'action-animator'
-  | 'variant-forge'
-  | 'portrait-studio'
-  | 'texture-lab'
-  | 'uv-lab'
-  | 'vfx-forge'
-  | 'visualizer'
-  | 'character-sheet'
 
 export type ReferenceSlot = 'style' | 'subject'
 export type CharacterSheetReferenceSlot = 'face' | 'outfit' | 'art-style'

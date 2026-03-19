@@ -13,6 +13,7 @@ import type {
   VariantForgeOptionStateMap,
   VariantForgePreset,
 } from './forge'
+import { isForgeMode } from '../../shared/modeCatalog.js'
 import {
   clampActionAnimatorFps,
   clampActionAnimatorNormalizedSize,
@@ -108,17 +109,7 @@ function normalizeStoredMode(value: unknown): ForgeMode {
     return 'variant-forge'
   }
 
-  return value === 'action-animator' ||
-    value === 'portrait-studio' ||
-    value === 'texture-lab' ||
-    value === 'uv-lab' ||
-    value === 'vfx-forge' ||
-    value === 'visualizer' ||
-    value === 'character-sheet' ||
-    value === 'variant-forge' ||
-    value === 'armory'
-    ? value
-    : 'armory'
+  return isForgeMode(value) ? value : 'armory'
 }
 
 function readLegacyLootLevelerRarity(

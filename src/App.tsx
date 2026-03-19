@@ -34,23 +34,18 @@ import { ModelUploadField } from './components/ModelUploadField'
 import { GeneratedResultCard, PlaceholderCard } from './components/ResultCards'
 import {
   actionAnimatorActionOptions,
-  buildActionAnimatorPrompt,
   generateActionAnimator,
 } from './lib/actionAnimator'
 import {
-  buildCharacterSheetPrompt,
   generateCharacterSheet,
-  getCharacterSheetPromptSource,
 } from './lib/characterSheet'
 import {
   buildTextureSeamRepairInput,
-  buildTextureExpansionInput,
   copyResultToClipboard,
   createDataUrl,
   dataUrlToFile,
   downloadDataUrl,
   downloadResult,
-  fileToBase64,
   normalizeSquareTextureDataUrl,
   sliceSpriteSheetFramesByContent,
   slicePortraitStudioFaces,
@@ -86,7 +81,6 @@ import type {
   ModelAsset,
   ModeDefinition,
   ReferenceAsset,
-  ReferenceSlot,
   TextureExpansionTargetSize,
   TextureLabWorkflow,
   UvLabAtlasSize,
@@ -112,6 +106,24 @@ import {
   formatVariantForgeLabel,
   pickVariantForgeIdeaSuggestions,
 } from '../shared/variantForgeCatalog.js'
+import {
+  getAvailableModelsForMode,
+  getModeDefaultModel,
+  MODEL_LABELS,
+  TELEMETRY_ROW_BY_MODEL_ID,
+  type ModelId,
+} from './modes/models'
+import { buildActiveVariantForgeOptions, getModePresentation } from './modes/registry'
+import {
+  buildPortraitStudioRequest,
+  buildStandardForgeRequest,
+  buildTextureExpansionRequest,
+  buildVariantForgeRequest,
+  buildVfxForgeRequest,
+  normalizeForgeApiResults,
+  postForgeRequest,
+  type ForgeApiResponse,
+} from './modes/execution'
 
 type ServiceHealth = {
   ok: boolean
@@ -158,26 +170,6 @@ type TelemetrySnapshot = {
   timeZone: string
 }
 
-type ForgeApiResponse = {
-  error?:
-    | string
-    | {
-        code?: string
-        details?: string[]
-        message?: string
-        retryAfterSeconds?: number
-        title?: string
-      }
-  images?: Array<{
-    data: string
-    id: string
-    mimeType: string
-    text?: string
-  }>
-  model?: string
-  prompt?: string
-}
-
 type TextureLabRunContext = {
   prompt: string
   seamlessMode: boolean
@@ -202,77 +194,8 @@ type TelemetryWindowState = {
 const telemetryWindowStorageKey = 'kizer-forge-telemetry-window'
 const telemetryWindowDurationMs = 24 * 60 * 60 * 1000
 const UvLabWorkspace = lazy(() => import('./components/UvLabWorkspace'))
-const MODEL_LABELS = {
-  'browser-uv-engine': 'Built-in UV Engine',
-  'gemini-2.5-flash-image': 'Gemini 2.5 Flash Image',
-  'gemini-3-flash': 'Gemini 3.1 Flash',
-  'gemini-3-pro': 'Gemini 3 Pro Image',
-  'veo-3.1-fast': 'Veo 3 Fast Generate',
-}
-type ModelId = keyof typeof MODEL_LABELS
-
-const TELEMETRY_ROW_BY_MODEL_ID: Record<ModelId, string> = {
-  'browser-uv-engine': 'browser-uv-engine',
-  'gemini-2.5-flash-image': 'nano-banana',
-  'gemini-3-flash': 'nano-banana-2',
-  'gemini-3-pro': 'nano-banana-pro',
-  'veo-3.1-fast': 'veo-3-fast-generate',
-}
 const telemetryRefreshIntervalMs = 10000
-
-const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
-  armory: 'gemini-3-flash',
-  'action-animator': 'gemini-3-pro',
-  'character-sheet': 'gemini-3-pro',
-  'portrait-studio': 'gemini-3-pro',
-  'texture-lab': 'gemini-3-flash',
-  'uv-lab': 'browser-uv-engine',
-  'variant-forge': 'gemini-3-flash',
-  'vfx-forge': 'gemini-3-flash',
-  visualizer: 'gemini-3-flash',
-}
-
-const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
-  armory: ['gemini-3-flash', 'gemini-2.5-flash-image'],
-  'action-animator': ['gemini-3-pro', 'gemini-2.5-flash-image', 'veo-3.1-fast'],
-  'character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
-  'portrait-studio': ['gemini-3-pro'],
-  'texture-lab': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
-  'uv-lab': ['browser-uv-engine'],
-  'variant-forge': ['gemini-3-flash', 'gemini-2.5-flash-image', 'gemini-3-pro'],
-  'vfx-forge': ['gemini-3-flash'],
-  visualizer: ['gemini-3-flash', 'gemini-2.5-flash-image'],
-}
-
-const defaultTextureExpansionPrompt =
-  'Generatively expand this texture. Use the central pattern as a reference to fill the outer edges with a matching, seamless, high-resolution material. Maintain identical grain, lighting, and color.'
 const variantForgeIdeaSuggestionCount = 4
-
-function getActionAnimatorDefaultModel(pipeline: ActionAnimatorPipeline): ModelId {
-  return pipeline === 'veo-video' ? 'veo-3.1-fast' : 'gemini-3-pro'
-}
-
-function getModeDefaultModel(
-  mode: ForgeMode,
-  actionAnimatorPipeline: ActionAnimatorPipeline,
-): ModelId {
-  return mode === 'action-animator'
-    ? getActionAnimatorDefaultModel(actionAnimatorPipeline)
-    : smartDefaultModelByMode[mode]
-}
-
-function getAvailableModelsForMode(
-  mode: ForgeMode,
-  actionAnimatorPipeline: ActionAnimatorPipeline,
-): ModelId[] {
-  if (mode !== 'action-animator') {
-    return availableModelsByMode[mode]
-  }
-
-  return actionAnimatorPipeline === 'veo-video'
-    ? ['veo-3.1-fast']
-    : ['gemini-3-pro', 'gemini-2.5-flash-image']
-}
 
 function loadTelemetryWindowState(now = Date.now()): TelemetryWindowState {
   if (typeof window === 'undefined') {
@@ -478,7 +401,7 @@ function App() {
     Partial<Record<ForgeMode, string>>
   >({})
   const [activeModel, setActiveModel] = useState<ModelId>(
-    smartDefaultModelByMode[initialState.activeMode],
+    getModeDefaultModel(initialState.activeMode, initialState.actionAnimator.pipeline),
   )
   const [variantForgeIdeaSelections, setVariantForgeIdeaSelections] = useState<
     Partial<Record<VariantForgeFamily, string[]>>
@@ -508,87 +431,49 @@ function App() {
       ),
     }))
   }, [])
-  const activeMode = modeDefinitions[state.activeMode]
-  const isActionAnimatorMode = state.activeMode === 'action-animator'
-  const isCharacterSheetMode = state.activeMode === 'character-sheet'
-  const isPortraitStudioMode = state.activeMode === 'portrait-studio'
-  const isTextureLabMode = state.activeMode === 'texture-lab'
-  const isUvLabMode = state.activeMode === 'uv-lab'
-  const isVariantForgeMode = state.activeMode === 'variant-forge'
-  const isTextureExpansionMode =
-    isTextureLabMode && state.textureLab.workflow === 'expand'
-  const isTextureGenerateMode =
-    isTextureLabMode && state.textureLab.workflow === 'generate'
-  const isVfxForgeMode = state.activeMode === 'vfx-forge'
-  const characterReferenceCount = Object.values(
-    state.characterSheet.references,
-  ).filter(Boolean).length
-  const standardReferenceCount = Object.values(state.references).filter(Boolean).length
-  const referenceCount = isCharacterSheetMode
-    ? characterReferenceCount
-    : isActionAnimatorMode
-      ? Number(Boolean(state.actionAnimator.characterImage))
-      : isVariantForgeMode
-        ? Number(Boolean(state.variantForge.baseAsset))
-        : isPortraitStudioMode
-          ? Number(Boolean(state.portraitStudio.heroImage))
-          : isUvLabMode
-            ? Number(Boolean(state.uvLab.mesh))
-          : isTextureExpansionMode
-            ? Number(Boolean(state.textureLab.expansionSource))
-            : isVfxForgeMode
-              ? 0
-              : standardReferenceCount
+  const isForging = status === 'loading'
   const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
+  const modeAvailableModels = getAvailableModelsForMode(
+    state.activeMode,
+    state.actionAnimator.pipeline,
+  )
+  const selectedModelSupported =
+    state.activeMode === 'uv-lab' || modeAvailableModels.includes(activeModel)
+  const modePresentation = getModePresentation({
+    isForging,
+    selectedModelSupported,
+    state,
+    styleText: activeStyleInput,
+  })
+  const {
+    activeMode,
+    activePromptValue,
+    briefItems,
+    controlPanelTitle,
+    flags: {
+      isActionAnimatorMode,
+      isCharacterSheetMode,
+      isPortraitStudioMode,
+      isTextureExpansionMode,
+      isTextureGenerateMode,
+      isTextureLabMode,
+      isUvLabMode,
+      isVariantForgeMode,
+      isVfxForgeMode,
+    },
+    headerInputLabel,
+    isReadyForApi,
+    isSingleResultMode,
+    primaryActionDescription,
+    primaryActionLabel,
+    promptPreview,
+    readinessLabel,
+    referenceCount,
+    resultGridTitle,
+    useWideControlGrid,
+  } = modePresentation
   const activeVariantForgeIdeaSuggestions =
     variantForgeIdeaSelections[state.variantForge.variantFamily] ?? []
-  const promptPreview = isCharacterSheetMode
-    ? buildCharacterSheetPrompt(state.characterSheet)
-    : isActionAnimatorMode
-      ? buildActionAnimatorPrompt(state.actionAnimator)
-      : isVariantForgeMode
-        ? buildVariantForgePromptPreview(state.variantForge)
-        : isPortraitStudioMode
-          ? buildPortraitStudioPromptPreview(state.portraitStudio.prompt)
-          : isUvLabMode
-            ? 'Automatic UV unwrap, packing, atlas export, and downloadable processed mesh.'
-          : isTextureExpansionMode
-            ? state.prompt.trim() || defaultTextureExpansionPrompt
-            : isTextureGenerateMode
-              ? buildTextureLabPromptPreview(state.prompt, activeStyleInput, {
-                  seamlessMode: state.textureLab.seamlessMode,
-                  targetSize: state.textureLab.expansionTargetSize,
-                })
-              : isVfxForgeMode
-                ? buildVfxForgePromptPreview(
-                    state.vfxForge.projectileType,
-                    state.vfxForge.intensity,
-                    state.vfxForge.frameCount,
-                    state.vfxForge.prompt,
-                  )
-              : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
-  const activePromptValue = isCharacterSheetMode
-    ? getCharacterSheetPromptSource(state.characterSheet)
-    : isActionAnimatorMode
-      ? state.actionAnimator.actionType === 'custom'
-        ? state.actionAnimator.customActionPrompt
-        : buildActionAnimatorPrompt(state.actionAnimator)
-      : isVariantForgeMode
-        ? buildVariantForgePromptPreview(state.variantForge)
-        : isPortraitStudioMode
-          ? state.portraitStudio.prompt
-          : isUvLabMode
-            ? state.uvLab.mesh
-              ? `Source mesh: ${state.uvLab.mesh.name}. ${promptPreview}`
-              : promptPreview
-          : isVfxForgeMode
-            ? buildVfxForgePromptPreview(
-                state.vfxForge.projectileType,
-                state.vfxForge.intensity,
-                state.vfxForge.frameCount,
-                state.vfxForge.prompt,
-              )
-            : state.prompt
 
   useEffect(() => {
     if (!isVariantForgeMode) {
@@ -601,37 +486,7 @@ function App() {
     refreshVariantForgeIdeas,
     state.variantForge.variantFamily,
   ])
-  const isCharacterSheetReady =
-    state.characterSheet.generationMode === 'manifest'
-      ? state.characterSheet.manifestPrompt.trim().length > 0
-      : characterReferenceCount === 3
-  const isReadyForApi = isCharacterSheetMode
-    ? isCharacterSheetReady
-    : isActionAnimatorMode
-      ? Boolean(state.actionAnimator.characterImage) &&
-        (state.actionAnimator.actionType !== 'custom' ||
-          state.actionAnimator.customActionPrompt.trim().length > 0)
-      : isVariantForgeMode
-        ? Boolean(state.variantForge.baseAsset)
-        : isPortraitStudioMode
-          ? Boolean(state.portraitStudio.heroImage)
-          : isUvLabMode
-            ? Boolean(state.uvLab.mesh)
-          : isTextureExpansionMode
-            ? Boolean(state.textureLab.expansionSource)
-            : isVfxForgeMode
-              ? state.vfxForge.projectileType.trim().length > 0
-              : state.prompt.trim().length > 0
-  const isForging = status === 'loading'
   const isShowingResults = results.length > 0
-  const isSingleResultMode =
-    isActionAnimatorMode ||
-    isCharacterSheetMode ||
-    isPortraitStudioMode ||
-    isTextureExpansionMode ||
-    isUvLabMode ||
-    isVariantForgeMode ||
-    isVfxForgeMode
   const activeGenerationCount =
     isSingleResultMode ? 1 : state.generationCount
   const reservedOutputs = Array.from(
@@ -640,38 +495,6 @@ function App() {
   )
   const effectiveModel = isTextureExpansionMode ? 'gemini-3-pro' : activeModel
   const activeModelName = serverModel ?? effectiveModel
-  const briefItems = isCharacterSheetMode
-    ? buildCharacterSheetBriefItems(state)
-    : isActionAnimatorMode
-        ? buildActionAnimatorBriefItems(state)
-      : isVariantForgeMode
-        ? buildVariantForgeBriefItems(state)
-        : isPortraitStudioMode
-          ? buildPortraitStudioBriefItems(state)
-          : isUvLabMode
-            ? buildUvLabBriefItems(state)
-          : isTextureGenerateMode
-            ? buildTextureLabGenerateBriefItems(state)
-          : isTextureExpansionMode
-            ? buildTextureExpansionBriefItems(state)
-            : isVfxForgeMode
-              ? buildVfxForgeBriefItems(state)
-              : [
-                  {
-                    label: 'Style Ref',
-                    value: state.references.style?.name ?? 'Not attached',
-                  },
-                  {
-                    label: 'Subject Ref',
-                    value: state.references.subject?.name ?? 'Not attached',
-                  },
-                ]
-  const modeAvailableModels = getAvailableModelsForMode(
-    state.activeMode,
-    state.actionAnimator.pipeline,
-  )
-  const selectedModelSupported =
-    isUvLabMode || modeAvailableModels.includes(activeModel)
   const selectedTelemetryModel = effectiveModel
   const highlightedTelemetryRowId =
     TELEMETRY_ROW_BY_MODEL_ID[selectedTelemetryModel ?? activeModel] ?? null
@@ -1152,59 +975,28 @@ function App() {
       }
 
       if (isVariantForgeMode) {
-        const baseAsset = state.variantForge.baseAsset
         const activeVariantOptions = buildActiveVariantForgeOptions(state.variantForge)
         const activeFamilyCustomDirection = getVariantForgeFamilyCustomDirection(
           state.variantForge.variantFamily,
           state.variantForge.familyCustomDirections,
         )
 
-        if (!baseAsset) {
-          throw new Error('Attach a base asset before running Variant Forge.')
-        }
-
-        const response = await fetch('/api/forge', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            generationCount: 1,
-            mode: 'variant-forge',
+        const { ok, payload } = await postForgeRequest(
+          await buildVariantForgeRequest({
+            activeVariantOptions,
+            customDirection: activeFamilyCustomDirection,
             modelId: activeModel,
-            prompt: '',
-            customDirection: activeFamilyCustomDirection.trim(),
-            preservePalette: state.variantForge.preservePalette,
-            preserveSilhouette: state.variantForge.preserveSilhouette,
-            variantOptions: activeVariantOptions,
-            references: [
-              {
-                data: await fileToBase64(baseAsset.file),
-                mimeType: baseAsset.mimeType,
-                name: baseAsset.name,
-                slot: 'subject',
-              },
-            ],
+            state: state.variantForge,
             styleText: activeStyleInput.trim(),
-            variantFamily: state.variantForge.variantFamily,
-            variantIntensity: state.variantForge.intensity,
-            variantPreset: state.variantForge.variantPreset,
           }),
-        })
+        )
 
-        const payload = (await response.json()) as ForgeApiResponse | undefined
-
-        if (!response.ok || !payload?.images?.length) {
+        if (!ok || !payload?.images?.length) {
           throw toForgeError(payload?.error)
         }
 
         finalizeForgeRun(
-          payload.images.map((image) => ({
-            dataUrl: createDataUrl(image.data, image.mimeType),
-            id: image.id,
-            mimeType: image.mimeType,
-            text: image.text,
-          })),
+          normalizeForgeApiResults(payload),
           payload.model ?? null,
           payload.prompt ?? promptPreview,
           activeVariantOptions.length > 0
@@ -1226,41 +1018,21 @@ function App() {
           throw new Error('Attach a hero image before running Portrait Studio.')
         }
 
-        const response = await fetch('/api/forge', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            generationCount: 1,
-            mode: 'portrait-studio',
+        const { ok, payload } = await postForgeRequest(
+          await buildPortraitStudioRequest({
+            heroImage,
             modelId: activeModel,
             prompt: state.portraitStudio.prompt.trim(),
-            references: [
-              {
-                data: await fileToBase64(heroImage.file),
-                mimeType: heroImage.mimeType,
-                name: heroImage.name,
-                slot: 'subject',
-              },
-            ],
             styleText: activeStyleInput.trim(),
           }),
-        })
+        )
 
-        const payload = (await response.json()) as ForgeApiResponse | undefined
-
-        if (!response.ok || !payload?.images?.length) {
+        if (!ok || !payload?.images?.length) {
           throw toForgeError(payload?.error)
         }
 
         finalizeForgeRun(
-          payload.images.map((image) => ({
-            dataUrl: createDataUrl(image.data, image.mimeType),
-            id: image.id,
-            mimeType: image.mimeType,
-            text: image.text,
-          })),
+          normalizeForgeApiResults(payload),
           payload.model ?? null,
           payload.prompt ?? promptPreview,
           'Portrait Studio generated a five-expression contact sheet.',
@@ -1280,57 +1052,21 @@ function App() {
           throw new Error('Attach a source texture before starting an expansion pass.')
         }
 
-        const [expansionCanvas, sourceBase64] = await Promise.all([
-          buildTextureExpansionInput(sourceAsset.file, {
-            targetSize: state.textureLab.expansionTargetSize,
-          }),
-          fileToBase64(sourceAsset.file),
-        ])
-
-        const response = await fetch('/api/forge', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            generationCount: 1,
-            mode: state.activeMode,
+        const { ok, payload } = await postForgeRequest(
+          await buildTextureExpansionRequest({
             modelId: activeModel,
-            prompt: state.prompt.trim(),
+            sourceAsset,
+            state,
             styleText: activeStyleInput.trim(),
-            textureExpansion: {
-              canvasImage: {
-                data: expansionCanvas.base64,
-                mimeType: expansionCanvas.mimeType,
-                name: `expanded-canvas-${sourceAsset.name}`,
-              },
-              sourceCoverage: expansionCanvas.sourceCoverage,
-              sourceHeight: expansionCanvas.sourceHeight,
-              sourceImage: {
-                data: sourceBase64,
-                mimeType: sourceAsset.mimeType,
-                name: sourceAsset.name,
-              },
-              sourceWidth: expansionCanvas.sourceWidth,
-              targetSize: expansionCanvas.targetSize,
-            },
-            workflow: 'expand-texture',
           }),
-        })
+        )
 
-        const payload = (await response.json()) as ForgeApiResponse | undefined
-
-        if (!response.ok || !payload?.images?.length) {
+        if (!ok || !payload?.images?.length) {
           throw toForgeError(payload?.error)
         }
 
         const normalizedResults = await normalizeTextureLabResults(
-          payload.images.map((image) => ({
-            dataUrl: createDataUrl(image.data, image.mimeType),
-            id: image.id,
-            mimeType: image.mimeType,
-            text: image.text,
-          })),
+          normalizeForgeApiResults(payload),
           state.textureLab.expansionTargetSize,
         )
 
@@ -1355,36 +1091,20 @@ function App() {
       }
 
       if (isVfxForgeMode) {
-        const response = await fetch('/api/forge', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            generationCount: 1,
-            frameCount: state.vfxForge.frameCount,
-            intensity: state.vfxForge.intensity,
-            mode: 'vfx-forge',
+        const { ok, payload } = await postForgeRequest(
+          buildVfxForgeRequest({
             modelId: activeModel,
-            projectileType: state.vfxForge.projectileType.trim(),
-            prompt: state.vfxForge.prompt.trim(),
+            state: state.vfxForge,
             styleText: activeStyleInput.trim(),
           }),
-        })
+        )
 
-        const payload = (await response.json()) as ForgeApiResponse | undefined
-
-        if (!response.ok || !payload?.images?.length) {
+        if (!ok || !payload?.images?.length) {
           throw toForgeError(payload?.error)
         }
 
         finalizeForgeRun(
-          payload.images.map((image) => ({
-            dataUrl: createDataUrl(image.data, image.mimeType),
-            id: image.id,
-            mimeType: image.mimeType,
-            text: image.text,
-          })),
+          normalizeForgeApiResults(payload),
           payload.model ?? null,
           payload.prompt ?? promptPreview,
           'VFX Forge generated an additive-ready projectile strip.',
@@ -1397,61 +1117,26 @@ function App() {
         return
       }
 
-      const references = await Promise.all(
-        Object.entries(state.references)
-          .filter(
-            (entry): entry is [ReferenceSlot, ReferenceAsset] => Boolean(entry[1]),
-          )
-          .map(async ([slot, asset]) => ({
-            data: await fileToBase64(asset.file),
-            mimeType: asset.mimeType,
-            name: asset.name,
-            slot,
-        })),
+      const { ok, payload } = await postForgeRequest(
+        await buildStandardForgeRequest({
+          mode: state.activeMode,
+          modelId: activeModel,
+          state,
+          styleText: activeStyleInput.trim(),
+        }),
       )
 
-      const response = await fetch('/api/forge', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          generationCount: state.generationCount,
-          modelId: activeModel,
-          mode: state.activeMode,
-          prompt: state.prompt.trim(),
-          references,
-          seamlessMode: isTextureGenerateMode && state.textureLab.seamlessMode,
-          styleText: activeStyleInput.trim(),
-          textureSize: isTextureGenerateMode
-            ? state.textureLab.expansionTargetSize
-            : undefined,
-        }),
-      })
-
-      const payload = (await response.json()) as ForgeApiResponse | undefined
-
-      if (!response.ok || !payload?.images?.length) {
+      if (!ok || !payload?.images?.length) {
         throw toForgeError(payload?.error)
       }
 
       const finalizedResults =
         isTextureLabMode && isTextureGenerateMode
           ? await normalizeTextureLabResults(
-              payload.images.map((image) => ({
-                dataUrl: createDataUrl(image.data, image.mimeType),
-                id: image.id,
-                mimeType: image.mimeType,
-                text: image.text,
-              })),
+              normalizeForgeApiResults(payload),
               state.textureLab.expansionTargetSize,
             )
-          : payload.images.map((image) => ({
-              dataUrl: createDataUrl(image.data, image.mimeType),
-              id: image.id,
-              mimeType: image.mimeType,
-              text: image.text,
-            }))
+          : normalizeForgeApiResults(payload)
 
       finalizeForgeRun(
         finalizedResults,
@@ -1731,153 +1416,6 @@ function App() {
     )
   }
 
-  const headerInputLabel = isTextureExpansionMode
-    ? 'Source'
-    : isActionAnimatorMode || isPortraitStudioMode || isVariantForgeMode
-      ? 'Image'
-      : isUvLabMode
-        ? 'Mesh'
-      : isVfxForgeMode
-        ? 'Config'
-        : 'Prompt'
-  const controlPanelTitle = isCharacterSheetMode
-    ? 'Sheet settings'
-    : isActionAnimatorMode
-      ? 'Animator settings'
-      : isVariantForgeMode
-        ? 'Variant settings'
-        : isPortraitStudioMode
-          ? 'Portrait settings'
-          : isUvLabMode
-            ? 'UV settings'
-            : isVfxForgeMode
-            ? 'VFX settings'
-            : 'Forge settings'
-  const primaryActionLabel = isForging
-    ? isActionAnimatorMode
-      ? 'ANIMATING'
-      : isCharacterSheetMode
-        ? 'BUILDING SHEET'
-        : isVariantForgeMode
-          ? 'FORGING VARIANT'
-          : isPortraitStudioMode
-            ? 'BUILDING PORTRAITS'
-            : isUvLabMode
-              ? 'UNWRAPPING UVS'
-            : isTextureExpansionMode
-              ? 'EXPANDING TEXTURE'
-              : isVfxForgeMode
-                ? 'FORGING VFX'
-                : 'FORGING'
-    : isActionAnimatorMode
-      ? 'ANIMATE'
-      : isCharacterSheetMode
-        ? 'BUILD SHEET'
-        : isVariantForgeMode
-          ? 'FORGE VARIANT'
-          : isPortraitStudioMode
-            ? 'BUILD PORTRAITS'
-            : isUvLabMode
-              ? 'ONE-CLICK UNWRAP'
-            : isTextureExpansionMode
-              ? 'EXPAND TEXTURE'
-              : isVfxForgeMode
-                ? 'FORGE VFX'
-                : 'FORGE'
-  const primaryActionDescription = isForging
-    ? isActionAnimatorMode
-      ? state.actionAnimator.pipeline === 'sprite-strip'
-        ? 'Generating strip chunks from the seed frame and normalizing the final spritesheet'
-        : 'Sending character image to Veo and building a spritesheet'
-      : isCharacterSheetMode
-        ? 'Sending character sheet request to Gemini'
-        : isVariantForgeMode
-          ? 'Applying the selected transformation pass to the base asset'
-          : isPortraitStudioMode
-            ? 'Generating a locked five-expression portrait sheet'
-            : isUvLabMode
-              ? 'Unwrapping and exporting the mesh with the in-browser UV engine'
-            : isTextureExpansionMode
-              ? 'Sending centered outpaint canvas to Gemini 3 Pro'
-              : isVfxForgeMode
-                ? `Generating a ${state.vfxForge.frameCount}-frame projectile spritesheet`
-                : 'Sending prompt and references to Gemini'
-    : !selectedModelSupported
-      ? 'Selected model is not supported for this tab'
-      : isReadyForApi
-        ? isActionAnimatorMode
-          ? state.actionAnimator.pipeline === 'sprite-strip'
-            ? 'Seed frame staged for strip generation and normalization'
-            : 'Character image staged for Veo animation'
-          : isVariantForgeMode
-            ? 'Base asset staged for single-variant transformation'
-            : isPortraitStudioMode
-              ? 'Hero image staged for expression pack generation'
-              : isUvLabMode
-                ? 'Mesh staged for in-browser unwrap and packing'
-                : isTextureExpansionMode
-                  ? 'Centered source canvas staged for outpaint execution'
-                  : isVfxForgeMode
-                    ? `Projectile sheet request staged for ${state.vfxForge.frameCount} frames`
-                    : 'Request staged for API execution'
-        : isCharacterSheetMode
-          ? 'Attach all required references or write a manifest'
-        : isActionAnimatorMode
-          ? state.actionAnimator.pipeline === 'sprite-strip'
-            ? 'Attach a seed frame and choose an action'
-            : 'Attach a character image and choose an action'
-            : isVariantForgeMode
-              ? 'Attach a base asset to begin forging a variant'
-              : isPortraitStudioMode
-                ? 'Attach a hero portrait or reuse the latest character sheet'
-                : isUvLabMode
-                  ? 'Attach an OBJ or FBX mesh to start UV Lab'
-                : isTextureExpansionMode
-                  ? 'Attach a source texture to prepare the expansion pass'
-                  : isVfxForgeMode
-                    ? 'Enter a projectile type to prepare the VFX spritesheet request'
-                    : 'Add a prompt to prepare the request'
-  const readinessLabel = isForging
-    ? isTextureExpansionMode
-      ? 'Source processing'
-      : isActionAnimatorMode
-        ? 'Animating'
-        : isUvLabMode
-          ? 'Unwrapping'
-        : 'Generating'
-    : isReadyForApi
-      ? isTextureExpansionMode
-        ? 'Source ready'
-        : isActionAnimatorMode
-          ? 'Animation ready'
-          : isUvLabMode
-            ? 'Mesh ready'
-          : isVfxForgeMode
-            ? 'Config ready'
-            : 'Prompt ready'
-      : isTextureExpansionMode
-        ? 'Source required'
-        : isActionAnimatorMode || isPortraitStudioMode || isVariantForgeMode
-          ? 'Image required'
-          : isUvLabMode
-            ? 'Mesh required'
-            : isVfxForgeMode
-            ? 'Config required'
-            : 'Prompt required'
-  const resultGridTitle = isCharacterSheetMode
-    ? 'Character sheet output slot'
-    : isActionAnimatorMode
-      ? 'Action Animator sprite sheet'
-      : isVariantForgeMode
-      ? 'Variant Forge output slot'
-      : isPortraitStudioMode
-        ? 'Portrait Studio contact sheet'
-        : isUvLabMode
-          ? 'UV layout, processed mesh, and preview'
-        : isVfxForgeMode
-          ? 'VFX Forge spritesheet output'
-          : 'Output slots for the current forge pass'
-  const useWideControlGrid = !isActionAnimatorMode && !isCharacterSheetMode
   const controlPanelLayoutClassName = useWideControlGrid
     ? 'mt-6 grid gap-5 2xl:grid-cols-2 2xl:items-start'
     : 'mt-6 space-y-5'
@@ -4768,301 +4306,6 @@ type RawForgeError =
   | unknown
   | null
   | undefined
-
-function buildCharacterSheetBriefItems(
-  state: typeof initialState,
-): ForgeBriefItem[] {
-  return [
-    {
-      label: 'Face Ref',
-      value: state.characterSheet.references.face?.name ?? 'Not attached',
-    },
-    {
-      label: 'Outfit Ref',
-      value: state.characterSheet.references.outfit?.name ?? 'Not attached',
-    },
-    {
-      label: 'Style Ref',
-      value: state.characterSheet.references['art-style']?.name ?? 'Not attached',
-    },
-    {
-      label: 'Mode',
-      value:
-        state.characterSheet.generationMode === 'manifest'
-          ? 'Manifest'
-          : 'Reference',
-    },
-  ]
-}
-
-function buildActionAnimatorBriefItems(
-  state: typeof initialState,
-): ForgeBriefItem[] {
-  return [
-    {
-      label: state.actionAnimator.pipeline === 'sprite-strip' ? 'Seed' : 'Source',
-      value: state.actionAnimator.characterImage?.name ?? 'Not attached',
-    },
-    {
-      label: 'Pipeline',
-      value: state.actionAnimator.pipeline === 'sprite-strip' ? 'Sprite Strip' : 'Veo Video',
-    },
-    {
-      label: 'Action',
-      value:
-        state.actionAnimator.actionType === 'custom'
-          ? state.actionAnimator.customActionPrompt.trim() || 'Custom'
-          : state.actionAnimator.actionType,
-    },
-    {
-      label: 'Frames',
-      value: String(state.actionAnimator.frameCount),
-    },
-    {
-      label: 'FPS',
-      value: String(state.actionAnimator.fps),
-    },
-    {
-      label: 'Export',
-      value: `${state.actionAnimator.normalizedSize}px`,
-    },
-  ]
-}
-
-function buildActiveVariantForgeOptions(state: typeof initialState.variantForge) {
-  return getVariantForgeEnabledPresets(state.variantFamily, state.optionStates).map((preset) => ({
-    customSetting: getVariantForgeOptionState(state.optionStates, preset).customSetting.trim(),
-    preset,
-  }))
-}
-
-function buildVariantForgeBriefItems(
-  state: typeof initialState,
-): ForgeBriefItem[] {
-  const activeOptions = buildActiveVariantForgeOptions(state.variantForge)
-
-  return [
-    {
-      label: 'Base Asset',
-      value: state.variantForge.baseAsset?.name ?? 'Not attached',
-    },
-    {
-      label: 'Family',
-      value: formatVariantForgeLabel(state.variantForge.variantFamily),
-    },
-    {
-      label: 'Lead Preset',
-      value: activeOptions.length
-        ? formatVariantForgeLabel(state.variantForge.variantPreset)
-        : 'None selected',
-    },
-    {
-      label: 'Active Options',
-      value: activeOptions.length
-        ? activeOptions.map((option) => formatVariantForgeLabel(option.preset)).join(', ')
-        : 'None selected',
-    },
-    {
-      label: 'Intensity',
-      value: `${state.variantForge.intensity}/100`,
-    },
-  ]
-}
-
-function buildPortraitStudioBriefItems(
-  state: typeof initialState,
-): ForgeBriefItem[] {
-  return [
-    {
-      label: 'Hero Image',
-      value: state.portraitStudio.heroImage?.name ?? 'Not attached',
-    },
-    {
-      label: 'Direction',
-      value: state.portraitStudio.prompt.trim() || 'Default expression pack',
-    },
-    {
-      label: 'Expressions',
-      value: '5 locked portraits',
-    },
-  ]
-}
-
-function buildTextureLabGenerateBriefItems(
-  state: typeof initialState,
-): ForgeBriefItem[] {
-  return [
-    {
-      label: 'Style Ref',
-      value: state.references.style?.name ?? 'Not attached',
-    },
-    {
-      label: 'Subject Ref',
-      value: state.references.subject?.name ?? 'Not attached',
-    },
-    {
-      label: 'Seamless',
-      value: state.textureLab.seamlessMode ? 'Enabled' : 'Disabled',
-    },
-    {
-      label: 'Size',
-      value: `${state.textureLab.expansionTargetSize} x ${state.textureLab.expansionTargetSize}`,
-    },
-  ]
-}
-
-function buildTextureExpansionBriefItems(
-  state: typeof initialState,
-): ForgeBriefItem[] {
-  return [
-    {
-      label: 'Workflow',
-      value: 'Expand Texture',
-    },
-    {
-      label: 'Source',
-      value: state.textureLab.expansionSource?.name ?? 'Not attached',
-    },
-    {
-      label: 'Output',
-      value: `${state.textureLab.expansionTargetSize} x ${state.textureLab.expansionTargetSize}`,
-    },
-  ]
-}
-
-function buildUvLabBriefItems(
-  state: typeof initialState,
-): ForgeBriefItem[] {
-  return [
-    {
-      label: 'Mesh',
-      value: state.uvLab.mesh?.name ?? 'Not attached',
-    },
-    {
-      label: 'Atlas',
-      value: `${state.uvLab.atlasSize}px`,
-    },
-    {
-      label: 'Padding',
-      value: `${state.uvLab.paddingPx}px`,
-    },
-    {
-      label: 'Format',
-      value: state.uvLab.mesh?.format.toUpperCase() ?? 'N/A',
-    },
-  ]
-}
-
-function buildVfxForgeBriefItems(
-  state: typeof initialState,
-): ForgeBriefItem[] {
-  return [
-    {
-      label: 'Projectile',
-      value: state.vfxForge.projectileType.trim() || 'Not set',
-    },
-    {
-      label: 'Direction',
-      value: state.vfxForge.prompt.trim() || 'Default timing',
-    },
-    {
-      label: 'Intensity',
-      value: `${state.vfxForge.intensity}/100`,
-    },
-    {
-      label: 'Layout',
-      value: `${state.vfxForge.frameCount} x 1 strip`,
-    },
-  ]
-}
-
-function buildVariantForgePromptPreview(state: typeof initialState.variantForge) {
-  const activeOptions = buildActiveVariantForgeOptions(state)
-  const activeFamilyCustomDirection = getVariantForgeFamilyCustomDirection(
-    state.variantFamily,
-    state.familyCustomDirections,
-  )
-
-  return [
-    activeOptions.length > 0
-      ? `Transform the base asset using the ${formatVariantForgeLabel(state.variantFamily)} family with a ${formatVariantForgeLabel(state.variantPreset)} preset.`
-      : `Transform the base asset using the ${formatVariantForgeLabel(state.variantFamily)} family with no preset toggles enabled.`,
-    activeOptions.length > 1
-      ? `Blend these active options: ${activeOptions.map((option) => formatVariantForgeLabel(option.preset)).join(', ')}.`
-      : null,
-    ...activeOptions
-      .filter((option) => option.customSetting)
-      .map(
-        (option) =>
-          `${formatVariantForgeLabel(option.preset)} custom setting: ${option.customSetting}.`,
-      ),
-    state.preserveSilhouette
-      ? 'Preserve the silhouette and core item class.'
-      : 'Keep the item class and subject identity intact while allowing modest silhouette drift.',
-    state.preservePalette
-      ? 'Stay close to the original palette while changing finish and material cues.'
-      : 'Palette shifts are allowed when the preset benefits from them.',
-    `Intensity: ${state.intensity}/100.`,
-    activeFamilyCustomDirection.trim()
-      ? `Additional direction: ${activeFamilyCustomDirection.trim()}.`
-      : null,
-  ]
-    .filter(Boolean)
-    .join(' ')
-}
-
-function buildPortraitStudioPromptPreview(prompt: string) {
-  const normalizedPrompt = prompt.trim()
-
-  return [
-    'Generate a 3 column by 2 row portrait sheet.',
-    'Keep the facial structure, hair, and eye color 100% identical while shifting only expression.',
-    normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
-  ]
-    .filter(Boolean)
-    .join(' ')
-}
-
-function buildTextureLabPromptPreview(
-  prompt: string,
-  styleText: string,
-  options: {
-    seamlessMode: boolean
-    targetSize: TextureExpansionTargetSize
-  },
-) {
-  const subject = prompt.trim() || 'weathered stone floor tile'
-  const styleSegment = styleText.trim() ? styleText.trim() : 'neutral production texture'
-
-  return [
-    `Generate a ${options.targetSize} x ${options.targetSize} square top-down material texture of ${subject}.`,
-    options.seamlessMode
-      ? 'Ensure opposite edges tile cleanly on both axes.'
-      : 'Keep the full frame filled with material detail and avoid scene-style composition.',
-    `Style: ${styleSegment}.`,
-    'Use flat lighting with production-safe surface scale.',
-  ].join(' ')
-}
-
-function buildVfxForgePromptPreview(
-  projectileType: string,
-  intensity: number,
-  frameCount: number,
-  prompt: string,
-) {
-  const normalizedProjectileType = projectileType.trim() || 'Fireball'
-  const normalizedPrompt = prompt.trim()
-
-  return [
-    'Generate a 2D projectile spritesheet.',
-    `Projectile: ${normalizedProjectileType}.`,
-    `Intensity: ${Math.max(0, Math.min(100, Math.round(intensity)))}/100.`,
-    normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
-    `Background: pure #000000 black. Layout: ${Math.max(4, Math.min(30, Math.round(frameCount)))} frames in one horizontal row.`,
-  ]
-    .filter(Boolean)
-    .join(' ')
-}
 
 function slugifyFileSegment(value: string, fallback: string) {
   const normalizedValue = value

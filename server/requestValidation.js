@@ -4,6 +4,7 @@ import {
   variantForgeDefaultPresetByFamily,
   variantForgeFamilies,
 } from '../shared/variantForgeCatalog.js'
+import { forgeApiModes } from '../shared/modeCatalog.js'
 
 const maxPromptLength = 4000
 const maxStyleTextLength = 400
@@ -16,14 +17,7 @@ const allowedImageMimeTypes = new Set([
   'image/png',
   'image/webp',
 ])
-const supportedForgeModes = new Set([
-  'armory',
-  'portrait-studio',
-  'texture-lab',
-  'variant-forge',
-  'vfx-forge',
-  'visualizer',
-])
+const supportedForgeModes = new Set(forgeApiModes)
 const allowedVariantForgeFamilies = new Set(variantForgeFamilies)
 const allowedCharacterSheetModes = new Set(['reference', 'manifest'])
 const allowedCharacterReferenceRoles = new Set([

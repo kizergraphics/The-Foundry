@@ -37,6 +37,7 @@ import {
   isVariantForgePresetForFamily,
   variantForgeDefaultPresetByFamily,
 } from '../shared/variantForgeCatalog.js'
+import { forgeApiModes } from '../shared/modeCatalog.js'
 
 dotenv.config()
 
@@ -78,14 +79,7 @@ const routeModelAllowlist = {
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
 }
-const supportedForgeModes = [
-  'armory',
-  'portrait-studio',
-  'texture-lab',
-  'variant-forge',
-  'vfx-forge',
-  'visualizer',
-]
+const supportedForgeModes = forgeApiModes
 const forgeBatchMaxAttemptsPerImage = 4
 const forgeBatchMaxParallelRequests = 4
 const forgeBatchRecoveryPasses = 2
