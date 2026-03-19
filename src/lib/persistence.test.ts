@@ -33,7 +33,7 @@ const baseStoredSettings = {
     paddingPx: 8,
   },
   variantForge: {
-    customDirection: '',
+    familyCustomDirections: {},
     intensity: 60,
     optionStates: {
       worn: {
@@ -246,6 +246,62 @@ describe('persistStoredState', () => {
         },
       },
       variantPreset: 'broken',
+    })
+  })
+
+  it('restores family-specific custom directions', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          ...baseStoredSettings,
+          activeMode: 'variant-forge',
+          variantForge: {
+            ...baseStoredSettings.variantForge,
+            familyCustomDirections: {
+              damage: 'Split the edge near the tip.',
+              elemental: 'Lean into wind and drifting leaves.',
+            },
+            variantFamily: 'elemental',
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.variantForge).toMatchObject({
+      familyCustomDirections: {
+        damage: 'Split the edge near the tip.',
+        elemental: 'Lean into wind and drifting leaves.',
+      },
+      variantFamily: 'elemental',
+    })
+  })
+
+  it('migrates legacy shared custom direction into the active family', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          ...baseStoredSettings,
+          activeMode: 'variant-forge',
+          variantForge: {
+            ...baseStoredSettings.variantForge,
+            customDirection: 'Wind-torn ribbons and floral overgrowth.',
+            variantFamily: 'elemental',
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.variantForge).toMatchObject({
+      familyCustomDirections: {
+        elemental: 'Wind-torn ribbons and floral overgrowth.',
+      },
+      variantFamily: 'elemental',
     })
   })
 

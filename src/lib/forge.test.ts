@@ -87,4 +87,27 @@ describe('forgeReducer', () => {
       enabled: false,
     })
   })
+
+  it('stores custom directions separately for each variant family', () => {
+    const withDamageDirection = forgeReducer(initialState, {
+      type: 'set-variant-forge-custom-direction',
+      customDirection: 'Split the hilt leather and deepen the rust.',
+    })
+
+    const withElementalDirection = forgeReducer(
+      forgeReducer(withDamageDirection, {
+        type: 'set-variant-forge-family',
+        family: 'elemental',
+      }),
+      {
+        type: 'set-variant-forge-custom-direction',
+        customDirection: 'Use wind-blown flora and drifting leaves.',
+      },
+    )
+
+    expect(withElementalDirection.variantForge.familyCustomDirections).toMatchObject({
+      damage: 'Split the hilt leather and deepen the rust.',
+      elemental: 'Use wind-blown flora and drifting leaves.',
+    })
+  })
 })

@@ -62,6 +62,9 @@ export type VariantForgeOptionState = {
   customSetting: string
   enabled: boolean
 }
+export type VariantForgeFamilyCustomDirectionMap = Partial<
+  Record<VariantForgeFamily, string>
+>
 export type VariantForgeOptionStateMap = Partial<
   Record<VariantForgePreset, VariantForgeOptionState>
 >
@@ -113,7 +116,7 @@ export type TextureLabState = {
 
 export type VariantForgeState = {
   baseAsset: ReferenceAsset | null
-  customDirection: string
+  familyCustomDirections: VariantForgeFamilyCustomDirectionMap
   intensity: number
   optionStates: VariantForgeOptionStateMap
   preservePalette: boolean
@@ -399,6 +402,15 @@ export function getVariantForgeOptionState(
   return optionStates[preset] ?? buildVariantForgeOptionState(false)
 }
 
+export function getVariantForgeFamilyCustomDirection(
+  family: VariantForgeFamily,
+  familyCustomDirections: VariantForgeFamilyCustomDirectionMap,
+): string {
+  return typeof familyCustomDirections[family] === 'string'
+    ? familyCustomDirections[family]
+    : ''
+}
+
 export function getVariantForgeEnabledPresets(
   family: VariantForgeFamily,
   optionStates: VariantForgeOptionStateMap,
@@ -447,7 +459,7 @@ export const initialState: ForgeState = {
   },
   variantForge: {
     baseAsset: null,
-    customDirection: '',
+    familyCustomDirections: {},
     intensity: 60,
     optionStates: {
       worn: buildVariantForgeOptionState(true),
@@ -716,7 +728,10 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         ...state,
         variantForge: {
           ...state.variantForge,
-          customDirection: action.customDirection,
+          familyCustomDirections: {
+            ...state.variantForge.familyCustomDirections,
+            [state.variantForge.variantFamily]: action.customDirection,
+          },
         },
       }
     case 'set-portrait-studio-image':

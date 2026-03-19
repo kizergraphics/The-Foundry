@@ -66,6 +66,7 @@ import {
   forgeReducer,
   getActionAnimatorNormalizedSizeOptions,
   getVariantForgeEnabledPresets,
+  getVariantForgeFamilyCustomDirection,
   getVariantForgeOptionState,
   initialState,
   modeDefinitions,
@@ -106,7 +107,11 @@ import {
   primeUvEngine,
   runLocalUvJob,
 } from './lib/uvEngine'
-import { formatVariantForgeLabel } from '../shared/variantForgeCatalog.js'
+import {
+  appendVariantForgeIdeaToDirection,
+  formatVariantForgeLabel,
+  pickVariantForgeIdeaSuggestions,
+} from '../shared/variantForgeCatalog.js'
 
 type ServiceHealth = {
   ok: boolean
@@ -241,6 +246,7 @@ const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
 
 const defaultTextureExpansionPrompt =
   'Generatively expand this texture. Use the central pattern as a reference to fill the outer edges with a matching, seamless, high-resolution material. Maintain identical grain, lighting, and color.'
+const variantForgeIdeaSuggestionCount = 4
 
 function getActionAnimatorDefaultModel(pipeline: ActionAnimatorPipeline): ModelId {
   return pipeline === 'veo-video' ? 'veo-3.1-fast' : 'gemini-3-pro'
@@ -414,7 +420,7 @@ function buildStoredStateSnapshot(
         paddingPx: state.uvLab.paddingPx,
       },
       variantForge: {
-        customDirection: state.variantForge.customDirection,
+        familyCustomDirections: state.variantForge.familyCustomDirections,
         intensity: state.variantForge.intensity,
         optionStates: state.variantForge.optionStates,
         preservePalette: state.variantForge.preservePalette,
@@ -474,6 +480,14 @@ function App() {
   const [activeModel, setActiveModel] = useState<ModelId>(
     smartDefaultModelByMode[initialState.activeMode],
   )
+  const [variantForgeIdeaSelections, setVariantForgeIdeaSelections] = useState<
+    Partial<Record<VariantForgeFamily, string[]>>
+  >(() => ({
+    [initialState.variantForge.variantFamily]: pickVariantForgeIdeaSuggestions(
+      initialState.variantForge.variantFamily,
+      variantForgeIdeaSuggestionCount,
+    ),
+  }))
   const forgeRunInFlightRef = useRef(false)
   const persistTimeoutRef = useRef<number | null>(null)
   const pendingPersistStateRef = useRef<Parameters<typeof persistStoredState>[0] | null>(
@@ -485,6 +499,15 @@ function App() {
   const [sessionMaxByModel, setSessionMaxByModel] = useState(
     () => loadTelemetryWindowState().sessionMaxByModel,
   )
+  const refreshVariantForgeIdeas = useCallback((family: VariantForgeFamily) => {
+    setVariantForgeIdeaSelections((currentSelections) => ({
+      ...currentSelections,
+      [family]: pickVariantForgeIdeaSuggestions(
+        family,
+        variantForgeIdeaSuggestionCount,
+      ),
+    }))
+  }, [])
   const activeMode = modeDefinitions[state.activeMode]
   const isActionAnimatorMode = state.activeMode === 'action-animator'
   const isCharacterSheetMode = state.activeMode === 'character-sheet'
@@ -517,6 +540,8 @@ function App() {
               ? 0
               : standardReferenceCount
   const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
+  const activeVariantForgeIdeaSuggestions =
+    variantForgeIdeaSelections[state.variantForge.variantFamily] ?? []
   const promptPreview = isCharacterSheetMode
     ? buildCharacterSheetPrompt(state.characterSheet)
     : isActionAnimatorMode
@@ -541,7 +566,7 @@ function App() {
                     state.vfxForge.frameCount,
                     state.vfxForge.prompt,
                   )
-                : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
+              : state.prompt.trim() || modeDefinitions[state.activeMode].instruction
   const activePromptValue = isCharacterSheetMode
     ? getCharacterSheetPromptSource(state.characterSheet)
     : isActionAnimatorMode
@@ -564,6 +589,18 @@ function App() {
                 state.vfxForge.prompt,
               )
             : state.prompt
+
+  useEffect(() => {
+    if (!isVariantForgeMode) {
+      return
+    }
+
+    refreshVariantForgeIdeas(state.variantForge.variantFamily)
+  }, [
+    isVariantForgeMode,
+    refreshVariantForgeIdeas,
+    state.variantForge.variantFamily,
+  ])
   const isCharacterSheetReady =
     state.characterSheet.generationMode === 'manifest'
       ? state.characterSheet.manifestPrompt.trim().length > 0
@@ -886,7 +923,7 @@ function App() {
     state.textureLab.workflow,
     state.uvLab.atlasSize,
     state.uvLab.paddingPx,
-    state.variantForge.customDirection,
+    state.variantForge.familyCustomDirections,
     state.variantForge.intensity,
     state.variantForge.optionStates,
     state.variantForge.preservePalette,
@@ -1117,6 +1154,10 @@ function App() {
       if (isVariantForgeMode) {
         const baseAsset = state.variantForge.baseAsset
         const activeVariantOptions = buildActiveVariantForgeOptions(state.variantForge)
+        const activeFamilyCustomDirection = getVariantForgeFamilyCustomDirection(
+          state.variantForge.variantFamily,
+          state.variantForge.familyCustomDirections,
+        )
 
         if (!baseAsset) {
           throw new Error('Attach a base asset before running Variant Forge.')
@@ -1132,7 +1173,7 @@ function App() {
             mode: 'variant-forge',
             modelId: activeModel,
             prompt: '',
-            customDirection: state.variantForge.customDirection.trim(),
+            customDirection: activeFamilyCustomDirection.trim(),
             preservePalette: state.variantForge.preservePalette,
             preserveSilhouette: state.variantForge.preserveSilhouette,
             variantOptions: activeVariantOptions,
@@ -2040,14 +2081,31 @@ function App() {
                 ) : isVariantForgeMode ? (
                   <div className={controlPanelFullSpanClassName}>
                     <VariantForgePanel
+                      key={state.variantForge.variantFamily}
                       asset={state.variantForge.baseAsset}
-                      customDirection={state.variantForge.customDirection}
+                      customDirection={getVariantForgeFamilyCustomDirection(
+                        state.variantForge.variantFamily,
+                        state.variantForge.familyCustomDirections,
+                      )}
                       family={state.variantForge.variantFamily}
+                      ideaSuggestions={activeVariantForgeIdeaSuggestions}
                       intensity={state.variantForge.intensity}
                       optionStates={state.variantForge.optionStates}
                       preservePalette={state.variantForge.preservePalette}
                       preserveSilhouette={state.variantForge.preserveSilhouette}
                       preset={state.variantForge.variantPreset}
+                      onApplyIdeaSuggestion={(idea) =>
+                        dispatch({
+                          type: 'set-variant-forge-custom-direction',
+                          customDirection: appendVariantForgeIdeaToDirection(
+                            getVariantForgeFamilyCustomDirection(
+                              state.variantForge.variantFamily,
+                              state.variantForge.familyCustomDirections,
+                            ),
+                            idea,
+                          ),
+                        })
+                      }
                       onFileSelect={(asset) =>
                         dispatch({ type: 'set-variant-forge-asset', asset })
                       }
@@ -2087,6 +2145,9 @@ function App() {
                       }
                       onPresetToggle={(preset) =>
                         dispatch({ type: 'toggle-variant-forge-preset', preset })
+                      }
+                      onRefreshIdeas={() =>
+                        refreshVariantForgeIdeas(state.variantForge.variantFamily)
                       }
                     />
                   </div>
@@ -3868,7 +3929,9 @@ type VariantForgePanelProps = {
   asset: ReferenceAsset | null
   customDirection: string
   family: VariantForgeFamily
+  ideaSuggestions: string[]
   intensity: number
+  onApplyIdeaSuggestion: (idea: string) => void
   onFileSelect: (asset: ReferenceAsset | null) => void
   onCustomDirectionChange: (customDirection: string) => void
   onFamilyChange: (family: VariantForgeFamily) => void
@@ -3881,6 +3944,7 @@ type VariantForgePanelProps = {
     customSetting: string,
   ) => void
   onPresetToggle: (preset: VariantForgePreset) => void
+  onRefreshIdeas: () => void
   optionStates: VariantForgeOptionStateMap
   preservePalette: boolean
   preserveSilhouette: boolean
@@ -3891,7 +3955,9 @@ function VariantForgePanel({
   asset,
   customDirection,
   family,
+  ideaSuggestions,
   intensity,
+  onApplyIdeaSuggestion,
   onFileSelect,
   onCustomDirectionChange,
   onFamilyChange,
@@ -3901,6 +3967,7 @@ function VariantForgePanel({
   onPresetChange,
   onPresetCustomSettingChange,
   onPresetToggle,
+  onRefreshIdeas,
   optionStates,
   preservePalette,
   preserveSilhouette,
@@ -3913,6 +3980,20 @@ function VariantForgePanel({
     elemental: 'Infuse the asset with elemental material and energy cues.',
     rarity: 'Stay close to the original Loot Leveler rarity-upgrade behavior.',
     tech: 'Shift the build language toward low-tech, industrial, or arcane-tech.',
+  }
+  const familyCustomDirectionPlaceholders: Record<VariantForgeFamily, string> = {
+    alignment:
+      'Ex: ancestral blessing, funeral-gold trim, candle soot, and a shrine-kept ceremonial finish.',
+    boss:
+      'Ex: overgrown arena relic, tyrant crest carved into the guard, and a final-boss presentation.',
+    damage:
+      'Ex: snapped tip, split leather grip, dents around the guard, and deep rust in the seams.',
+    elemental:
+      'Ex: wind-carved grooves, drifting leaves, thorny flora growth, pollen glow, and seed-pod accents.',
+    rarity:
+      'Ex: druidic premium treatment, antique jewel sockets, and quiet prestige instead of loud glow.',
+    tech:
+      'Ex: salvaged copper coils, moss in the vents, analog gauges, and hand-built field modifications.',
   }
   const presetDescriptions: Record<VariantForgePreset, string> = {
     'arcane-tech': 'Mystic circuitry, runic engineering, and controlled powered components.',
@@ -3936,6 +4017,11 @@ function VariantForgePanel({
   }
   const presetOptions = variantForgePresetCatalog[family]
   const activePresetCount = getVariantForgeEnabledPresets(family, optionStates).length
+  const [showAdvancedPresets, setShowAdvancedPresets] = useState(false)
+  const advancedPresetSummary =
+    activePresetCount > 0
+      ? `${activePresetCount} advanced preset${activePresetCount === 1 ? '' : 's'} active`
+      : 'No advanced presets enabled'
 
   return (
     <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
@@ -3976,80 +4062,143 @@ function VariantForgePanel({
       </div>
 
       <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <div className="flex items-center justify-between gap-3">
-          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-            Variant Preset
-          </p>
-          <span className="text-xs text-zinc-500">
-            {activePresetCount} active
-          </span>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              {formatVariantForgeLabel(family)} Direction
+            </p>
+            <p className="mt-2 text-sm leading-6 text-zinc-400">
+              Write your own family-specific variation prompt, then pull in a few curated ideas when you want a faster starting point.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onRefreshIdeas}
+            className="shrink-0 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-[10px] font-mono uppercase tracking-[0.24em] text-zinc-300 transition hover:border-white/20 hover:bg-black/30 hover:text-zinc-100"
+          >
+            Refresh Ideas
+          </button>
         </div>
-        <p className="mt-2 text-sm leading-6 text-zinc-400">
-          Click a preset to make it the lead treatment. Toggle presets on or off to blend them, and add per-preset notes when you need more control. You can also leave every preset off and drive the variation with the family, intensity, and custom direction alone.
-        </p>
-        <div className="mt-4 grid gap-2 sm:grid-cols-2">
-          {presetOptions.map((option) => {
-            const optionState = getVariantForgeOptionState(optionStates, option)
-            const isEnabled = optionState.enabled
-            const isLead = preset === option
-
-            return (
-              <div
-                key={option}
-                className={`rounded-[18px] border px-3 py-3 transition ${
-                  isEnabled
-                    ? isLead
-                      ? 'border-amber-300/35 bg-amber-400/12 text-amber-50'
-                      : 'border-amber-300/20 bg-amber-400/8 text-zinc-100'
-                    : 'border-white/10 bg-black/20 text-zinc-300'
-                }`}
+        <div className="mt-4 flex flex-wrap gap-2">
+          {ideaSuggestions.length > 0 ? (
+            ideaSuggestions.map((idea) => (
+              <button
+                key={idea}
+                type="button"
+                onClick={() => onApplyIdeaSuggestion(idea)}
+                className="rounded-full border border-amber-300/18 bg-amber-400/8 px-3 py-2 text-xs text-amber-50 transition hover:border-amber-300/30 hover:bg-amber-400/14"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <button
-                    type="button"
-                    onClick={() => onPresetChange(option)}
-                    className="min-w-0 flex-1 text-left"
-                  >
-                    <span className="block text-sm font-medium">
-                      {formatVariantForgeLabel(option)}
-                      {isLead ? ' Lead' : ''}
-                    </span>
-                    <span className="mt-1 block text-xs leading-5 text-current/70">
-                      {presetDescriptions[option]}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onPresetToggle(option)}
-                    className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-mono uppercase tracking-[0.24em] transition ${
-                      isEnabled
-                        ? 'border-emerald-300/30 bg-emerald-400/12 text-emerald-50'
-                        : 'border-white/10 bg-black/30 text-zinc-400 hover:border-white/20 hover:text-zinc-200'
-                    }`}
-                  >
-                    {isEnabled ? 'On' : 'Off'}
-                  </button>
-                </div>
-                {(isEnabled || optionState.customSetting.trim()) && (
-                  <div className="mt-3">
-                    <label className="block font-mono text-[10px] uppercase tracking-[0.24em] text-current/60">
-                      Custom Setting
-                    </label>
-                    <textarea
-                      value={optionState.customSetting}
-                      onChange={(event) =>
-                        onPresetCustomSettingChange(option, event.target.value)
-                      }
-                      placeholder={`Optional note for ${formatVariantForgeLabel(option).toLowerCase()}.`}
-                      rows={3}
-                      className="mt-2 w-full resize-none rounded-[16px] border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-amber-300/35 focus:bg-black/30"
-                    />
-                  </div>
-                )}
-              </div>
-            )
-          })}
+                + {idea}
+              </button>
+            ))
+          ) : (
+            <span className="text-xs text-zinc-500">
+              Fresh family ideas will appear here.
+            </span>
+          )}
         </div>
+        <label className="mt-5 block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          {formatVariantForgeLabel(family)} Custom Direction
+        </label>
+        <p className="mt-2 text-sm text-zinc-400">
+          Optional family-specific guidance. This note is saved separately for each category, so you can keep elemental ideas like wind or flora without affecting damage, boss, or tech.
+        </p>
+        <textarea
+          value={customDirection}
+          onChange={(event) => onCustomDirectionChange(event.target.value)}
+          placeholder={familyCustomDirectionPlaceholders[family]}
+          rows={5}
+          className="mt-4 w-full resize-none rounded-[20px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-amber-300/35 focus:bg-black/30"
+        />
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <button
+          type="button"
+          onClick={() => setShowAdvancedPresets((isOpen) => !isOpen)}
+          className="flex w-full items-center justify-between gap-4 text-left"
+        >
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Advanced Presets
+            </p>
+            <p className="mt-2 text-sm leading-6 text-zinc-400">
+              {advancedPresetSummary}
+            </p>
+          </div>
+          <ChevronRight
+            className={`size-5 text-zinc-400 transition ${showAdvancedPresets ? 'rotate-90' : ''}`}
+            strokeWidth={1.9}
+          />
+        </button>
+        <p className="mt-3 text-sm leading-6 text-zinc-400">
+          Open this when you want the old named preset system, blending, or per-preset notes. Leave it alone for a cleaner family-first workflow.
+        </p>
+        {showAdvancedPresets ? (
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            {presetOptions.map((option) => {
+              const optionState = getVariantForgeOptionState(optionStates, option)
+              const isEnabled = optionState.enabled
+              const isLead = preset === option
+
+              return (
+                <div
+                  key={option}
+                  className={`rounded-[18px] border px-3 py-3 transition ${
+                    isEnabled
+                      ? isLead
+                        ? 'border-amber-300/35 bg-amber-400/12 text-amber-50'
+                        : 'border-amber-300/20 bg-amber-400/8 text-zinc-100'
+                      : 'border-white/10 bg-black/20 text-zinc-300'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <button
+                      type="button"
+                      onClick={() => onPresetChange(option)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <span className="block text-sm font-medium">
+                        {formatVariantForgeLabel(option)}
+                        {isLead ? ' Lead' : ''}
+                      </span>
+                      <span className="mt-1 block text-xs leading-5 text-current/70">
+                        {presetDescriptions[option]}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onPresetToggle(option)}
+                      className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-mono uppercase tracking-[0.24em] transition ${
+                        isEnabled
+                          ? 'border-emerald-300/30 bg-emerald-400/12 text-emerald-50'
+                          : 'border-white/10 bg-black/30 text-zinc-400 hover:border-white/20 hover:text-zinc-200'
+                      }`}
+                    >
+                      {isEnabled ? 'On' : 'Off'}
+                    </button>
+                  </div>
+                  {(isEnabled || optionState.customSetting.trim()) && (
+                    <div className="mt-3">
+                      <label className="block font-mono text-[10px] uppercase tracking-[0.24em] text-current/60">
+                        Custom Setting
+                      </label>
+                      <textarea
+                        value={optionState.customSetting}
+                        onChange={(event) =>
+                          onPresetCustomSettingChange(option, event.target.value)
+                        }
+                        placeholder={`Optional note for ${formatVariantForgeLabel(option).toLowerCase()}.`}
+                        rows={3}
+                        className="mt-2 w-full resize-none rounded-[16px] border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-amber-300/35 focus:bg-black/30"
+                      />
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        ) : null}
       </div>
 
       <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
@@ -4113,21 +4262,6 @@ function VariantForgePanel({
         </button>
       </div>
 
-      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-          Custom Direction
-        </label>
-        <p className="mt-2 text-sm text-zinc-400">
-          Optional additive guidance. Use this to nudge finish, story cues, or mood without overriding the preset.
-        </p>
-        <textarea
-          value={customDirection}
-          onChange={(event) => onCustomDirectionChange(event.target.value)}
-          placeholder="Ex: keep the grip wrapped in faded red cloth, add age cracks near the guard, and make the metal feel damp and cold."
-          rows={5}
-          className="mt-4 w-full resize-none rounded-[20px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-amber-300/35 focus:bg-black/30"
-        />
-      </div>
     </section>
   )
 }
@@ -4718,7 +4852,9 @@ function buildVariantForgeBriefItems(
     },
     {
       label: 'Lead Preset',
-      value: formatVariantForgeLabel(state.variantForge.variantPreset),
+      value: activeOptions.length
+        ? formatVariantForgeLabel(state.variantForge.variantPreset)
+        : 'None selected',
     },
     {
       label: 'Active Options',
@@ -4842,6 +4978,10 @@ function buildVfxForgeBriefItems(
 
 function buildVariantForgePromptPreview(state: typeof initialState.variantForge) {
   const activeOptions = buildActiveVariantForgeOptions(state)
+  const activeFamilyCustomDirection = getVariantForgeFamilyCustomDirection(
+    state.variantFamily,
+    state.familyCustomDirections,
+  )
 
   return [
     activeOptions.length > 0
@@ -4863,8 +5003,8 @@ function buildVariantForgePromptPreview(state: typeof initialState.variantForge)
       ? 'Stay close to the original palette while changing finish and material cues.'
       : 'Palette shifts are allowed when the preset benefits from them.',
     `Intensity: ${state.intensity}/100.`,
-    state.customDirection.trim()
-      ? `Additional direction: ${state.customDirection.trim()}.`
+    activeFamilyCustomDirection.trim()
+      ? `Additional direction: ${activeFamilyCustomDirection.trim()}.`
       : null,
   ]
     .filter(Boolean)

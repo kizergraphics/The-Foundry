@@ -9,6 +9,7 @@ import type {
   TextureLabWorkflow,
   UvLabAtlasSize,
   VariantForgeFamily,
+  VariantForgeFamilyCustomDirectionMap,
   VariantForgeOptionStateMap,
   VariantForgePreset,
 } from './forge'
@@ -48,7 +49,7 @@ type StoredCharacterSheetSettings = {
 }
 
 type StoredVariantForgeSettings = {
-  customDirection: string
+  familyCustomDirections: VariantForgeFamilyCustomDirectionMap
   intensity: number
   optionStates: VariantForgeOptionStateMap
   preservePalette: boolean
@@ -160,6 +161,25 @@ function readStoredVariantForgeOptionStates(value: unknown): VariantForgeOptionS
   return normalizedStates
 }
 
+function readStoredVariantForgeFamilyCustomDirections(
+  value: unknown,
+): VariantForgeFamilyCustomDirectionMap {
+  if (!value || typeof value !== 'object') {
+    return {}
+  }
+
+  const rawValue = value as Record<string, unknown>
+  const normalizedDirections: VariantForgeFamilyCustomDirectionMap = {}
+
+  for (const family of variantForgeFamilies) {
+    if (typeof rawValue[family] === 'string') {
+      normalizedDirections[family] = rawValue[family]
+    }
+  }
+
+  return normalizedDirections
+}
+
 export function loadStoredState(): StoredState | null {
   if (typeof window === 'undefined') {
     return null
@@ -197,6 +217,16 @@ export function loadStoredState(): StoredState | null {
     const storedVariantOptionStates = readStoredVariantForgeOptionStates(
       parsed.settings?.variantForge?.optionStates,
     )
+    const storedVariantFamilyCustomDirections = readStoredVariantForgeFamilyCustomDirections(
+      parsed.settings?.variantForge?.familyCustomDirections,
+    )
+    const legacyVariantForgeSettings = parsed.settings?.variantForge as
+      | ({ customDirection?: unknown } & Record<string, unknown>)
+      | undefined
+    const legacyVariantCustomDirection =
+      typeof legacyVariantForgeSettings?.customDirection === 'string'
+        ? legacyVariantForgeSettings.customDirection
+        : ''
     const shouldHydrateLegacyVariantPreset =
       parsed.settings?.variantForge?.optionStates === undefined
     const hydratedVariantOptionStates = shouldHydrateLegacyVariantPreset
@@ -208,6 +238,14 @@ export function loadStoredState(): StoredState | null {
           },
         }
       : storedVariantOptionStates
+    const hydratedVariantFamilyCustomDirections =
+      Object.keys(storedVariantFamilyCustomDirections).length > 0
+        ? storedVariantFamilyCustomDirections
+        : legacyVariantCustomDirection.length > 0
+          ? {
+              [storedVariantFamily]: legacyVariantCustomDirection,
+            }
+          : {}
 
     return {
       recentPrompts: Array.isArray(parsed.recentPrompts)
@@ -303,10 +341,7 @@ export function loadStoredState(): StoredState | null {
           paddingPx: clampUvPaddingPx(parsed.settings?.uvLab?.paddingPx ?? 8),
         },
         variantForge: {
-          customDirection:
-            typeof parsed.settings?.variantForge?.customDirection === 'string'
-              ? parsed.settings.variantForge.customDirection
-              : '',
+          familyCustomDirections: hydratedVariantFamilyCustomDirections,
           intensity:
             typeof parsed.settings?.variantForge?.intensity === 'number' &&
             Number.isFinite(parsed.settings.variantForge.intensity)

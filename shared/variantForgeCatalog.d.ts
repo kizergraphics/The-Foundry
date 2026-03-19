@@ -7,6 +7,10 @@ export const variantForgePresetCatalog: {
   readonly boss: readonly ['elite', 'boss-tier']
 }
 
+export const variantForgeIdeaCatalog: {
+  readonly [K in keyof typeof variantForgePresetCatalog]: readonly string[]
+}
+
 export type VariantForgeFamily = keyof typeof variantForgePresetCatalog
 export type VariantForgeRarityPreset = (typeof variantForgePresetCatalog)['rarity'][number]
 export type VariantForgeDamagePreset = (typeof variantForgePresetCatalog)['damage'][number]
@@ -34,4 +38,16 @@ export function isVariantForgePresetForFamily(
 export function getVariantForgePresetOptions(
   family: VariantForgeFamily | unknown,
 ): readonly VariantForgePreset[]
+export function getVariantForgeIdeaOptions(
+  family: VariantForgeFamily | unknown,
+): readonly string[]
+export function pickVariantForgeIdeaSuggestions(
+  family: VariantForgeFamily | unknown,
+  count?: number,
+  random?: () => number,
+): string[]
+export function appendVariantForgeIdeaToDirection(
+  currentDirection: string,
+  idea: string,
+): string
 export function formatVariantForgeLabel(value: string): string
