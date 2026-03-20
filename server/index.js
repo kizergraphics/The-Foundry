@@ -21,6 +21,7 @@ import {
   validateActionAnimatorStripRequest,
   validateCharacterSheetRequest,
   validateForgeRequest,
+  validateVariantForgeIdeaRequest,
 } from './requestValidation.js'
 import {
   getTelemetrySnapshot,
@@ -35,9 +36,11 @@ import {
   formatVariantForgeLabel,
   isVariantForgeFamily,
   isVariantForgePresetForFamily,
+  pickVariantForgeIdeaSuggestions,
   variantForgeDefaultPresetByFamily,
 } from '../shared/variantForgeCatalog.js'
 import { forgeApiModes } from '../shared/modeCatalog.js'
+import { variantForgeIdeaSuggestionCount } from '../shared/variantForgeIdeas.js'
 
 dotenv.config()
 
@@ -72,12 +75,14 @@ const routeModelDefaults = {
   '/api/action-animator-strip': 'gemini-3-pro',
   '/api/character-sheet': 'gemini-3-pro',
   '/api/forge': 'gemini-3-flash',
+  '/api/variant-forge-ideas': 'gemini-3-flash',
 }
 const routeModelAllowlist = {
   '/api/action-animator': ['veo-3.1-fast'],
   '/api/action-animator-strip': ['gemini-3-pro', 'gemini-2.5-flash-image'],
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
+  '/api/variant-forge-ideas': ['gemini-3-flash'],
 }
 const supportedForgeModes = forgeApiModes
 const forgeBatchMaxAttemptsPerImage = 4
@@ -183,6 +188,87 @@ app.get('/api/usage', usageAuth, async (request, response) => {
     })
   }
 })
+
+app.post(
+  '/api/variant-forge-ideas',
+  optionalGenerationAuth,
+  forgeRateLimit,
+  forgeConcurrencyLimit,
+  parseForgeBody,
+  async (request, response) => {
+    if (!apiKey) {
+      response.status(500).json({
+        error:
+          'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
+      })
+      return
+    }
+
+    let validatedRequest
+
+    try {
+      validatedRequest = validateVariantForgeIdeaRequest(request.body ?? {})
+    } catch (error) {
+      response.status(400).json(toValidationResponse(error))
+      return
+    }
+
+    const modelSelection = resolveModelForRoute('/api/variant-forge-ideas')
+
+    if (!modelSelection.ok) {
+      response.status(500).json({
+        error: {
+          code: 'model_unavailable',
+          details: modelSelection.details,
+          message: modelSelection.message,
+          title: 'Idea Refresh Is Unavailable',
+        },
+      })
+      return
+    }
+
+    const ai = new GoogleGenAI({ apiKey })
+
+    try {
+      const generation = await ai.models.generateContent({
+        model: modelSelection.providerModel,
+        contents: [
+          {
+            text: buildVariantForgeIdeaPrompt(validatedRequest),
+          },
+        ],
+        config: {
+          candidateCount: 1,
+          responseModalities: ['TEXT'],
+          systemInstruction:
+            'You generate short clickable Variant Forge idea chips for game asset iteration. ' +
+            `Return exactly ${variantForgeIdeaSuggestionCount} distinct idea phrases, one per line, with no numbering, no bullets, no markdown, and no commentary. ` +
+            'Each idea should be concise, production-usable, and specific to the provided Variant Forge context. ' +
+            'Avoid repeating preset names verbatim unless that wording materially improves the idea.',
+        },
+      })
+
+      await recordUsageEvent({
+        model: modelSelection.modelId,
+        route: '/api/variant-forge-ideas',
+        telemetryModel: resolveTelemetryModelId(
+          modelSelection.modelId,
+          '/api/variant-forge-ideas',
+        ),
+        tokenCount: extractTotalTokenCount(generation),
+      }).catch(() => {})
+
+      response.json(
+        normalizeVariantForgeIdeaResponse(
+          typeof generation.text === 'string' ? generation.text : '',
+          validatedRequest.variantFamily,
+        ),
+      )
+    } catch {
+      response.json(buildVariantForgeIdeaFallbackResponse(validatedRequest.variantFamily))
+    }
+  },
+)
 
 app.post(
   '/api/forge',
@@ -1840,6 +1926,88 @@ export function buildVariantForgePrompt({
     .join(' ')
 }
 
+export function buildVariantForgeIdeaPrompt({
+  customDirection,
+  preservePalette,
+  preserveSilhouette,
+  styleText,
+  variantFamily,
+  variantIntensity,
+  variantOptions,
+  variantPreset,
+}) {
+  const normalizedFamily = normalizeVariantForgeFamily(variantFamily)
+  const normalizedPreset = normalizeVariantForgePreset(normalizedFamily, variantPreset)
+  const normalizedOptions = normalizeVariantForgeOptions(normalizedFamily, variantOptions)
+  const normalizedIntensity = clampPercentage(variantIntensity, 60)
+  const normalizedStyleText =
+    typeof styleText === 'string' && styleText.trim() ? styleText.trim() : ''
+  const normalizedCustomDirection =
+    typeof customDirection === 'string' && customDirection.trim()
+      ? customDirection.trim()
+      : ''
+
+  return [
+    `Variant family: ${formatVariantForgeLabel(normalizedFamily)}.`,
+    `Lead preset: ${formatVariantForgeLabel(normalizedPreset)}.`,
+    normalizedOptions.length > 0
+      ? `Enabled presets: ${normalizedOptions.map((option) => formatVariantForgeLabel(option.preset)).join(', ')}.`
+      : 'Enabled presets: none.',
+    ...normalizedOptions
+      .filter((option) => option.customSetting)
+      .map(
+        (option) =>
+          `${formatVariantForgeLabel(option.preset)} custom setting: ${option.customSetting}.`,
+      ),
+    normalizedCustomDirection
+      ? `Family direction: ${normalizedCustomDirection}.`
+      : 'Family direction: none provided.',
+    preserveSilhouette
+      ? 'Preserve silhouette: yes.'
+      : 'Preserve silhouette: allow minor drift.',
+    preservePalette
+      ? 'Preserve palette: yes.'
+      : 'Preserve palette: shifts are allowed.',
+    `Intensity: ${normalizedIntensity} out of 100.`,
+    normalizedStyleText
+      ? `Style guidance: ${normalizedStyleText}.`
+      : 'Style guidance: none provided.',
+  ].join('\n')
+}
+
+export function normalizeVariantForgeIdeaResponse(generationText, variantFamily) {
+  const normalizedFamily = normalizeVariantForgeFamily(variantFamily)
+  const fallbackResponse = buildVariantForgeIdeaFallbackResponse(normalizedFamily)
+  const candidateIdeas = extractVariantForgeIdeaCandidates(generationText)
+  const uniqueIdeas = []
+  const seenIdeas = new Set()
+
+  candidateIdeas.forEach((idea) => {
+    if (uniqueIdeas.length >= variantForgeIdeaSuggestionCount) {
+      return
+    }
+
+    const normalizedIdea = sanitizeVariantForgeIdeaCandidate(idea)
+    const normalizedKey = normalizedIdea.toLowerCase()
+
+    if (!normalizedIdea || seenIdeas.has(normalizedKey)) {
+      return
+    }
+
+    seenIdeas.add(normalizedKey)
+    uniqueIdeas.push(normalizedIdea)
+  })
+
+  if (uniqueIdeas.length < variantForgeIdeaSuggestionCount) {
+    return fallbackResponse
+  }
+
+  return {
+    ideas: uniqueIdeas,
+    source: 'ai',
+  }
+}
+
 function buildPortraitStudioPrompt({ prompt, styleText }) {
   const emotions = ['Neutral', 'Angry', 'Sad', 'Joy', 'Surprised']
   const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
@@ -2060,6 +2228,56 @@ function resolveTextureGenerationSystemInstruction(
 
 function normalizeTextureLabOutputSize(value) {
   return Number(value) <= 512 ? 512 : 1024
+}
+
+function buildVariantForgeIdeaFallbackResponse(variantFamily) {
+  return {
+    ideas: pickVariantForgeIdeaSuggestions(
+      variantFamily,
+      variantForgeIdeaSuggestionCount,
+    ),
+    source: 'fallback',
+  }
+}
+
+function extractVariantForgeIdeaCandidates(generationText) {
+  const normalizedText =
+    typeof generationText === 'string' ? generationText.trim() : ''
+
+  if (!normalizedText) {
+    return []
+  }
+
+  try {
+    const parsedValue = JSON.parse(normalizedText)
+
+    if (Array.isArray(parsedValue)) {
+      return parsedValue.filter((entry) => typeof entry === 'string')
+    }
+
+    if (Array.isArray(parsedValue?.ideas)) {
+      return parsedValue.ideas.filter((entry) => typeof entry === 'string')
+    }
+  } catch {
+    // Fall through to line-based parsing when the model does not return JSON.
+  }
+
+  return normalizedText
+    .replace(/\r/g, '')
+    .replace(/(?:^|\n)\s*\d+[.)]\s+/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function sanitizeVariantForgeIdeaCandidate(value) {
+  return String(value)
+    .trim()
+    .replace(/^[-*•]\s+/, '')
+    .replace(/^['"`]+|['"`]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.;:,!?]+$/g, '')
+    .trim()
 }
 
 async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {

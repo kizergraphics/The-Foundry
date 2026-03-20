@@ -390,6 +390,45 @@ export function validateForgeRequest(body) {
   }
 }
 
+export function validateVariantForgeIdeaRequest(body) {
+  const variantFamily =
+    readOptionalEnum(body?.variantFamily, 'variantFamily', allowedVariantForgeFamilies) ??
+    'damage'
+  const variantPreset =
+    readOptionalTrimmedString(body?.variantPreset, 'variantPreset', 40) ||
+    variantForgeDefaultPresetByFamily[variantFamily]
+  const variantOptions = readVariantForgeOptions(body?.variantOptions, variantFamily)
+
+  if (!isVariantForgePresetForFamily(variantFamily, variantPreset)) {
+    throw buildValidationError('variantPreset contains an unsupported value.', [
+      `Allowed values for ${variantFamily}: ${getVariantForgePresetOptions(variantFamily).join(', ')}`,
+    ])
+  }
+
+  return {
+    customDirection: readOptionalTrimmedString(
+      body?.customDirection,
+      'customDirection',
+      400,
+    ),
+    preservePalette: readBoolean(body?.preservePalette, 'preservePalette', false),
+    preserveSilhouette: readBoolean(
+      body?.preserveSilhouette,
+      'preserveSilhouette',
+      true,
+    ),
+    styleText: readOptionalTrimmedString(body?.styleText, 'styleText', maxStyleTextLength),
+    variantFamily,
+    variantIntensity: readInteger(body?.variantIntensity, 'variantIntensity', {
+      fallback: 60,
+      max: 100,
+      min: 0,
+    }),
+    variantOptions,
+    variantPreset,
+  }
+}
+
 export function validateCharacterSheetRequest(body) {
   const generationMode = readOptionalEnum(
     body?.generationMode,

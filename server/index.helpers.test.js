@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildAnimatorMatteFilter,
+  buildVariantForgeIdeaPrompt,
   buildVariantForgePrompt,
   normalizeActionAnimatorFrameSize,
+  normalizeVariantForgeIdeaResponse,
   resolveVariantForgeSystemInstruction,
 } from './index.js'
 
@@ -54,5 +56,61 @@ describe('action animator server sizing helpers', () => {
 
     expect(instruction).toContain('without applying any named preset cues')
     expect(instruction).not.toContain('Use damage family cues and worn preset cues')
+  })
+})
+
+describe('variant forge idea helpers', () => {
+  it('builds idea prompts with family, lead preset, active options, and custom direction', () => {
+    const prompt = buildVariantForgeIdeaPrompt({
+      customDirection: 'quiet prestige, jewel sockets, and druidic premium treatment',
+      preservePalette: true,
+      preserveSilhouette: true,
+      styleText: 'painted fantasy inventory render',
+      variantFamily: 'rarity',
+      variantIntensity: 72,
+      variantOptions: [
+        {
+          customSetting: 'Keep the upgrade noble rather than explosive.',
+          preset: 'epic',
+        },
+      ],
+      variantPreset: 'rare',
+    })
+
+    expect(prompt).toContain('Variant family: Rarity.')
+    expect(prompt).toContain('Lead preset: Rare.')
+    expect(prompt).toContain('Enabled presets: Epic.')
+    expect(prompt).toContain('Epic custom setting: Keep the upgrade noble rather than explosive.')
+    expect(prompt).toContain(
+      'Family direction: quiet prestige, jewel sockets, and druidic premium treatment.',
+    )
+    expect(prompt).toContain('Style guidance: painted fantasy inventory render.')
+  })
+
+  it('falls back to curated ideas when the model text is incomplete', () => {
+    const response = normalizeVariantForgeIdeaResponse(
+      '1. noble trim\n2. jewel socket accents',
+      'rarity',
+    )
+
+    expect(response.source).toBe('fallback')
+    expect(response.ideas).toHaveLength(4)
+  })
+
+  it('returns normalized ai ideas when four distinct lines are available', () => {
+    const response = normalizeVariantForgeIdeaResponse(
+      '1. wind-carved fuller\n2. drifting pollen halo\n3. seedpod pommel wrap\n4. thorn-vein filigree',
+      'elemental',
+    )
+
+    expect(response).toEqual({
+      ideas: [
+        'wind-carved fuller',
+        'drifting pollen halo',
+        'seedpod pommel wrap',
+        'thorn-vein filigree',
+      ],
+      source: 'ai',
+    })
   })
 })

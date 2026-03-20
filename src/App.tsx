@@ -104,8 +104,8 @@ import {
 import {
   appendVariantForgeIdeaToDirection,
   formatVariantForgeLabel,
-  pickVariantForgeIdeaSuggestions,
 } from '../shared/variantForgeCatalog.js'
+import type { VariantForgeIdeaResponseSource } from '../shared/variantForgeIdeas.js'
 import {
   getAvailableModelsForMode,
   getModeDefaultModel,
@@ -114,6 +114,13 @@ import {
   type ModelId,
 } from './modes/models'
 import { buildActiveVariantForgeOptions, getModePresentation } from './modes/registry'
+import {
+  buildVariantForgeFallbackIdeaState,
+  buildVariantForgeIdeaRequest,
+  normalizeVariantForgeIdeaState,
+  postVariantForgeIdeaRequest,
+  type VariantForgeIdeaState,
+} from './lib/variantForgeIdeas'
 import {
   buildPortraitStudioRequest,
   buildStandardForgeRequest,
@@ -195,7 +202,6 @@ const telemetryWindowStorageKey = 'kizer-forge-telemetry-window'
 const telemetryWindowDurationMs = 24 * 60 * 60 * 1000
 const UvLabWorkspace = lazy(() => import('./components/UvLabWorkspace'))
 const telemetryRefreshIntervalMs = 10000
-const variantForgeIdeaSuggestionCount = 4
 
 function loadTelemetryWindowState(now = Date.now()): TelemetryWindowState {
   if (typeof window === 'undefined') {
@@ -404,14 +410,16 @@ function App() {
     getModeDefaultModel(initialState.activeMode, initialState.actionAnimator.pipeline),
   )
   const [variantForgeIdeaSelections, setVariantForgeIdeaSelections] = useState<
-    Partial<Record<VariantForgeFamily, string[]>>
+    Partial<Record<VariantForgeFamily, VariantForgeIdeaState>>
   >(() => ({
-    [initialState.variantForge.variantFamily]: pickVariantForgeIdeaSuggestions(
+    [initialState.variantForge.variantFamily]: buildVariantForgeFallbackIdeaState(
       initialState.variantForge.variantFamily,
-      variantForgeIdeaSuggestionCount,
     ),
   }))
   const forgeRunInFlightRef = useRef(false)
+  const variantForgeIdeaRequestVersionRef = useRef<Partial<Record<VariantForgeFamily, number>>>(
+    {},
+  )
   const persistTimeoutRef = useRef<number | null>(null)
   const pendingPersistStateRef = useRef<Parameters<typeof persistStoredState>[0] | null>(
     null,
@@ -422,17 +430,64 @@ function App() {
   const [sessionMaxByModel, setSessionMaxByModel] = useState(
     () => loadTelemetryWindowState().sessionMaxByModel,
   )
-  const refreshVariantForgeIdeas = useCallback((family: VariantForgeFamily) => {
-    setVariantForgeIdeaSelections((currentSelections) => ({
-      ...currentSelections,
-      [family]: pickVariantForgeIdeaSuggestions(
-        family,
-        variantForgeIdeaSuggestionCount,
-      ),
-    }))
-  }, [])
   const isForging = status === 'loading'
   const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
+  const refreshVariantForgeIdeas = useEffectEvent(async () => {
+    const family = state.variantForge.variantFamily
+    const nextRequestVersion =
+      (variantForgeIdeaRequestVersionRef.current[family] ?? 0) + 1
+    const fallbackState = buildVariantForgeFallbackIdeaState(family)
+
+    variantForgeIdeaRequestVersionRef.current[family] = nextRequestVersion
+    setVariantForgeIdeaSelections((currentSelections) => ({
+      ...currentSelections,
+      [family]: {
+        ...(currentSelections[family] ?? fallbackState),
+        ideas:
+          currentSelections[family]?.ideas.length
+            ? currentSelections[family]?.ideas
+            : fallbackState.ideas,
+        loading: true,
+      },
+    }))
+
+    try {
+      const activeVariantOptions = buildActiveVariantForgeOptions(state.variantForge)
+      const customDirection = getVariantForgeFamilyCustomDirection(
+        family,
+        state.variantForge.familyCustomDirections,
+      )
+      const { ok, payload } = await postVariantForgeIdeaRequest(
+        buildVariantForgeIdeaRequest({
+          activeVariantOptions,
+          customDirection,
+          state: state.variantForge,
+          styleText: activeStyleInput,
+        }),
+      )
+
+      if (variantForgeIdeaRequestVersionRef.current[family] !== nextRequestVersion) {
+        return
+      }
+
+      setVariantForgeIdeaSelections((currentSelections) => ({
+        ...currentSelections,
+        [family]:
+          ok && payload
+            ? normalizeVariantForgeIdeaState(payload, family)
+            : fallbackState,
+      }))
+    } catch {
+      if (variantForgeIdeaRequestVersionRef.current[family] !== nextRequestVersion) {
+        return
+      }
+
+      setVariantForgeIdeaSelections((currentSelections) => ({
+        ...currentSelections,
+        [family]: fallbackState,
+      }))
+    }
+  })
   const modeAvailableModels = getAvailableModelsForMode(
     state.activeMode,
     state.actionAnimator.pipeline,
@@ -472,20 +527,18 @@ function App() {
     resultGridTitle,
     useWideControlGrid,
   } = modePresentation
-  const activeVariantForgeIdeaSuggestions =
-    variantForgeIdeaSelections[state.variantForge.variantFamily] ?? []
+  const activeVariantForgeIdeaState =
+    variantForgeIdeaSelections[state.variantForge.variantFamily] ??
+    buildVariantForgeFallbackIdeaState(state.variantForge.variantFamily)
+  const activeVariantForgeIdeaSuggestions = activeVariantForgeIdeaState.ideas
 
   useEffect(() => {
     if (!isVariantForgeMode) {
       return
     }
 
-    refreshVariantForgeIdeas(state.variantForge.variantFamily)
-  }, [
-    isVariantForgeMode,
-    refreshVariantForgeIdeas,
-    state.variantForge.variantFamily,
-  ])
+    void refreshVariantForgeIdeas()
+  }, [isVariantForgeMode, state.variantForge.variantFamily, state.variantForge.variantPreset])
   const isShowingResults = results.length > 0
   const activeGenerationCount =
     isSingleResultMode ? 1 : state.generationCount
@@ -1627,7 +1680,9 @@ function App() {
                       )}
                       family={state.variantForge.variantFamily}
                       ideaSuggestions={activeVariantForgeIdeaSuggestions}
+                      ideaSource={activeVariantForgeIdeaState.source}
                       intensity={state.variantForge.intensity}
+                      isRefreshingIdeas={activeVariantForgeIdeaState.loading}
                       optionStates={state.variantForge.optionStates}
                       preservePalette={state.variantForge.preservePalette}
                       preserveSilhouette={state.variantForge.preserveSilhouette}
@@ -1684,9 +1739,7 @@ function App() {
                       onPresetToggle={(preset) =>
                         dispatch({ type: 'toggle-variant-forge-preset', preset })
                       }
-                      onRefreshIdeas={() =>
-                        refreshVariantForgeIdeas(state.variantForge.variantFamily)
-                      }
+                      onRefreshIdeas={() => void refreshVariantForgeIdeas()}
                     />
                   </div>
                 ) : isPortraitStudioMode ? (
@@ -3463,12 +3516,14 @@ function ActionAnimatorPanel({
   )
 }
 
-type VariantForgePanelProps = {
+export type VariantForgePanelProps = {
   asset: ReferenceAsset | null
   customDirection: string
   family: VariantForgeFamily
   ideaSuggestions: string[]
+  ideaSource: VariantForgeIdeaResponseSource
   intensity: number
+  isRefreshingIdeas: boolean
   onApplyIdeaSuggestion: (idea: string) => void
   onFileSelect: (asset: ReferenceAsset | null) => void
   onCustomDirectionChange: (customDirection: string) => void
@@ -3489,12 +3544,14 @@ type VariantForgePanelProps = {
   preset: VariantForgePreset
 }
 
-function VariantForgePanel({
+export function VariantForgePanel({
   asset,
   customDirection,
   family,
   ideaSuggestions,
+  ideaSource,
   intensity,
+  isRefreshingIdeas,
   onApplyIdeaSuggestion,
   onFileSelect,
   onCustomDirectionChange,
@@ -3560,6 +3617,11 @@ function VariantForgePanel({
     activePresetCount > 0
       ? `${activePresetCount} advanced preset${activePresetCount === 1 ? '' : 's'} active`
       : 'No advanced presets enabled'
+  const ideaStatusCopy = isRefreshingIdeas
+    ? 'Refreshing ideas from AI using the current Variant Forge setup.'
+    : ideaSource === 'ai'
+      ? 'AI-backed ideas matched to the current setting.'
+      : 'Using curated fallback ideas while AI refresh is unavailable.'
 
   return (
     <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
@@ -3606,17 +3668,60 @@ function VariantForgePanel({
               {formatVariantForgeLabel(family)} Direction
             </p>
             <p className="mt-2 text-sm leading-6 text-zinc-400">
-              Write your own family-specific variation prompt, then pull in a few curated ideas when you want a faster starting point.
+              Write your own family-specific variation prompt, then refresh AI-backed ideas that match the selected setting when you want a faster starting point.
             </p>
+            <p className="mt-2 text-xs text-zinc-500">{ideaStatusCopy}</p>
           </div>
           <button
             type="button"
             onClick={onRefreshIdeas}
-            className="shrink-0 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-[10px] font-mono uppercase tracking-[0.24em] text-zinc-300 transition hover:border-white/20 hover:bg-black/30 hover:text-zinc-100"
+            disabled={isRefreshingIdeas}
+            className={`shrink-0 rounded-full border px-3 py-1.5 text-[10px] font-mono uppercase tracking-[0.24em] transition ${
+              isRefreshingIdeas
+                ? 'border-amber-300/18 bg-amber-400/10 text-amber-100/80'
+                : 'border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-black/30 hover:text-zinc-100'
+            }`}
           >
-            Refresh Ideas
+            <span className="inline-flex items-center gap-2">
+              {isRefreshingIdeas ? (
+                <LoaderCircle className="size-3.5 animate-spin" strokeWidth={1.9} />
+              ) : null}
+              {isRefreshingIdeas ? 'Refreshing' : 'Refresh Ideas'}
+            </span>
           </button>
         </div>
+        {family === 'rarity' ? (
+          <div className="mt-4">
+            <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-zinc-500">
+              Rarity Cards
+            </p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              {variantForgePresetCatalog.rarity.map((rarityPreset) => {
+                const isActiveRarity = preset === rarityPreset
+
+                return (
+                  <button
+                    key={rarityPreset}
+                    type="button"
+                    onClick={() => onPresetChange(rarityPreset)}
+                    className={`rounded-[18px] border px-3 py-3 text-left transition ${
+                      isActiveRarity
+                        ? 'border-amber-300/35 bg-amber-400/12 text-amber-50'
+                        : 'border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-black/30'
+                    }`}
+                  >
+                    <span className="block text-sm font-medium">
+                      {formatVariantForgeLabel(rarityPreset)}
+                    </span>
+                    <span className="mt-1 block text-xs leading-5 text-current/70">
+                      {presetDescriptions[rarityPreset]}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
           {ideaSuggestions.length > 0 ? (
             ideaSuggestions.map((idea) => (
@@ -3631,7 +3736,7 @@ function VariantForgePanel({
             ))
           ) : (
             <span className="text-xs text-zinc-500">
-              Fresh family ideas will appear here.
+              Refreshed family ideas will appear here.
             </span>
           )}
         </div>

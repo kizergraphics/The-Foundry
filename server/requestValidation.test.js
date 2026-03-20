@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   validateActionAnimatorRequest,
   validateForgeRequest,
+  validateVariantForgeIdeaRequest,
 } from './requestValidation.js'
 
 const validPngBase64 =
@@ -119,6 +120,46 @@ describe('validateForgeRequest', () => {
             preset: 'frozen',
           },
         ],
+      }),
+    ).toThrow()
+  })
+})
+
+describe('validateVariantForgeIdeaRequest', () => {
+  it('accepts variant forge idea-refresh fields and defaults optional values', () => {
+    expect(
+      validateVariantForgeIdeaRequest({
+        styleText: 'Painterly game render',
+        variantFamily: 'rarity',
+        variantOptions: [
+          {
+            customSetting: 'Keep the glow restrained and noble.',
+            preset: 'epic',
+          },
+        ],
+      }),
+    ).toMatchObject({
+      customDirection: '',
+      preservePalette: false,
+      preserveSilhouette: true,
+      styleText: 'Painterly game render',
+      variantFamily: 'rarity',
+      variantIntensity: 60,
+      variantOptions: [
+        {
+          customSetting: 'Keep the glow restrained and noble.',
+          preset: 'epic',
+        },
+      ],
+      variantPreset: 'common',
+    })
+  })
+
+  it('rejects idea-refresh presets that do not belong to the selected family', () => {
+    expect(() =>
+      validateVariantForgeIdeaRequest({
+        variantFamily: 'tech',
+        variantPreset: 'legendary',
       }),
     ).toThrow()
   })

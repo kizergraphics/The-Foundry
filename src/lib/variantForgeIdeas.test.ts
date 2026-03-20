@@ -5,6 +5,11 @@ import {
   getVariantForgeIdeaOptions,
   pickVariantForgeIdeaSuggestions,
 } from '../../shared/variantForgeCatalog.js'
+import { initialState } from './forge'
+import {
+  buildVariantForgeIdeaRequest,
+  normalizeVariantForgeIdeaState,
+} from './variantForgeIdeas'
 
 describe('variant forge idea helpers', () => {
   it('returns curated idea pools that are separate from preset names', () => {
@@ -44,5 +49,77 @@ describe('variant forge idea helpers', () => {
     expect(
       appendVariantForgeIdeaToDirection('Weathered grip wrap.', 'flora'),
     ).toBe('Weathered grip wrap. flora')
+  })
+
+  it('builds idea-refresh requests from the current variant forge state', () => {
+    expect(
+      buildVariantForgeIdeaRequest({
+        activeVariantOptions: [
+          {
+            customSetting: 'Keep the finish noble and restrained.',
+            preset: 'rare',
+          },
+        ],
+        customDirection: '  jewel sockets and quiet prestige  ',
+        state: {
+          ...initialState.variantForge,
+          intensity: 74,
+          preservePalette: true,
+          variantFamily: 'rarity',
+          variantPreset: 'epic',
+        },
+        styleText: '  painted inventory render  ',
+      }),
+    ).toEqual({
+      customDirection: 'jewel sockets and quiet prestige',
+      preservePalette: true,
+      preserveSilhouette: true,
+      styleText: 'painted inventory render',
+      variantFamily: 'rarity',
+      variantIntensity: 74,
+      variantOptions: [
+        {
+          customSetting: 'Keep the finish noble and restrained.',
+          preset: 'rare',
+        },
+      ],
+      variantPreset: 'epic',
+    })
+  })
+
+  it('normalizes ai-backed idea responses and falls back when the payload is incomplete', () => {
+    expect(
+      normalizeVariantForgeIdeaState(
+        {
+          ideas: ['wind-carved fuller', 'drifting pollen halo', 'seedpod pommel wrap', 'thorn-vein filigree'],
+          source: 'ai',
+        },
+        'elemental',
+      ),
+    ).toEqual({
+      ideas: [
+        'wind-carved fuller',
+        'drifting pollen halo',
+        'seedpod pommel wrap',
+        'thorn-vein filigree',
+      ],
+      loading: false,
+      source: 'ai',
+    })
+
+    const fallbackState = normalizeVariantForgeIdeaState(
+      {
+        ideas: ['wind-carved fuller', 'drifting pollen halo'],
+        source: 'ai',
+      },
+      'elemental',
+    )
+
+    expect(fallbackState.source).toBe('fallback')
+    expect(fallbackState.loading).toBe(false)
+    expect(fallbackState.ideas).toHaveLength(4)
+    fallbackState.ideas.forEach((idea) => {
+      expect(getVariantForgeIdeaOptions('elemental')).toContain(idea)
+    })
   })
 })

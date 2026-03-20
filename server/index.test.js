@@ -136,6 +136,22 @@ describe('API hardening', () => {
     }
   })
 
+  it('rejects invalid variant forge idea-refresh payloads before attempting generation', async () => {
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/variant-forge-ideas')
+      .send({
+        variantFamily: 'damage',
+        variantPreset: 'legendary',
+      })
+
+    expect(response.status).toBe(400)
+    expect(response.body.error.code).toBe('invalid_request')
+  })
+
   it('rate limits repeated action animator requests', async () => {
     const app = await loadApp({
       ACTION_ANIMATOR_RATE_LIMIT_PER_MINUTE: '1',
