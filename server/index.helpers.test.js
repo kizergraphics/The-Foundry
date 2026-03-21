@@ -25,7 +25,8 @@ describe('action animator server sizing helpers', () => {
     expect(filter).toContain('fps=2')
     expect(filter).toContain('scale=1080:1080')
     expect(filter).toContain('pad=1080:1080')
-    expect(filter).toContain('s=1080x1080')
+    expect(filter).toContain('format=rgba')
+    expect(filter).not.toContain('overlay=')
   })
 
   it('keeps variant forge prompts free of fallback presets when no options are active', () => {

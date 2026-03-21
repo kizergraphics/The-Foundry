@@ -55,7 +55,8 @@ type TextureExpansionInput = {
 
 type AnimatorStripCanvasInput = {
   base64: string
-  canvasSize: number
+  canvasHeight: number
+  canvasWidth: number
   mimeType: 'image/png'
   slotCount: number
   slotSize: number
@@ -220,18 +221,19 @@ export async function normalizeSquareTextureDataUrl(
 export async function buildAnimatorStripCanvasInput(
   source: string | Blob,
   options: {
-    canvasSize?: number
     slotCount?: number
+    slotSize?: number
   } = {},
 ): Promise<AnimatorStripCanvasInput> {
   const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
   const image = await loadImage(blob)
-  const canvasSize = Math.max(256, Math.round(options.canvasSize ?? 1024))
   const slotCount = Math.max(1, Math.round(options.slotCount ?? 4))
-  const slotSize = Math.max(1, Math.floor(canvasSize / slotCount))
+  const slotSize = Math.max(64, Math.round(options.slotSize ?? 256))
+  const canvasWidth = slotSize * slotCount
+  const canvasHeight = slotSize
   const canvas = document.createElement('canvas')
-  canvas.width = canvasSize
-  canvas.height = canvasSize
+  canvas.width = canvasWidth
+  canvas.height = canvasHeight
 
   const context = canvas.getContext('2d')
 
@@ -239,14 +241,14 @@ export async function buildAnimatorStripCanvasInput(
     throw new Error('Canvas rendering is not available in this browser.')
   }
 
-  const slotY = Math.round((canvasSize - slotSize) / 2)
-  const drawScale = Math.min(slotSize / image.naturalWidth, slotSize / image.naturalHeight)
+  const maxSpriteSize = slotSize * 0.88
+  const drawScale = Math.min(maxSpriteSize / image.naturalWidth, maxSpriteSize / image.naturalHeight)
   const drawWidth = Math.max(1, Math.round(image.naturalWidth * drawScale))
   const drawHeight = Math.max(1, Math.round(image.naturalHeight * drawScale))
   const drawX = Math.round((slotSize - drawWidth) / 2)
-  const drawY = slotY + Math.round((slotSize - drawHeight) / 2)
+  const drawY = Math.round((slotSize - drawHeight) / 2)
 
-  context.clearRect(0, 0, canvasSize, canvasSize)
+  context.clearRect(0, 0, canvasWidth, canvasHeight)
   context.imageSmoothingEnabled = false
   context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
 
@@ -254,7 +256,8 @@ export async function buildAnimatorStripCanvasInput(
 
   return {
     base64: await fileToBase64(outputBlob),
-    canvasSize,
+    canvasHeight,
+    canvasWidth,
     mimeType: 'image/png',
     slotCount,
     slotSize,
@@ -310,16 +313,15 @@ export async function sliceSpriteSheetFrames(
 export async function sliceAnimatorStripSlots(
   source: string | Blob,
   slotCount: number,
-  canvasSize = 1024,
 ): Promise<string[]> {
   const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
   const image = await loadImage(blob)
   const safeSlotCount = Math.max(1, Math.round(slotCount))
-  const slotSize = Math.max(1, Math.floor(canvasSize / safeSlotCount))
-  const slotY = Math.round((canvasSize - slotSize) / 2)
+  const slotWidth = Math.max(1, Math.floor(image.naturalWidth / safeSlotCount))
+  const slotHeight = image.naturalHeight
   const outputCanvas = document.createElement('canvas')
-  outputCanvas.width = slotSize
-  outputCanvas.height = slotSize
+  outputCanvas.width = slotWidth
+  outputCanvas.height = slotHeight
   const outputContext = outputCanvas.getContext('2d')
 
   if (!outputContext) {
@@ -327,17 +329,17 @@ export async function sliceAnimatorStripSlots(
   }
 
   return Promise.all(Array.from({ length: safeSlotCount }, async (_, index) => {
-    outputContext.clearRect(0, 0, slotSize, slotSize)
+    outputContext.clearRect(0, 0, slotWidth, slotHeight)
     outputContext.drawImage(
       image,
-      index * slotSize,
-      slotY,
-      slotSize,
-      slotSize,
+      index * slotWidth,
+      0,
+      slotWidth,
+      slotHeight,
       0,
       0,
-      slotSize,
-      slotSize,
+      slotWidth,
+      slotHeight,
     )
 
     return blobToDataUrl(await canvasToBlob(outputCanvas, 'image/png'))

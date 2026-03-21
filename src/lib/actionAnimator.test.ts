@@ -36,6 +36,7 @@ describe('buildActionAnimatorPrompt', () => {
   it('builds a strip-oriented prompt when the sprite pipeline is selected', () => {
     const prompt = buildActionAnimatorPrompt({
       ...initialState.actionAnimator,
+      actionType: 'attack',
       frameCount: 12,
       normalizedSize: 512,
       pipeline: 'sprite-strip',
@@ -44,6 +45,8 @@ describe('buildActionAnimatorPrompt', () => {
     expect(prompt).toContain('seed frame')
     expect(prompt).toContain('12 total frames')
     expect(prompt).toContain('512 x 512')
+    expect(prompt).toContain('anticipation')
+    expect(prompt).toContain('small safety margin')
   })
 
   it('keeps the Veo green-screen prompt for 512 video mode', () => {
@@ -60,12 +63,14 @@ describe('buildActionAnimatorPrompt', () => {
   it('keeps the Veo green-screen prompt for 1080 video mode', () => {
     const prompt = buildActionAnimatorPrompt({
       ...initialState.actionAnimator,
+      actionType: 'attack',
       normalizedSize: 1080,
       pipeline: 'veo-video',
     })
 
     expect(prompt).toContain('#00FF00')
     expect(prompt).toContain('character in the image')
+    expect(prompt).toContain('occupying most of the frame height')
   })
 })
 

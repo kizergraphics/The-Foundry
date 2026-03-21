@@ -3,6 +3,7 @@ import {
   createDataUrl,
   fileToBase64,
   normalizeAnimatorSpriteFrames,
+  sliceSpriteSheetFrames,
   sliceAnimatorStripSlots,
 } from './browser'
 import type {
@@ -132,8 +133,8 @@ async function buildActionAnimatorStripChunkRequest(
   }
 
   const canvasImage = await buildAnimatorStripCanvasInput(anchorSource, {
-    canvasSize: 1024,
     slotCount: 4,
+    slotSize: 256,
   })
   const anchorBase64 = anchorSource.startsWith('data:')
     ? anchorSource.slice(anchorSource.indexOf(',') + 1)
@@ -189,16 +190,30 @@ async function generateVeoActionAnimator({
 }) {
   const request = await buildActionAnimatorVideoRequest(state, modelId)
   const payload = await postActionAnimatorRequest('/api/action-animator', request)
+  const normalizedResults = await Promise.all(
+    payload.images.map(async (image) => {
+      const rawSpriteSheetDataUrl = createDataUrl(image.data, image.mimeType)
+      const rawFrames = await sliceSpriteSheetFrames(rawSpriteSheetDataUrl, state.frameCount)
+      const normalizedFrames = await normalizeAnimatorSpriteFrames(rawFrames, {
+        seedFrame: rawFrames[0] ?? rawSpriteSheetDataUrl,
+        targetSize: state.normalizedSize,
+      })
+
+      return {
+        dataUrl: normalizedFrames.spriteSheetDataUrl,
+        id: image.id,
+        mimeType: 'image/png',
+        text:
+          image.text ??
+          `Generated ${state.frameCount} normalized frames at ${state.normalizedSize} x ${state.normalizedSize}.`,
+      } satisfies ForgeResult
+    }),
+  )
 
   return {
     model: payload.model ?? null,
     prompt: payload.prompt ?? null,
-    results: payload.images.map<ForgeResult>((image) => ({
-      dataUrl: createDataUrl(image.data, image.mimeType),
-      id: image.id,
-      mimeType: image.mimeType,
-      text: image.text,
-    })),
+    results: normalizedResults,
   }
 }
 
@@ -299,12 +314,15 @@ function buildActionAnimatorStripPrompt(state: ActionAnimatorState) {
     `${state.frameCount} total frames with chunked four-slot strip generation.`,
     `Normalize the final output to ${state.normalizedSize} x ${state.normalizedSize} frames.`,
     `Preview target playback rate: ${state.fps} fps.`,
+    describeActionAnimatorMotion(state.actionType),
     state.actionType !== 'custom' && directionPrompt
       ? `Additional direction: ${directionPrompt}.`
       : null,
     'Preserve the exact face, palette, silhouette, proportions, outfit shapes, and side-view orientation from the seed frame.',
+    'Push clear readable pose changes from frame to frame instead of near-static micro-movement.',
+    'Keep the character large inside each slot, with only a small safety margin for motion.',
     'Do not introduce props, scenery, floor planes, glow, haze, labels, or UI.',
-    'Keep the image transparent outside the reserved frame slots.',
+    'Keep the image transparent outside the reserved frame slots and avoid poster-style empty margins.',
   ]
     .filter(Boolean)
     .join(' ')
@@ -324,16 +342,36 @@ function buildActionAnimatorVideoPrompt(state: ActionAnimatorState) {
     'Side-profile view.',
     `${state.frameCount} frames of fluid motion.`,
     `Target playback rate: ${state.fps} fps.`,
+    describeActionAnimatorMotion(state.actionType),
     state.actionType !== 'custom' && directionPrompt
       ? `Additional direction: ${directionPrompt}.`
       : null,
     'Preserve the exact character design from the reference image with no new accessories, materials, texture detail, props, or costume changes.',
     'Do not alter the face, proportions, silhouette, colors, clothing shapes, or surface details from the reference image.',
     'Animate the existing character only. Do not redesign or embellish the subject.',
+    'Keep the camera locked and the character occupying most of the frame height with consistent scale.',
     'Isolated on a solid #00FF00 green screen background.',
     'The background must remain perfectly identical in every frame.',
     'Do not introduce white backdrops, dark green flicker, gradients, shadows, floor planes, or background changes.',
   ]
     .filter(Boolean)
     .join(' ')
+}
+
+function describeActionAnimatorMotion(actionType: ActionAnimatorActionType) {
+  switch (actionType) {
+    case 'attack':
+      return 'Stage one complete attack cycle with anticipation, a decisive strike, follow-through, and recovery so adjacent frames show obvious motion.'
+    case 'jump':
+      return 'Stage one complete jump with crouch, launch, airborne apex, and landing, making each phase visually distinct.'
+    case 'run':
+      return 'Emphasize aggressive forward lean, arm swing, leg extension, and airborne stride changes for a readable run cycle.'
+    case 'walk':
+      return 'Emphasize alternating contact, passing, and recoil poses so the walk cycle has clear readable spacing.'
+    case 'idle':
+      return 'Keep the idle subtle but still readable, with weight shift, cloth drag, and arm movement that changes the silhouette.'
+    case 'custom':
+    default:
+      return 'Show one complete readable action arc with strong silhouette changes and no duplicate adjacent poses.'
+  }
 }

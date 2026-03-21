@@ -2807,7 +2807,6 @@ async function generateAnimatorSpriteSheet({
   const videoBuffer = await readGeneratedVideo(ai, video)
   const spriteSheetBase64 = await createSpriteSheetFromVideo({
     frameSize: normalizedFrameSize,
-    image,
     frameCount,
     videoBuffer,
   })
@@ -2815,7 +2814,7 @@ async function generateAnimatorSpriteSheet({
   return {
     note:
       `Generated ${frameCount} frame sprite sheet from Veo 3.1 Fast with a target playback rate of ${fps} fps at ${normalizedFrameSize} x ${normalizedFrameSize} per frame. ` +
-      'Frame 1 is locked to the reference image, with feet, lighting, centering, and background constraints injected server-side.',
+      'Frames are sampled directly from the generated clip with feet, lighting, centering, and background constraints injected server-side.',
     prompt: normalizedPrompt,
     spriteSheetBase64,
   }
@@ -2901,9 +2900,13 @@ function buildAnimatorPrompt({ actionType, fps, frameCount, prompt }) {
   return [
     basePrompt,
     `Target playback rate: ${normalizedFps} fps.`,
+    describeAnimatorMotion(normalizedAction),
+    'Stage one complete action cycle across the clip instead of holding on a single pose.',
+    'Make each adjacent frame visibly different with readable silhouette changes.',
     'Keep the feet on the same horizontal plane with no vertical drifting.',
     'Keep the lighting constant across all frames.',
     'Keep the character centered within each frame to prevent jitter.',
+    'Keep the camera locked and the character occupying most of the frame height with consistent scale.',
     'Preserve the exact character design from the reference image with no new accessories, materials, texture detail, props, or costume changes.',
     'Do not alter the face, proportions, silhouette, colors, clothing shapes, or surface details from the reference image.',
     'Animate the existing character only. Do not redesign or embellish the subject.',
@@ -2928,12 +2931,15 @@ function buildAnimatorStripPrompt({ actionType, chunkIndex, fps, frameCount, pro
   return [
     basePrompt,
     `Chunk index: ${chunkIndex + 1}.`,
-    `Layout: exactly ${normalizedFrameCount} equal square frame slots in one horizontal row across a 1024 x 1024 transparent canvas.`,
+    `Layout: exactly ${normalizedFrameCount} equal square frame slots in one tight horizontal row that uses the full canvas height with no extra top or bottom margin.`,
     `Target playback rate: ${normalizedFps} fps.`,
     'Keep the leftmost slot unchanged as the chunk starting frame.',
     'Continue the motion naturally across the remaining slots.',
+    describeAnimatorMotion(normalizedAction),
+    'Push clear readable pose changes from slot to slot instead of near-static micro-movement.',
+    'Keep the character large inside each slot, with only a small safety margin for motion.',
     'Preserve the exact face, silhouette, palette, proportions, clothing shapes, and side-profile orientation from the anchor image.',
-    'Keep wide transparent empty space outside the slot row.',
+    'Do not waste canvas space with poster-style empty margins or centered card layouts.',
     'Do not add props, scenery, floor, shadows outside the sprite, glow, labels, poster layout, or UI.',
     'Return a crisp pixel-art sprite strip candidate, not a concept illustration.',
   ].join(' ')
@@ -3004,60 +3010,38 @@ async function readGeneratedVideo(ai, video) {
   throw new Error('Veo returned no downloadable video bytes for the animation request.')
 }
 
-async function createSpriteSheetFromVideo({ frameCount, frameSize, image, videoBuffer }) {
+async function createSpriteSheetFromVideo({ frameCount, frameSize, videoBuffer }) {
   if (!ffmpegPath) {
     throw new Error('ffmpeg-static is unavailable, so sprite sheet extraction cannot run.')
   }
 
   const safeFrameCount = clampAnimatorFrameCount(frameCount)
   const safeFrameSize = normalizeActionAnimatorFrameSize(frameSize)
-  const extractedVideoFrameCount = Math.max(0, safeFrameCount - 1)
+  const extractedVideoFrameCount = Math.max(1, safeFrameCount)
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-action-animator-'))
-  const referenceImagePath = path.join(
-    tempDir,
-    `reference-source${getAnimatorImageExtension(image?.mimeType)}`,
-  )
   const videoPath = path.join(tempDir, 'source.mp4')
   const framePattern = path.join(tempDir, 'frame-%02d.png')
   const spriteSheetPath = path.join(tempDir, 'sprite-sheet.png')
 
   try {
-    await fs.writeFile(referenceImagePath, Buffer.from(image.data, 'base64'))
     await fs.writeFile(videoPath, videoBuffer)
     await runFfmpeg([
       '-y',
       '-i',
-      referenceImagePath,
+      videoPath,
       '-filter_complex',
       buildAnimatorMatteFilter({
         frameSizePx: safeFrameSize,
+        sampleFps: extractedVideoFrameCount / actionAnimatorDurationSeconds,
       }),
       '-map',
       '[out]',
       '-frames:v',
+      String(extractedVideoFrameCount),
+      '-start_number',
       '1',
-      path.join(tempDir, 'frame-01.png'),
+      framePattern,
     ])
-
-    if (extractedVideoFrameCount > 0) {
-      await runFfmpeg([
-        '-y',
-        '-i',
-        videoPath,
-        '-filter_complex',
-        buildAnimatorMatteFilter({
-          frameSizePx: safeFrameSize,
-          sampleFps: extractedVideoFrameCount / actionAnimatorDurationSeconds,
-        }),
-        '-map',
-        '[out]',
-        '-frames:v',
-        String(extractedVideoFrameCount),
-        '-start_number',
-        '2',
-        framePattern,
-      ])
-    }
 
     const frameInputs = Array.from({ length: safeFrameCount }, (_, index) => [
       '-i',
@@ -3094,29 +3078,14 @@ export function buildAnimatorMatteFilter(options = {}) {
     `pad=${frameSizePx}:${frameSizePx}:(ow-iw)/2:(oh-ih)/2:color=${actionAnimatorBackgroundColor}`,
     `chromakey=${actionAnimatorBackgroundColor}:0.22:0.06`,
     'colorkey=0xFFFFFF:0.18:0.05',
+    'format=rgba',
   )
 
-  return [
-    `[0:v]${filterSteps.join(',')}[subject]`,
-    `color=c=${actionAnimatorBackgroundColor}:s=${frameSizePx}x${frameSizePx}[background]`,
-    '[background][subject]overlay=format=auto,format=rgba[out]',
-  ].join(';')
+  return `[0:v]${filterSteps.join(',')}[out]`
 }
 
 export function normalizeActionAnimatorFrameSize(value) {
   return Number(value) === 1080 ? 1080 : defaultActionAnimatorFrameSizePx
-}
-
-function getAnimatorImageExtension(mimeType) {
-  if (mimeType === 'image/jpeg') {
-    return '.jpg'
-  }
-
-  if (mimeType === 'image/webp') {
-    return '.webp'
-  }
-
-  return '.png'
 }
 
 function runFfmpeg(args) {
@@ -3176,6 +3145,23 @@ function clampActionAnimatorDurationSeconds(durationSeconds) {
     minActionAnimatorDurationSeconds,
     Math.min(maxActionAnimatorDurationSeconds, Math.round(numericValue)),
   )
+}
+
+function describeAnimatorMotion(actionType) {
+  switch (actionType) {
+    case 'attack':
+      return 'Stage one complete attack cycle with anticipation, a decisive strike, follow-through, and recovery so adjacent frames show obvious motion.'
+    case 'jump':
+      return 'Stage one complete jump with crouch, launch, airborne apex, and landing, making each phase visually distinct.'
+    case 'run':
+      return 'Emphasize aggressive forward lean, arm swing, leg extension, and airborne stride changes for a readable run cycle.'
+    case 'walk':
+      return 'Emphasize alternating contact, passing, and recoil poses so the walk cycle has clear readable spacing.'
+    case 'idle':
+      return 'Keep the idle subtle but still readable, with weight shift, cloth drag, and arm movement that changes the silhouette.'
+    default:
+      return 'Show one complete readable action arc with strong silhouette changes and no duplicate adjacent poses.'
+  }
 }
 
 function normalizeLootRarity(rarity) {
