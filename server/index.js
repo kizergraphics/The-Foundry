@@ -101,11 +101,19 @@ const forgeGenerationTimeoutMs = clampTimeoutMs(
 )
 const textureLabMaxParallelRequests = Math.max(
   1,
-  Math.min(Math.round(Number(process.env.TEXTURE_LAB_MAX_PARALLEL_REQUESTS ?? 1)), 2),
+  Math.min(Math.round(Number(process.env.TEXTURE_LAB_MAX_PARALLEL_REQUESTS ?? 2)), 2),
 )
 const textureLabGenerationTimeoutMs = clampTimeoutMs(
   Number(process.env.TEXTURE_LAB_GENERATION_TIMEOUT_MS ?? 30000),
   30000,
+)
+const textureLabBatchStartStaggerMs = clampNonNegativeInteger(
+  Number(process.env.TEXTURE_LAB_BATCH_START_STAGGER_MS ?? 1500),
+  1500,
+)
+const textureLabRetryJitterMs = clampNonNegativeInteger(
+  Number(process.env.TEXTURE_LAB_RETRY_JITTER_MS ?? 800),
+  800,
 )
 const variantForgeGenerationTimeoutMs = clampTimeoutMs(
   Number(process.env.VARIANT_FORGE_GENERATION_TIMEOUT_MS ?? 45000),
@@ -651,6 +659,7 @@ app.post(
     const attemptBatchSlotGeneration = async ({
       phase,
       slotIndex,
+      workerStartDelayMs = 0,
       workerLabel,
     }) => {
       const slotErrors = []
@@ -669,6 +678,7 @@ app.post(
             attempt,
             phase,
             slot: slotIndex + 1,
+            startupDelayMs: workerStartDelayMs,
             useModalities,
             worker: workerLabel,
           })
@@ -773,23 +783,25 @@ app.post(
             }
           }
 
-          const retryAfterSeconds =
-            normalizedError.body?.error?.retryAfterSeconds
-          const retryAfterDelay =
-            typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
-              ? retryAfterSeconds * 1000
-              : forgeBatchRetryDelayMs
+          const retryAfterSeconds = normalizedError.body?.error?.retryAfterSeconds
+          const retryDelay = resolveForgeRetryDelay({
+            mode,
+            retryAfterSeconds,
+            workflow: requestedWorkflow,
+          })
           logServerEvent(batchRequestId, 'slot attempt retrying', {
             attempt,
+            baseDelayMs: retryDelay.baseDelayMs,
             code: normalizedError.body?.error?.code ?? null,
-            delayMs: retryAfterDelay,
+            delayMs: retryDelay.effectiveDelayMs,
+            jitterMs: retryDelay.jitterMs,
             message: normalizedError.body?.error?.message ?? null,
             phase,
             slot: slotIndex + 1,
             status: normalizedError.status,
             worker: workerLabel,
           })
-          await sleep(retryAfterDelay)
+          await sleep(retryDelay.effectiveDelayMs)
         }
       }
 
@@ -807,11 +819,20 @@ app.post(
           length: batchWorkerCount,
         },
         async (_, workerIndex) => {
+          const workerStartDelayMs = resolveForgeWorkerStartDelayMs(
+            mode,
+            requestedWorkflow,
+            workerIndex,
+          )
           const workerImages = []
           const workerSuccessfulRuns = []
           const workerErrors = []
           const workerNoImageTexts = []
           let fatalError = null
+
+          if (workerStartDelayMs > 0) {
+            await sleep(workerStartDelayMs)
+          }
 
           for (
             let slotIndex = workerIndex;
@@ -821,6 +842,7 @@ app.post(
             const slotResult = await attemptBatchSlotGeneration({
               phase: 'initial',
               slotIndex,
+              workerStartDelayMs,
               workerLabel: workerIndex + 1,
             })
 
@@ -885,6 +907,7 @@ app.post(
           const slotResult = await attemptBatchSlotGeneration({
             phase: `recovery-${recoveryPass}`,
             slotIndex,
+            workerStartDelayMs: 0,
             workerLabel: `recovery-${recoveryPass}`,
           })
 
@@ -2319,12 +2342,54 @@ function resolveForgeAttemptPolicy(mode, workflow = 'generate') {
   }
 }
 
-function resolveForgeBatchWorkerCount(mode, workflow = 'generate', candidateCount = 1) {
+export function resolveForgeBatchWorkerCount(
+  mode,
+  workflow = 'generate',
+  candidateCount = 1,
+) {
   if (mode === 'texture-lab' && workflow === 'generate') {
     return Math.min(candidateCount, textureLabMaxParallelRequests)
   }
 
   return Math.min(candidateCount, forgeBatchMaxParallelRequests)
+}
+
+export function resolveForgeWorkerStartDelayMs(
+  mode,
+  workflow = 'generate',
+  workerIndex = 0,
+) {
+  if (mode === 'texture-lab' && workflow === 'generate' && workerIndex > 0) {
+    return workerIndex * textureLabBatchStartStaggerMs
+  }
+
+  return 0
+}
+
+export function resolveForgeRetryDelay({
+  mode,
+  randomValue = Math.random(),
+  retryAfterSeconds,
+  workflow = 'generate',
+}) {
+  const baseDelayMs =
+    typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
+      ? retryAfterSeconds * 1000
+      : forgeBatchRetryDelayMs
+  const shouldApplyTextureLabJitter = mode === 'texture-lab' && workflow === 'generate'
+  const normalizedRandomValue =
+    Number.isFinite(randomValue) && randomValue >= 0
+      ? Math.min(randomValue, 0.999999999)
+      : 0
+  const jitterMs = shouldApplyTextureLabJitter
+    ? Math.floor(normalizedRandomValue * (textureLabRetryJitterMs + 1))
+    : 0
+
+  return {
+    baseDelayMs,
+    effectiveDelayMs: baseDelayMs + jitterMs,
+    jitterMs,
+  }
 }
 
 function buildVfxForgePrompt({ frameCount, intensity, prompt, projectileType, styleText }) {
@@ -2971,6 +3036,14 @@ function clampTimeoutMs(value, fallback) {
   }
 
   return Math.max(1000, Math.round(value))
+}
+
+function clampNonNegativeInteger(value, fallback) {
+  if (!Number.isFinite(value) || value < 0) {
+    return fallback
+  }
+
+  return Math.round(value)
 }
 
 function logServerEvent(requestId, message, details) {

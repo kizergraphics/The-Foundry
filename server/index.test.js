@@ -21,6 +21,11 @@ vi.mock('@google/genai/node', () => {
 })
 
 async function loadApp(env = {}) {
+  const module = await loadServerModule(env)
+  return module.app
+}
+
+async function loadServerModule(env = {}) {
   vi.resetModules()
   process.env = {
     ...originalEnv,
@@ -28,8 +33,7 @@ async function loadApp(env = {}) {
     ...env,
   }
 
-  const module = await import('./index.js')
-  return module.app
+  return import('./index.js')
 }
 
 afterEach(() => {
@@ -71,6 +75,135 @@ function buildImageGeneration(base64, mimeType = 'image/png') {
     },
   }
 }
+
+describe('Texture Lab batch scheduling', () => {
+  it('caps Texture Lab worker count at 2 by default', async () => {
+    const serverModule = await loadServerModule({
+      TEXTURE_LAB_MAX_PARALLEL_REQUESTS: '9',
+    })
+
+    expect(serverModule.resolveForgeBatchWorkerCount('texture-lab', 'generate', 1)).toBe(1)
+    expect(serverModule.resolveForgeBatchWorkerCount('texture-lab', 'generate', 4)).toBe(2)
+    expect(serverModule.resolveForgeBatchWorkerCount('armory', 'generate', 4)).toBe(4)
+  })
+
+  it('applies startup delay only to Texture Lab workers after the first slot', async () => {
+    const serverModule = await loadServerModule({
+      TEXTURE_LAB_BATCH_START_STAGGER_MS: '1500',
+    })
+
+    expect(serverModule.resolveForgeWorkerStartDelayMs('texture-lab', 'generate', 0)).toBe(0)
+    expect(serverModule.resolveForgeWorkerStartDelayMs('texture-lab', 'generate', 1)).toBe(1500)
+    expect(serverModule.resolveForgeWorkerStartDelayMs('texture-lab', 'generate', 2)).toBe(3000)
+    expect(serverModule.resolveForgeWorkerStartDelayMs('armory', 'generate', 1)).toBe(0)
+  })
+
+  it('adds bounded retry jitter only for Texture Lab generate requests', async () => {
+    const serverModule = await loadServerModule({
+      TEXTURE_LAB_RETRY_JITTER_MS: '800',
+    })
+
+    expect(
+      serverModule.resolveForgeRetryDelay({
+        mode: 'texture-lab',
+        workflow: 'generate',
+        randomValue: 0,
+      }),
+    ).toEqual({
+      baseDelayMs: 1200,
+      effectiveDelayMs: 1200,
+      jitterMs: 0,
+    })
+
+    const maxJitterDelay = serverModule.resolveForgeRetryDelay({
+      mode: 'texture-lab',
+      workflow: 'generate',
+      randomValue: 0.9999,
+      retryAfterSeconds: 3,
+    })
+    expect(maxJitterDelay.baseDelayMs).toBe(3000)
+    expect(maxJitterDelay.jitterMs).toBeGreaterThanOrEqual(0)
+    expect(maxJitterDelay.jitterMs).toBeLessThanOrEqual(800)
+    expect(maxJitterDelay.effectiveDelayMs).toBeGreaterThanOrEqual(3000)
+    expect(maxJitterDelay.effectiveDelayMs).toBeLessThanOrEqual(3800)
+
+    expect(
+      serverModule.resolveForgeRetryDelay({
+        mode: 'armory',
+        workflow: 'generate',
+        randomValue: 0.9999,
+        retryAfterSeconds: 3,
+      }),
+    ).toEqual({
+      baseDelayMs: 3000,
+      effectiveDelayMs: 3000,
+      jitterMs: 0,
+    })
+  })
+
+  it('stagger-starts initial Texture Lab worker requests without affecting result order', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateContent.mockReset()
+    const generatedBase64 = await createPngBase64(1, 1, [40, 80, 120])
+    const callTimes = []
+
+    __mock.generateContent.mockImplementation(async () => {
+      callTimes.push(Date.now())
+      return buildImageGeneration(generatedBase64)
+    })
+
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+      TEXTURE_LAB_BATCH_START_STAGGER_MS: '25',
+      TEXTURE_LAB_MAX_PARALLEL_REQUESTS: '2',
+    })
+
+    const response = await request(app)
+      .post('/api/forge')
+      .send({
+        generationCount: 2,
+        mode: 'texture-lab',
+        prompt: 'weathered basalt floor tile',
+        workflow: 'generate',
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body.images).toHaveLength(2)
+    expect(callTimes).toHaveLength(2)
+    expect(callTimes[1] - callTimes[0]).toBeGreaterThanOrEqual(20)
+  })
+
+  it('does not apply the Texture Lab startup stagger to other forge modes', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateContent.mockReset()
+    const generatedBase64 = await createPngBase64(1, 1, [90, 60, 30])
+    const callTimes = []
+
+    __mock.generateContent.mockImplementation(async () => {
+      callTimes.push(Date.now())
+      return buildImageGeneration(generatedBase64)
+    })
+
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+      TEXTURE_LAB_BATCH_START_STAGGER_MS: '40',
+    })
+
+    const response = await request(app)
+      .post('/api/forge')
+      .send({
+        generationCount: 2,
+        mode: 'armory',
+        prompt: 'iron longsword concept',
+        workflow: 'generate',
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body.images).toHaveLength(2)
+    expect(callTimes).toHaveLength(2)
+    expect(callTimes[1] - callTimes[0]).toBeLessThan(30)
+  })
+})
 
 describe('API hardening', () => {
   it('requires the internal token for usage telemetry when configured', async () => {

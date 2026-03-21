@@ -239,6 +239,8 @@ const textureMaterialMapLabels: Record<TextureMaterialMapKey, string> = {
   roughness: 'Roughness',
 }
 const textureLabClientBatchMaxAttempts = 2
+const textureLabClientBatchMaxParallelSlots = 1
+const textureLabClientInterSlotDelayMs = 250
 const textureLabClientRetryDelayMs = 1200
 const textureLabClientMaxRetryDelayMs = 10000
 
@@ -1038,7 +1040,9 @@ function App() {
     setMaterialPacksByResultId({})
     setRepairingResultId(null)
     setNotice(
-      `Starting ${noticeLabel.toLowerCase()} for ${totalCount} output slots. Finished slots will appear immediately.`,
+      isTextureLabBatch
+        ? `Starting ${noticeLabel.toLowerCase()} for ${totalCount} output slots. Texture Lab batches are queued conservatively so each slot behaves more like a stable single render.`
+        : `Starting ${noticeLabel.toLowerCase()} for ${totalCount} output slots. Finished slots will appear immediately.`,
     )
     setLastResultMode(null)
 
@@ -1046,126 +1050,153 @@ function App() {
       setLastTextureLabRun(runContext)
     }
 
-    const slotEntries = await Promise.all(
-      Array.from({ length: totalCount }, async (_, slotIndex) => {
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const runSlotGeneration = async (slotIndex: number) => {
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        updateForgeSlot(slotIndex, (slot) => ({
+          ...slot,
+          attempt,
+          detail:
+            attempt === 1
+              ? 'Generating with Gemini.'
+              : `Retrying after the previous attempt stalled. Attempt ${attempt} of ${maxAttempts}.`,
+          error: null,
+          status: attempt === 1 ? 'generating' : 'retrying',
+        }))
+
+        try {
+          const { ok, payload } = await postForgeRequest({
+            ...baseRequest,
+            generationCount: 1,
+          })
+
+          if (!ok || !payload?.images?.length) {
+            throw toForgeError(payload?.error)
+          }
+
+          latestServerModel = payload.model ?? latestServerModel
+          latestServerPrompt = payload.prompt ?? latestServerPrompt ?? nextServerPromptFallback
+
           updateForgeSlot(slotIndex, (slot) => ({
             ...slot,
-            attempt,
             detail:
-              attempt === 1
-                ? 'Generating with Gemini.'
-                : `Retrying after the previous attempt stalled. Attempt ${attempt} of ${maxAttempts}.`,
-            error: null,
-            status: attempt === 1 ? 'generating' : 'retrying',
+              isTextureLabBatch
+                ? 'Normalizing the texture into the final square output.'
+                : 'Finalizing the image candidate.',
+            status: 'finalizing',
           }))
 
-          try {
-            const { ok, payload } = await postForgeRequest({
-              ...baseRequest,
-              generationCount: 1,
-            })
+          const [rawResult] = normalizeForgeApiResults(payload)
+          const [nextResult] =
+            isTextureLabBatch
+              ? await normalizeTextureLabResults(
+                  [rawResult],
+                  state.textureLab.expansionTargetSize,
+                )
+              : [rawResult]
+          const nextSlotResult = {
+            ...nextResult,
+            id: `slot-${slotIndex + 1}-${nextResult.id}`,
+          }
 
-            if (!ok || !payload?.images?.length) {
-              throw toForgeError(payload?.error)
-            }
+          updateForgeSlot(slotIndex, (slot) => ({
+            ...slot,
+            detail: 'Ready.',
+            error: null,
+            result: nextSlotResult,
+            status: 'ready',
+          }))
+          registerSuccessfulApiCall(payload.model ?? null)
 
-            latestServerModel = payload.model ?? latestServerModel
-            latestServerPrompt = payload.prompt ?? latestServerPrompt ?? nextServerPromptFallback
+          return {
+            error: null,
+            result: nextSlotResult,
+          }
+        } catch (slotError) {
+          const normalizedError = toForgeError(slotError)
+          const canRetry =
+            attempt < maxAttempts &&
+            (normalizedError.code === 'quota_exceeded' ||
+              normalizedError.code === 'request_timeout' ||
+              (isTextureLabBatch && normalizedError.code === 'model_output_incompatible'))
 
+          if (!canRetry) {
             updateForgeSlot(slotIndex, (slot) => ({
               ...slot,
-              detail:
-                isTextureLabBatch
-                  ? 'Normalizing the texture into the final square output.'
-                  : 'Finalizing the image candidate.',
-              status: 'finalizing',
+              detail: normalizedError.message,
+              error: normalizedError,
+              status: 'failed',
             }))
-
-            const [rawResult] = normalizeForgeApiResults(payload)
-            const [nextResult] =
-              isTextureLabBatch
-                ? await normalizeTextureLabResults(
-                    [rawResult],
-                    state.textureLab.expansionTargetSize,
-                  )
-                : [rawResult]
-            const nextSlotResult = {
-              ...nextResult,
-              id: `slot-${slotIndex + 1}-${nextResult.id}`,
-            }
-
-            updateForgeSlot(slotIndex, (slot) => ({
-              ...slot,
-              detail: 'Ready.',
-              error: null,
-              result: nextSlotResult,
-              status: 'ready',
-            }))
-            registerSuccessfulApiCall(payload.model ?? null)
 
             return {
-              error: null,
-              result: nextSlotResult,
-            }
-          } catch (slotError) {
-            const normalizedError = toForgeError(slotError)
-            const canRetry =
-              attempt < maxAttempts &&
-              (normalizedError.code === 'quota_exceeded' ||
-                normalizedError.code === 'request_timeout')
-
-            if (!canRetry) {
-              updateForgeSlot(slotIndex, (slot) => ({
-                ...slot,
-                detail: normalizedError.message,
-                error: normalizedError,
-                status: 'failed',
-              }))
-
-              return {
-                error: normalizedError,
-                result: null,
-              }
-            }
-
-            const retryDelayMs =
-              normalizedError.code === 'quota_exceeded'
-                ? Math.min(
-                    Math.max(
-                      (normalizedError.retryAfterSeconds ?? 1) * 1000,
-                      textureLabClientRetryDelayMs,
-                    ),
-                    textureLabClientMaxRetryDelayMs,
-                  )
-                : textureLabClientRetryDelayMs
-
-            updateForgeSlot(slotIndex, (slot) => ({
-              ...slot,
-              detail:
-                normalizedError.code === 'quota_exceeded'
-                  ? `Gemini rate-limited this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
-                  : `Gemini timed out on this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`,
               error: normalizedError,
-              status:
-                normalizedError.code === 'quota_exceeded'
-                  ? 'rate-limited'
-                  : 'retrying',
-            }))
-
-            await sleep(retryDelayMs)
+              result: null,
+            }
           }
-        }
 
-        return {
-          error: {
-            message: 'This output slot did not complete.',
-            title: 'Slot Failed',
-          } satisfies ForgeErrorInfo,
-          result: null,
+          const retryDelayMs =
+            normalizedError.code === 'quota_exceeded'
+              ? Math.min(
+                  Math.max(
+                    (normalizedError.retryAfterSeconds ?? 1) * 1000,
+                    textureLabClientRetryDelayMs,
+                  ),
+                  textureLabClientMaxRetryDelayMs,
+                )
+              : textureLabClientRetryDelayMs
+
+          updateForgeSlot(slotIndex, (slot) => ({
+            ...slot,
+            detail:
+              normalizedError.code === 'quota_exceeded'
+                ? `Gemini rate-limited this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
+                : normalizedError.code === 'model_output_incompatible'
+                  ? `Gemini returned no image for this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
+                  : `Gemini timed out on this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`,
+            error: normalizedError,
+            status:
+              normalizedError.code === 'quota_exceeded'
+                ? 'rate-limited'
+                : 'retrying',
+          }))
+
+          await sleep(retryDelayMs)
         }
-      }),
-    )
+      }
+
+      return {
+        error: {
+          message: 'This output slot did not complete.',
+          title: 'Slot Failed',
+        } satisfies ForgeErrorInfo,
+        result: null,
+      }
+    }
+
+    const runTextureLabBatch = async () => {
+      const slotEntries = []
+
+      for (let slotIndex = 0; slotIndex < totalCount; slotIndex += 1) {
+        slotEntries.push(await runSlotGeneration(slotIndex))
+
+        const shouldPauseBetweenSlots =
+          slotIndex < totalCount - 1 &&
+          (slotIndex + 1) % textureLabClientBatchMaxParallelSlots === 0
+
+        if (shouldPauseBetweenSlots) {
+          await sleep(textureLabClientInterSlotDelayMs)
+        }
+      }
+
+      return slotEntries
+    }
+
+    const slotEntries = isTextureLabBatch
+      ? await runTextureLabBatch()
+      : await Promise.all(
+          Array.from({ length: totalCount }, async (_, slotIndex) =>
+            runSlotGeneration(slotIndex),
+          ),
+        )
 
     const completedResults = slotEntries.flatMap((entry) => (entry.result ? [entry.result] : []))
     const failedEntries = slotEntries.filter((entry) => entry.error)

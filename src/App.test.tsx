@@ -274,4 +274,90 @@ describe('App Texture Lab material packs', () => {
       expect(downloadDataUrlMock).toHaveBeenCalledTimes(5)
     })
   })
+
+  it('queues Texture Lab batch slots one at a time so later requests wait for earlier slots to finish', async () => {
+    const forgeRequestResolvers: Array<() => void> = []
+    let forgeRequestCount = 0
+
+    fetchMock.mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+
+      if (url === '/api/health') {
+        return buildJsonResponse({ ok: true })
+      }
+
+      if (url === '/api/usage/telemetry') {
+        return buildJsonResponse({
+          generatedAt: new Date('2026-03-19T12:00:00.000Z').toISOString(),
+          rows: [],
+          source: 'local',
+          timeZone: 'America/Los_Angeles',
+        })
+      }
+
+      if (url === '/api/variant-forge-ideas') {
+        return buildJsonResponse({
+          ideas: ['idea-a', 'idea-b', 'idea-c', 'idea-d'],
+          source: 'ai',
+        })
+      }
+
+      if (url === '/api/forge') {
+        forgeRequestCount += 1
+        const requestId = forgeRequestCount
+
+        return new Promise<Response>((resolve) => {
+          forgeRequestResolvers.push(() => {
+            resolve(
+              buildJsonResponse({
+                images: [
+                  {
+                    data: textureBase64,
+                    id: `texture-result-${requestId}`,
+                    mimeType: 'image/png',
+                    text: 'weathered stone floor',
+                  },
+                ],
+                model: 'gemini-3-pro',
+                prompt: 'weathered stone floor',
+              }),
+            )
+          })
+        })
+      }
+
+      return buildJsonResponse({})
+    })
+
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Texture Lab/i }))
+    fireEvent.change(
+      screen.getByPlaceholderText(/Ornate steel longsword/i),
+      { target: { value: 'weathered stone floor' } },
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^FORGE/i }))
+
+    await waitFor(() => {
+      expect(forgeRequestCount).toBe(1)
+    })
+
+    forgeRequestResolvers.shift()?.()
+
+    await waitFor(() => {
+      expect(forgeRequestCount).toBe(2)
+    })
+
+    forgeRequestResolvers.shift()?.()
+
+    await waitFor(() => {
+      expect(forgeRequestCount).toBe(3)
+    })
+
+    forgeRequestResolvers.shift()?.()
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /Generate Maps/i })).toHaveLength(3)
+    })
+  })
 })
