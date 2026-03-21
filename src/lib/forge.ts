@@ -98,9 +98,19 @@ export type CharacterSheetState = {
   referencePrompt: string
 }
 
+export type TextureMaterialMapKey = 'height' | 'normal' | 'roughness' | 'metallic'
+export type TextureMaterialMapStrengthKey =
+  | 'heightStrength'
+  | 'normalStrength'
+  | 'roughnessStrength'
+  | 'metallicStrength'
+
+export type TextureMaterialMapDefaults = Record<TextureMaterialMapStrengthKey, number>
+
 export type TextureLabState = {
   expansionSource: ReferenceAsset | null
   expansionTargetSize: TextureExpansionTargetSize
+  materialMapDefaults: TextureMaterialMapDefaults
   seamlessMode: boolean
   workflow: TextureLabWorkflow
 }
@@ -177,6 +187,11 @@ export type ForgeAction =
   | {
       type: 'set-texture-expansion-target-size'
       size: TextureExpansionTargetSize
+    }
+  | {
+      type: 'set-texture-material-map-default'
+      key: TextureMaterialMapStrengthKey
+      value: number
     }
   | { type: 'set-variant-forge-asset'; asset: ReferenceAsset | null }
   | { type: 'set-variant-forge-family'; family: VariantForgeFamily }
@@ -356,6 +371,12 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
 
 export const actionAnimatorStripNormalizedSizes = [64, 128, 256, 512] as const
 export const actionAnimatorVideoFrameSizes = [512, 1080] as const
+export const defaultTextureMaterialMapDefaults: TextureMaterialMapDefaults = {
+  heightStrength: 60,
+  normalStrength: 60,
+  roughnessStrength: 60,
+  metallicStrength: 60,
+}
 
 function buildVariantForgeOptionState(enabled = false, customSetting = ''): VariantForgeOptionState {
   return {
@@ -440,6 +461,7 @@ export const initialState: ForgeState = {
   textureLab: {
     expansionSource: null,
     expansionTargetSize: 1024,
+    materialMapDefaults: defaultTextureMaterialMapDefaults,
     seamlessMode: false,
     workflow: 'generate',
   },
@@ -600,6 +622,17 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         textureLab: {
           ...state.textureLab,
           expansionTargetSize: clampTextureLabOutputSize(action.size),
+        },
+      }
+    case 'set-texture-material-map-default':
+      return {
+        ...state,
+        textureLab: {
+          ...state.textureLab,
+          materialMapDefaults: {
+            ...state.textureLab.materialMapDefaults,
+            [action.key]: clampIntensity(action.value),
+          },
         },
       }
     case 'set-variant-forge-asset':

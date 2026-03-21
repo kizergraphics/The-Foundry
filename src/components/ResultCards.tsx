@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, type ReactNode } from 'react'
 import {
   Clock3,
   Copy,
@@ -12,15 +12,21 @@ import { PaletteDisplay } from './PaletteDisplay'
 import type { ForgeResult, ModeDefinition } from '../lib/forge'
 
 type PlaceholderCardProps = {
+  detail?: string
   index: number
   mode: ModeDefinition
+  progressTone?: 'neutral' | 'sky' | 'amber' | 'rose'
   state: 'idle' | 'loading'
+  statusLabel?: string
+  title?: string
 }
 
 type GeneratedResultCardProps = {
   canRepairSeams?: boolean
+  children?: ReactNode
   extraActionLabel?: string
   index: number
+  isExpanded?: boolean
   isExtraActionPending?: boolean
   isRepairing?: boolean
   mode: ModeDefinition
@@ -32,13 +38,25 @@ type GeneratedResultCardProps = {
 }
 
 export const PlaceholderCard = memo(function PlaceholderCard({
+  detail,
   index,
   mode,
+  progressTone = 'neutral',
   state,
+  statusLabel,
+  title,
 }: PlaceholderCardProps) {
   const ModeIcon = mode.icon
   const isLoading = state === 'loading'
   const isWideStrip = mode.previewAspectClassName === 'aspect-[8/1]'
+  const toneClassName =
+    progressTone === 'sky'
+      ? 'border-sky-300/20 bg-sky-400/10 text-sky-100'
+      : progressTone === 'amber'
+        ? 'border-amber-300/20 bg-amber-400/10 text-amber-100'
+        : progressTone === 'rose'
+          ? 'border-rose-300/20 bg-rose-400/10 text-rose-100'
+          : 'border-white/10 text-zinc-400'
 
   return (
     <article className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
@@ -47,10 +65,14 @@ export const PlaceholderCard = memo(function PlaceholderCard({
           <p className="font-mono text-[11px] uppercase tracking-[0.34em] text-zinc-500">
             Output {String(index + 1).padStart(2, '0')}
           </p>
-          <p className="mt-1 text-sm font-medium text-zinc-200">{mode.label} slot reserved</p>
+          <p className="mt-1 text-sm font-medium text-zinc-200">
+            {title ?? `${mode.label} slot reserved`}
+          </p>
         </div>
-        <div className="rounded-full border border-white/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-400">
-          {isLoading ? 'Forging' : 'Queued'}
+        <div
+          className={`rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.32em] ${toneClassName}`}
+        >
+          {statusLabel ?? (isLoading ? 'Forging' : 'Queued')}
         </div>
       </div>
 
@@ -113,11 +135,15 @@ export const PlaceholderCard = memo(function PlaceholderCard({
               </div>
             </div>
             <p className="text-center font-mono text-[11px] uppercase tracking-[0.28em] text-zinc-500">
-              {isLoading ? 'Generating with Gemini' : 'Ready for forge pass'}
+              {statusLabel ?? (isLoading ? 'Generating with Gemini' : 'Ready for forge pass')}
             </p>
           </div>
         )}
       </div>
+
+      {detail ? (
+        <p className="mt-4 min-h-[3.75rem] text-sm leading-6 text-zinc-400">{detail}</p>
+      ) : null}
 
       <div className="mt-4 grid grid-cols-2 gap-2">
         <button
@@ -143,8 +169,10 @@ export const PlaceholderCard = memo(function PlaceholderCard({
 
 export const GeneratedResultCard = memo(function GeneratedResultCard({
   canRepairSeams = false,
+  children,
   extraActionLabel,
   index,
+  isExpanded = false,
   isExtraActionPending = false,
   isRepairing = false,
   mode,
@@ -154,15 +182,12 @@ export const GeneratedResultCard = memo(function GeneratedResultCard({
   onExtraAction,
   onRepairSeams,
 }: GeneratedResultCardProps) {
-  const actionColumnClass =
-    canRepairSeams && onExtraAction
-      ? 'grid-cols-4'
-      : canRepairSeams || onExtraAction
-        ? 'grid-cols-3'
-        : 'grid-cols-2'
-
   return (
-    <article className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+    <article
+      className={`min-w-0 rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] ${
+        isExpanded ? 'md:col-span-2 2xl:col-span-4' : ''
+      }`}
+    >
       <div className="flex items-center justify-between">
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.34em] text-zinc-500">
@@ -189,11 +214,11 @@ export const GeneratedResultCard = memo(function GeneratedResultCard({
 
       <PaletteDisplay colors={result.paletteHexes ?? []} />
 
-      <div className={`mt-4 grid gap-2 ${actionColumnClass}`}>
+      <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(132px,1fr))] gap-2">
         <button
           type="button"
           onClick={() => onDownload(result, index)}
-          className="inline-flex items-center justify-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-4 py-2.5 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
+          className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-2.5 text-center text-sm leading-5 text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
         >
           <Download className="size-4" strokeWidth={1.7} />
           Download
@@ -201,7 +226,7 @@ export const GeneratedResultCard = memo(function GeneratedResultCard({
         <button
           type="button"
           onClick={() => void onCopy(result)}
-          className="inline-flex items-center justify-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-4 py-2.5 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
+          className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-2.5 text-center text-sm leading-5 text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
         >
           <Copy className="size-4" strokeWidth={1.7} />
           Copy
@@ -211,7 +236,7 @@ export const GeneratedResultCard = memo(function GeneratedResultCard({
             type="button"
             disabled={isExtraActionPending}
             onClick={() => void onExtraAction(result, index)}
-            className="inline-flex items-center justify-center gap-2 rounded-full border border-sky-300/20 bg-sky-400/10 px-4 py-2.5 text-sm text-sky-50 transition hover:border-sky-300/35 hover:bg-sky-400/16 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-sky-300/20 bg-sky-400/10 px-3 py-2.5 text-center text-sm leading-5 text-sky-50 transition hover:border-sky-300/35 hover:bg-sky-400/16 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Download
               className={`size-4 ${isExtraActionPending ? 'animate-pulse' : ''}`}
@@ -225,7 +250,7 @@ export const GeneratedResultCard = memo(function GeneratedResultCard({
             type="button"
             disabled={isRepairing || !onRepairSeams}
             onClick={() => void onRepairSeams?.(result)}
-            className="inline-flex items-center justify-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-400/10 px-4 py-2.5 text-sm text-emerald-50 transition hover:border-emerald-300/35 hover:bg-emerald-400/16 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-400/10 px-3 py-2.5 text-center text-sm leading-5 text-emerald-50 transition hover:border-emerald-300/35 hover:bg-emerald-400/16 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <RefreshCw
               className={`size-4 ${isRepairing ? 'animate-spin' : ''}`}
@@ -235,6 +260,8 @@ export const GeneratedResultCard = memo(function GeneratedResultCard({
           </button>
         ) : null}
       </div>
+
+      {children}
     </article>
   )
 })

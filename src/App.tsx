@@ -32,6 +32,7 @@ import {
 import { ImageUploadField } from './components/ImageUploadField'
 import { ModelUploadField } from './components/ModelUploadField'
 import { GeneratedResultCard, PlaceholderCard } from './components/ResultCards'
+import { TextureMaterialPack } from './components/TextureMaterialPack'
 import {
   actionAnimatorActionOptions,
   generateActionAnimator,
@@ -82,6 +83,9 @@ import type {
   ModeDefinition,
   ReferenceAsset,
   TextureExpansionTargetSize,
+  TextureMaterialMapDefaults,
+  TextureMaterialMapKey,
+  TextureMaterialMapStrengthKey,
   TextureLabWorkflow,
   UvLabAtlasSize,
   VariantForgeFamily,
@@ -122,12 +126,16 @@ import {
   type VariantForgeIdeaState,
 } from './lib/variantForgeIdeas'
 import {
+  buildMaterialMapsRequest,
   buildPortraitStudioRequest,
   buildStandardForgeRequest,
   buildTextureExpansionRequest,
   buildVariantForgeRequest,
   buildVfxForgeRequest,
+  normalizeMaterialMapsApiResults,
   normalizeForgeApiResults,
+  postMaterialMapsRequest,
+  type MaterialMapResult,
   postForgeRequest,
   type ForgeApiResponse,
 } from './modes/execution'
@@ -185,6 +193,32 @@ type TextureLabRunContext = {
   workflow: 'expand' | 'generate'
 }
 
+type TextureMaterialPackState = {
+  dirty: boolean
+  error: ForgeErrorInfo | null
+  isVisible: boolean
+  maps: Partial<Record<TextureMaterialMapKey, MaterialMapResult>>
+  status: 'idle' | 'loading' | 'ready' | 'error'
+  strengths: TextureMaterialMapDefaults
+}
+
+type ForgeBatchSlotStatus =
+  | 'queued'
+  | 'generating'
+  | 'retrying'
+  | 'rate-limited'
+  | 'finalizing'
+  | 'ready'
+  | 'failed'
+
+type ForgeBatchSlotState = {
+  attempt: number
+  detail: string | null
+  error: ForgeErrorInfo | null
+  result: ForgeResult | null
+  status: ForgeBatchSlotStatus
+}
+
 const portraitStudioExpressionLabels = [
   'neutral',
   'angry',
@@ -192,6 +226,21 @@ const portraitStudioExpressionLabels = [
   'joy',
   'surprised',
 ] as const
+const textureMaterialMapOrder: TextureMaterialMapKey[] = [
+  'height',
+  'normal',
+  'roughness',
+  'metallic',
+]
+const textureMaterialMapLabels: Record<TextureMaterialMapKey, string> = {
+  height: 'Height',
+  metallic: 'Metallic',
+  normal: 'Normal',
+  roughness: 'Roughness',
+}
+const textureLabClientBatchMaxAttempts = 2
+const textureLabClientRetryDelayMs = 1200
+const textureLabClientMaxRetryDelayMs = 10000
 
 type TelemetryWindowState = {
   sessionMaxByModel: Record<string, number>
@@ -268,6 +317,45 @@ function persistTelemetryWindowState(state: TelemetryWindowState) {
   window.localStorage.setItem(telemetryWindowStorageKey, JSON.stringify(state))
 }
 
+function buildTextureMaterialPackState(
+  defaults: TextureMaterialMapDefaults,
+): TextureMaterialPackState {
+  return {
+    dirty: false,
+    error: null,
+    isVisible: true,
+    maps: {},
+    status: 'idle',
+    strengths: {
+      ...defaults,
+    },
+  }
+}
+
+function buildForgeBatchSlots(count: number): ForgeBatchSlotState[] {
+  return Array.from({ length: count }, () => ({
+    attempt: 1,
+    detail: 'Queued for Gemini image generation.',
+    error: null,
+    result: null,
+    status: 'queued',
+  }))
+}
+
+function collectForgeBatchResults(slots: ForgeBatchSlotState[]) {
+  return slots.flatMap((slot) => (slot.result ? [slot.result] : []))
+}
+
+function sleep(delayMs: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, delayMs)
+  })
+}
+
+function hasGeneratedTextureMaterialMaps(pack: TextureMaterialPackState | undefined) {
+  return textureMaterialMapOrder.some((mapKey) => Boolean(pack?.maps[mapKey]))
+}
+
 function buildHydratedForgeState(
   storedState: NonNullable<ReturnType<typeof loadStoredState>>,
 ) {
@@ -291,6 +379,10 @@ function buildHydratedForgeState(
     textureLab: {
       ...initialState.textureLab,
       ...storedState.settings.textureLab,
+      materialMapDefaults: {
+        ...initialState.textureLab.materialMapDefaults,
+        ...storedState.settings.textureLab.materialMapDefaults,
+      },
     },
     uvLab: {
       ...initialState.uvLab,
@@ -341,6 +433,7 @@ function buildStoredStateSnapshot(
       prompt: state.prompt,
       textureLab: {
         expansionTargetSize: state.textureLab.expansionTargetSize,
+        materialMapDefaults: state.textureLab.materialMapDefaults,
         seamlessMode: state.textureLab.seamlessMode,
         workflow: state.textureLab.workflow,
       },
@@ -380,6 +473,7 @@ function App() {
   const [state, dispatch] = useReducer(forgeReducer, initialState)
   const [status, setStatus] = useState<ForgeStatus>('idle')
   const [results, setResults] = useState<ForgeResult[]>([])
+  const [forgeSlots, setForgeSlots] = useState<ForgeBatchSlotState[]>([])
   const [error, setError] = useState<ForgeErrorInfo | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [serverPrompt, setServerPrompt] = useState<string | null>(null)
@@ -395,6 +489,9 @@ function App() {
   const [lastCharacterSheetResult, setLastCharacterSheetResult] =
     useState<ForgeResult | null>(null)
   const [lastResultMode, setLastResultMode] = useState<ForgeMode | null>(null)
+  const [materialPacksByResultId, setMaterialPacksByResultId] = useState<
+    Record<string, TextureMaterialPackState>
+  >({})
   const [repairingResultId, setRepairingResultId] = useState<string | null>(null)
   const [hasRestoredState, setHasRestoredState] = useState(false)
   const [lastTextureLabRun, setLastTextureLabRun] =
@@ -539,11 +636,21 @@ function App() {
 
     void refreshVariantForgeIdeas()
   }, [isVariantForgeMode, state.variantForge.variantFamily, state.variantForge.variantPreset])
-  const isShowingResults = results.length > 0
+  const hasForgeSlots = forgeSlots.length > 0
+  const visibleResultsCount = hasForgeSlots
+    ? collectForgeBatchResults(forgeSlots).length
+    : results.length
+  const isShowingResults = visibleResultsCount > 0 || hasForgeSlots
   const activeGenerationCount =
     isSingleResultMode ? 1 : state.generationCount
   const reservedOutputs = Array.from(
-    { length: isShowingResults ? results.length : activeGenerationCount },
+    {
+      length: hasForgeSlots
+        ? forgeSlots.length
+        : results.length > 0
+          ? results.length
+          : activeGenerationCount,
+    },
     (_, index) => index,
   )
   const effectiveModel = isTextureExpansionMode ? 'gemini-3-pro' : activeModel
@@ -710,6 +817,15 @@ function App() {
     })
   }, [])
 
+  const updateForgeSlot = useCallback((
+    slotIndex: number,
+    updater: (slot: ForgeBatchSlotState) => ForgeBatchSlotState,
+  ) => {
+    setForgeSlots((previousSlots) =>
+      previousSlots.map((slot, index) => (index === slotIndex ? updater(slot) : slot)),
+    )
+  }, [])
+
   const handleModelSelect = useCallback((nextModel: ModelId) => {
     if (!modeAvailableModels.includes(nextModel)) {
       setError({
@@ -795,6 +911,7 @@ function App() {
     state.portraitStudio.prompt,
     state.prompt,
     state.textureLab.expansionTargetSize,
+    state.textureLab.materialMapDefaults,
     state.textureLab.seamlessMode,
     state.textureLab.workflow,
     state.uvLab.atlasSize,
@@ -842,7 +959,9 @@ function App() {
     const savedAt = new Date().toISOString()
     const nextRecentPrompts = buildRecentPrompts(activePromptValue, recentPrompts)
 
+    setForgeSlots([])
     setResults(nextResults)
+    setMaterialPacksByResultId({})
     setServerModel(nextServerModel)
     setServerPrompt(nextServerPrompt)
     setStatus('success')
@@ -895,6 +1014,192 @@ function App() {
     )
   }
 
+  async function handleIncrementalForgeBatch({
+    baseRequest,
+    nextServerPromptFallback,
+    noticeLabel,
+    runContext,
+    totalCount,
+  }: {
+    baseRequest: Awaited<ReturnType<typeof buildStandardForgeRequest>>
+    nextServerPromptFallback: string
+    noticeLabel: string
+    runContext: TextureLabRunContext | null
+    totalCount: number
+  }) {
+    const isTextureLabBatch = isTextureLabMode && isTextureGenerateMode
+    const maxAttempts = isTextureLabBatch ? textureLabClientBatchMaxAttempts : 1
+    const nextRecentPrompts = buildRecentPrompts(activePromptValue, recentPrompts)
+    let latestServerModel: string | null = null
+    let latestServerPrompt: string | null = null
+
+    setForgeSlots(buildForgeBatchSlots(totalCount))
+    setResults([])
+    setMaterialPacksByResultId({})
+    setRepairingResultId(null)
+    setNotice(
+      `Starting ${noticeLabel.toLowerCase()} for ${totalCount} output slots. Finished slots will appear immediately.`,
+    )
+    setLastResultMode(null)
+
+    if (runContext) {
+      setLastTextureLabRun(runContext)
+    }
+
+    const slotEntries = await Promise.all(
+      Array.from({ length: totalCount }, async (_, slotIndex) => {
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          updateForgeSlot(slotIndex, (slot) => ({
+            ...slot,
+            attempt,
+            detail:
+              attempt === 1
+                ? 'Generating with Gemini.'
+                : `Retrying after the previous attempt stalled. Attempt ${attempt} of ${maxAttempts}.`,
+            error: null,
+            status: attempt === 1 ? 'generating' : 'retrying',
+          }))
+
+          try {
+            const { ok, payload } = await postForgeRequest({
+              ...baseRequest,
+              generationCount: 1,
+            })
+
+            if (!ok || !payload?.images?.length) {
+              throw toForgeError(payload?.error)
+            }
+
+            latestServerModel = payload.model ?? latestServerModel
+            latestServerPrompt = payload.prompt ?? latestServerPrompt ?? nextServerPromptFallback
+
+            updateForgeSlot(slotIndex, (slot) => ({
+              ...slot,
+              detail:
+                isTextureLabBatch
+                  ? 'Normalizing the texture into the final square output.'
+                  : 'Finalizing the image candidate.',
+              status: 'finalizing',
+            }))
+
+            const [rawResult] = normalizeForgeApiResults(payload)
+            const [nextResult] =
+              isTextureLabBatch
+                ? await normalizeTextureLabResults(
+                    [rawResult],
+                    state.textureLab.expansionTargetSize,
+                  )
+                : [rawResult]
+            const nextSlotResult = {
+              ...nextResult,
+              id: `slot-${slotIndex + 1}-${nextResult.id}`,
+            }
+
+            updateForgeSlot(slotIndex, (slot) => ({
+              ...slot,
+              detail: 'Ready.',
+              error: null,
+              result: nextSlotResult,
+              status: 'ready',
+            }))
+            registerSuccessfulApiCall(payload.model ?? null)
+
+            return {
+              error: null,
+              result: nextSlotResult,
+            }
+          } catch (slotError) {
+            const normalizedError = toForgeError(slotError)
+            const canRetry =
+              attempt < maxAttempts &&
+              (normalizedError.code === 'quota_exceeded' ||
+                normalizedError.code === 'request_timeout')
+
+            if (!canRetry) {
+              updateForgeSlot(slotIndex, (slot) => ({
+                ...slot,
+                detail: normalizedError.message,
+                error: normalizedError,
+                status: 'failed',
+              }))
+
+              return {
+                error: normalizedError,
+                result: null,
+              }
+            }
+
+            const retryDelayMs =
+              normalizedError.code === 'quota_exceeded'
+                ? Math.min(
+                    Math.max(
+                      (normalizedError.retryAfterSeconds ?? 1) * 1000,
+                      textureLabClientRetryDelayMs,
+                    ),
+                    textureLabClientMaxRetryDelayMs,
+                  )
+                : textureLabClientRetryDelayMs
+
+            updateForgeSlot(slotIndex, (slot) => ({
+              ...slot,
+              detail:
+                normalizedError.code === 'quota_exceeded'
+                  ? `Gemini rate-limited this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
+                  : `Gemini timed out on this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`,
+              error: normalizedError,
+              status:
+                normalizedError.code === 'quota_exceeded'
+                  ? 'rate-limited'
+                  : 'retrying',
+            }))
+
+            await sleep(retryDelayMs)
+          }
+        }
+
+        return {
+          error: {
+            message: 'This output slot did not complete.',
+            title: 'Slot Failed',
+          } satisfies ForgeErrorInfo,
+          result: null,
+        }
+      }),
+    )
+
+    const completedResults = slotEntries.flatMap((entry) => (entry.result ? [entry.result] : []))
+    const failedEntries = slotEntries.filter((entry) => entry.error)
+    const savedAt = new Date().toISOString()
+
+    setResults(completedResults)
+    setRepairingResultId(null)
+
+    if (completedResults.length > 0) {
+      setServerModel(latestServerModel)
+      setServerPrompt(latestServerPrompt ?? nextServerPromptFallback)
+      setLastResultMode(state.activeMode)
+      setRecentPrompts(nextRecentPrompts)
+      setLastSavedAt(savedAt)
+      setStatus('success')
+      setError(null)
+      setNotice(
+        failedEntries.length > 0
+          ? `${completedResults.length} of ${totalCount} candidate outputs completed. Failed slots stay visible so you can see what needs another run.`
+          : `Forge pass completed with ${completedResults.length} candidate outputs.`,
+      )
+      return
+    }
+
+    setStatus('error')
+    setError(
+      failedEntries[0]?.error ?? {
+        message: 'No output slots completed successfully.',
+        title: 'Forge Request Failed',
+      },
+    )
+    setNotice(null)
+  }
+
   async function handleForge() {
     if (!isReadyForApi || isForging || forgeRunInFlightRef.current) {
       return
@@ -920,6 +1225,7 @@ function App() {
     setStatus('loading')
     setError(null)
     setNotice(null)
+    setForgeSlots([])
     setServerPrompt(null)
     if (isUvLabMode) {
       setUvJob(null)
@@ -1008,6 +1314,8 @@ function App() {
 
       if (isCharacterSheetMode) {
         const payload = await generateCharacterSheet({
+          consistencySource:
+            state.characterSheet.consistencyEnabled ? lastCharacterSheetResult : null,
           modelId: activeModel,
           state: state.characterSheet,
           styleId: activeStyleInput.trim() || 'studio-default',
@@ -1170,14 +1478,33 @@ function App() {
         return
       }
 
-      const { ok, payload } = await postForgeRequest(
-        await buildStandardForgeRequest({
-          mode: state.activeMode,
-          modelId: activeModel,
-          state,
-          styleText: activeStyleInput.trim(),
-        }),
-      )
+      const standardRequest = await buildStandardForgeRequest({
+        mode: state.activeMode,
+        modelId: activeModel,
+        state,
+        styleText: activeStyleInput.trim(),
+      })
+
+      if (standardRequest.generationCount > 1) {
+        await handleIncrementalForgeBatch({
+          baseRequest: standardRequest,
+          nextServerPromptFallback: activePromptValue.trim(),
+          noticeLabel: activeMode.label,
+          runContext: isTextureLabMode
+            ? {
+                prompt: state.prompt.trim(),
+                seamlessMode: state.textureLab.seamlessMode,
+                styleText: activeStyleInput.trim(),
+                targetSize: state.textureLab.expansionTargetSize,
+                workflow: 'generate',
+              }
+            : null,
+          totalCount: standardRequest.generationCount,
+        })
+        return
+      }
+
+      const { ok, payload } = await postForgeRequest(standardRequest)
 
       if (!ok || !payload?.images?.length) {
         throw toForgeError(payload?.error)
@@ -1255,6 +1582,204 @@ function App() {
     downloadResult(result, `kizer-forge-${state.activeMode}-${index + 1}.${extension}`)
     setNotice(`Downloaded candidate ${index + 1}.`)
   }, [state.activeMode])
+
+  const handleTextureMaterialStrengthChange = useCallback((
+    resultId: string,
+    key: TextureMaterialMapStrengthKey,
+    value: number,
+  ) => {
+    dispatch({
+      type: 'set-texture-material-map-default',
+      key,
+      value,
+    })
+    setMaterialPacksByResultId((previousPacks) => {
+      const existingPack =
+        previousPacks[resultId] ??
+        buildTextureMaterialPackState(state.textureLab.materialMapDefaults)
+
+      return {
+        ...previousPacks,
+        [resultId]: {
+          ...existingPack,
+          dirty: hasGeneratedTextureMaterialMaps(existingPack) || existingPack.status === 'error',
+          isVisible: true,
+          strengths: {
+            ...existingPack.strengths,
+            [key]: Math.max(0, Math.min(100, Math.round(value))),
+          },
+        },
+      }
+    })
+  }, [state.textureLab.materialMapDefaults])
+
+  const runTextureMaterialMapGeneration = useCallback(async (
+    result: ForgeResult,
+    strengths: TextureMaterialMapDefaults,
+  ) => {
+    setMaterialPacksByResultId((previousPacks) => {
+      const existingPack =
+        previousPacks[result.id] ??
+        buildTextureMaterialPackState(state.textureLab.materialMapDefaults)
+
+      return {
+        ...previousPacks,
+        [result.id]: {
+          ...existingPack,
+          error: null,
+          isVisible: true,
+          status: 'loading',
+          strengths: {
+            ...strengths,
+          },
+        },
+      }
+    })
+    setError(null)
+    setNotice('Generating material maps for the selected texture.')
+
+    try {
+      const { ok, payload } = await postMaterialMapsRequest(
+        await buildMaterialMapsRequest({
+          prompt: lastTextureLabRun?.prompt ?? state.prompt.trim(),
+          result,
+          strengths,
+          styleText: lastTextureLabRun?.styleText ?? activeStyleInput,
+        }),
+      )
+
+      if (!ok || !payload?.maps) {
+        throw toForgeError(payload?.error, 'Material Maps Failed')
+      }
+
+      const normalizedMaps = normalizeMaterialMapsApiResults(payload)
+
+      if (!textureMaterialMapOrder.every((mapKey) => normalizedMaps[mapKey])) {
+        throw new Error('The material map response was incomplete.')
+      }
+
+      setMaterialPacksByResultId((previousPacks) => ({
+        ...previousPacks,
+        [result.id]: {
+          dirty: false,
+          error: null,
+          isVisible: true,
+          maps: normalizedMaps,
+          status: 'ready',
+          strengths: {
+            ...strengths,
+          },
+        },
+      }))
+      setNotice('Material maps are ready below the selected texture.')
+      registerSuccessfulApiCall(payload.model ?? 'gemini-3-pro')
+    } catch (materialMapError) {
+      const nextError = toForgeError(materialMapError, 'Material Maps Failed')
+
+      setMaterialPacksByResultId((previousPacks) => {
+        const existingPack =
+          previousPacks[result.id] ??
+          buildTextureMaterialPackState(state.textureLab.materialMapDefaults)
+
+        return {
+          ...previousPacks,
+          [result.id]: {
+            ...existingPack,
+            dirty: hasGeneratedTextureMaterialMaps(existingPack) || existingPack.status === 'error',
+            error: nextError,
+            isVisible: true,
+            status: 'error',
+            strengths: {
+              ...strengths,
+            },
+          },
+        }
+      })
+      setError(nextError)
+    }
+  }, [
+    activeStyleInput,
+    lastTextureLabRun?.prompt,
+    lastTextureLabRun?.styleText,
+    registerSuccessfulApiCall,
+    state.prompt,
+    state.textureLab.materialMapDefaults,
+  ])
+
+  const handleGenerateMaterialMaps = useCallback(async (result: ForgeResult) => {
+    const existingPack = materialPacksByResultId[result.id]
+
+    setMaterialPacksByResultId((previousPacks) => ({
+      ...previousPacks,
+      [result.id]: {
+        ...(previousPacks[result.id] ??
+          buildTextureMaterialPackState(state.textureLab.materialMapDefaults)),
+        isVisible: true,
+      },
+    }))
+
+    if (existingPack?.status === 'loading') {
+      return
+    }
+
+    if (existingPack && !existingPack.dirty && !existingPack.error && hasGeneratedTextureMaterialMaps(existingPack)) {
+      setNotice('Material maps are already generated for this texture.')
+      return
+    }
+
+    await runTextureMaterialMapGeneration(
+      result,
+      existingPack?.strengths ?? state.textureLab.materialMapDefaults,
+    )
+  }, [materialPacksByResultId, runTextureMaterialMapGeneration, state.textureLab.materialMapDefaults])
+
+  const handleDownloadTextureMaterialMap = useCallback((
+    result: ForgeResult,
+    mapKey: TextureMaterialMapKey,
+  ) => {
+    const map = materialPacksByResultId[result.id]?.maps[mapKey]
+
+    if (!map) {
+      return
+    }
+
+    downloadDataUrl(
+      map.dataUrl,
+      `kizer-forge-texture-lab-${result.id}-${mapKey}.png`,
+    )
+    setNotice(`Downloaded the ${textureMaterialMapLabels[mapKey].toLowerCase()} map.`)
+  }, [materialPacksByResultId])
+
+  const handleDownloadAllTextureMaterialMaps = useCallback((result: ForgeResult) => {
+    const materialPack = materialPacksByResultId[result.id]
+    const availableMaps = textureMaterialMapOrder.flatMap((mapKey) => {
+      const map = materialPack?.maps[mapKey]
+
+      return map
+        ? [
+            {
+              key: mapKey,
+              map,
+            },
+          ]
+        : []
+    })
+
+    if (availableMaps.length === 0) {
+      return
+    }
+
+    availableMaps.forEach((entry, index) => {
+      window.setTimeout(() => {
+        downloadDataUrl(
+          entry.map.dataUrl,
+          `kizer-forge-texture-lab-${result.id}-${entry.key}.png`,
+        )
+      }, index * 120)
+    })
+
+    setNotice(`Queued ${availableMaps.length} material map downloads.`)
+  }, [materialPacksByResultId])
 
   const handleDownloadPortraitFaces = useCallback(async (
     result: ForgeResult,
@@ -1420,6 +1945,11 @@ function App() {
           entry.id === result.id ? normalizedResult : entry,
         ),
       )
+      setMaterialPacksByResultId((previousPacks) => {
+        const nextPacks = { ...previousPacks }
+        delete nextPacks[result.id]
+        return nextPacks
+      })
       setServerModel(payload.model ?? serverModel)
       setServerPrompt(payload.prompt ?? serverPrompt)
       setStatus('success')
@@ -2030,13 +2560,13 @@ function App() {
                       onRefreshHealth={() => void refreshHealth()}
                       prompt={activePromptValue.trim()}
                       referenceCount={referenceCount}
-                      resultsCount={results.length}
+                      resultsCount={visibleResultsCount}
                       serviceHealth={serviceHealth}
                       consistencyMessage={
                         isCharacterSheetMode && state.characterSheet.consistencyEnabled
                           ? state.characterSheet.parentId
-                            ? `Consistency token staged locally: ${state.characterSheet.parentId}.`
-                            : 'Consistency is enabled. The next successful sheet will stage a reusable token locally.'
+                            ? `Consistency reference staged locally: ${state.characterSheet.parentId}.`
+                            : 'Consistency is enabled. The next successful sheet will stage a reusable reference locally.'
                           : null
                       }
                     />
@@ -2048,46 +2578,173 @@ function App() {
                           : 'grid gap-4 md:grid-cols-2 2xl:grid-cols-4'
                       }
                     >
-                      {isShowingResults
-                        ? results.map((result, index) => (
-                            <GeneratedResultCard
-                              key={result.id}
-                              canRepairSeams={
-                                isTextureLabMode &&
-                                lastTextureLabRun?.seamlessMode === true &&
-                                lastTextureLabRun.workflow === 'generate'
-                              }
-                              extraActionLabel={
-                                isPortraitStudioMode
-                                  ? 'Download Faces'
-                                  : isVfxForgeMode
-                                    ? 'Download Frames'
-                                    : undefined
-                              }
-                              index={index}
-                              isRepairing={repairingResultId === result.id}
-                              mode={activeMode}
-                              result={result}
-                              onCopy={handleCopy}
-                              onDownload={handleDownload}
-                              onExtraAction={
-                                isPortraitStudioMode
-                                  ? handleDownloadPortraitFaces
-                                  : isVfxForgeMode
-                                    ? handleDownloadVfxFrames
-                                    : undefined
-                              }
-                              onRepairSeams={handleRepairSeams}
-                            />
-                          ))
-                        : reservedOutputs.map((index) => (
-                            <PlaceholderCard
-                              key={index}
-                              index={index}
-                              mode={activeMode}
-                              state={isForging ? 'loading' : 'idle'}
-                            />
-                          ))}
+                      {hasForgeSlots
+                        ? forgeSlots.map((slot, index) => {
+                            if (slot.result) {
+                              const result = slot.result
+
+                              return (
+                                <GeneratedResultCard
+                                  key={result.id}
+                                  canRepairSeams={
+                                    isTextureLabMode &&
+                                    lastTextureLabRun?.seamlessMode === true &&
+                                    lastTextureLabRun.workflow === 'generate'
+                                  }
+                                  extraActionLabel={
+                                    isPortraitStudioMode
+                                      ? 'Download Faces'
+                                      : isVfxForgeMode
+                                        ? 'Download Frames'
+                                        : isTextureLabMode
+                                          ? 'Generate Maps'
+                                          : undefined
+                                  }
+                                  index={index}
+                                  isExpanded={
+                                    isTextureLabMode &&
+                                    materialPacksByResultId[result.id]?.isVisible === true
+                                  }
+                                  isExtraActionPending={
+                                    isTextureLabMode &&
+                                    materialPacksByResultId[result.id]?.status === 'loading'
+                                  }
+                                  isRepairing={repairingResultId === result.id}
+                                  mode={activeMode}
+                                  result={result}
+                                  onCopy={handleCopy}
+                                  onDownload={handleDownload}
+                                  onExtraAction={
+                                    isPortraitStudioMode
+                                      ? handleDownloadPortraitFaces
+                                      : isVfxForgeMode
+                                        ? handleDownloadVfxFrames
+                                        : isTextureLabMode
+                                          ? handleGenerateMaterialMaps
+                                          : undefined
+                                  }
+                                  onRepairSeams={handleRepairSeams}
+                                >
+                                  {isTextureLabMode && materialPacksByResultId[result.id]?.isVisible ? (
+                                    <TextureMaterialPack
+                                      error={materialPacksByResultId[result.id]?.error ?? null}
+                                      isDirty={Boolean(materialPacksByResultId[result.id]?.dirty)}
+                                      isLoading={materialPacksByResultId[result.id]?.status === 'loading'}
+                                      maps={materialPacksByResultId[result.id]?.maps ?? {}}
+                                      onDownloadAll={() => handleDownloadAllTextureMaterialMaps(result)}
+                                      onDownloadMap={(mapKey) =>
+                                        handleDownloadTextureMaterialMap(result, mapKey)
+                                      }
+                                      onRegenerate={() => void handleGenerateMaterialMaps(result)}
+                                      onStrengthChange={(key, value) =>
+                                        handleTextureMaterialStrengthChange(result.id, key, value)
+                                      }
+                                      sourceResult={result}
+                                      strengths={
+                                        materialPacksByResultId[result.id]?.strengths ??
+                                        state.textureLab.materialMapDefaults
+                                      }
+                                    />
+                                  ) : null}
+                                </GeneratedResultCard>
+                              )
+                            }
+
+                            return (
+                              <PlaceholderCard
+                                key={`slot-${index}`}
+                                detail={slot.detail ?? 'Waiting for this slot to start.'}
+                                index={index}
+                                mode={activeMode}
+                                progressTone={getForgeSlotProgressTone(slot.status)}
+                                state={
+                                  slot.status === 'failed' || slot.status === 'queued'
+                                    ? 'idle'
+                                    : 'loading'
+                                }
+                                statusLabel={getForgeSlotStatusLabel(slot.status)}
+                                title={
+                                  slot.status === 'failed'
+                                    ? `${activeMode.label} slot needs attention`
+                                    : `${activeMode.label} slot in progress`
+                                }
+                              />
+                            )
+                          })
+                        : isShowingResults
+                          ? results.map((result, index) => (
+                              <GeneratedResultCard
+                                key={result.id}
+                                canRepairSeams={
+                                  isTextureLabMode &&
+                                  lastTextureLabRun?.seamlessMode === true &&
+                                  lastTextureLabRun.workflow === 'generate'
+                                }
+                                extraActionLabel={
+                                  isPortraitStudioMode
+                                    ? 'Download Faces'
+                                    : isVfxForgeMode
+                                      ? 'Download Frames'
+                                      : isTextureLabMode
+                                        ? 'Generate Maps'
+                                        : undefined
+                                }
+                                index={index}
+                                isExpanded={
+                                  isTextureLabMode &&
+                                  materialPacksByResultId[result.id]?.isVisible === true
+                                }
+                                isExtraActionPending={
+                                  isTextureLabMode &&
+                                  materialPacksByResultId[result.id]?.status === 'loading'
+                                }
+                                isRepairing={repairingResultId === result.id}
+                                mode={activeMode}
+                                result={result}
+                                onCopy={handleCopy}
+                                onDownload={handleDownload}
+                                onExtraAction={
+                                  isPortraitStudioMode
+                                    ? handleDownloadPortraitFaces
+                                    : isVfxForgeMode
+                                      ? handleDownloadVfxFrames
+                                      : isTextureLabMode
+                                        ? handleGenerateMaterialMaps
+                                        : undefined
+                                }
+                                onRepairSeams={handleRepairSeams}
+                              >
+                                {isTextureLabMode && materialPacksByResultId[result.id]?.isVisible ? (
+                                  <TextureMaterialPack
+                                    error={materialPacksByResultId[result.id]?.error ?? null}
+                                    isDirty={Boolean(materialPacksByResultId[result.id]?.dirty)}
+                                    isLoading={materialPacksByResultId[result.id]?.status === 'loading'}
+                                    maps={materialPacksByResultId[result.id]?.maps ?? {}}
+                                    onDownloadAll={() => handleDownloadAllTextureMaterialMaps(result)}
+                                    onDownloadMap={(mapKey) =>
+                                      handleDownloadTextureMaterialMap(result, mapKey)
+                                    }
+                                    onRegenerate={() => void handleGenerateMaterialMaps(result)}
+                                    onStrengthChange={(key, value) =>
+                                      handleTextureMaterialStrengthChange(result.id, key, value)
+                                    }
+                                    sourceResult={result}
+                                    strengths={
+                                      materialPacksByResultId[result.id]?.strengths ??
+                                      state.textureLab.materialMapDefaults
+                                    }
+                                  />
+                                ) : null}
+                              </GeneratedResultCard>
+                            ))
+                          : reservedOutputs.map((index) => (
+                              <PlaceholderCard
+                                key={index}
+                                index={index}
+                                mode={activeMode}
+                                state={isForging ? 'loading' : 'idle'}
+                              />
+                            ))}
                     </div>
                   </>
                 )}
@@ -3067,11 +3724,11 @@ function CharacterSheetPanel({
             <Fingerprint className="size-4" strokeWidth={1.8} />
           </span>
           <span>
-            <span className="block text-sm font-medium">Seed / Consistency</span>
+            <span className="block text-sm font-medium">Consistency Reference</span>
             <span className="block text-xs text-current/70">
               {parentId
-                ? `Local token staged: ${parentId}`
-                : 'Stage the latest successful sheet token for the next request'}
+                ? `Latest successful sheet staged locally: ${parentId}`
+                : 'Reuse the latest successful sheet as an extra reference on the next request'}
             </span>
           </span>
         </span>
@@ -4298,11 +4955,17 @@ function ForgeBrief({
   serviceHealth,
 }: ForgeBriefProps) {
   const description = isForging
-    ? `The current prompt and ${referenceCount} reference ${
-        referenceCount === 1 ? 'image' : 'images'
-      } are being processed for ${generationCount} candidate ${
-        generationCount === 1 ? 'output' : 'outputs'
-      } in ${activeMode.label}.`
+    ? resultsCount > 0
+      ? `${resultsCount} of ${generationCount} candidate ${
+          generationCount === 1 ? 'output is' : 'outputs are'
+        } already visible while the remaining ${
+          generationCount - resultsCount === 1 ? 'slot continues' : 'slots continue'
+        } processing in ${activeMode.label}.`
+      : `The current prompt and ${referenceCount} reference ${
+          referenceCount === 1 ? 'image' : 'images'
+        } are being processed for ${generationCount} candidate ${
+          generationCount === 1 ? 'output' : 'outputs'
+        } in ${activeMode.label}.`
     : isShowingResults
       ? `The last forge pass returned ${resultsCount} candidate ${
           resultsCount === 1 ? 'image' : 'images'
@@ -4439,6 +5102,40 @@ function readStringArray(value: unknown): string[] | undefined {
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function getForgeSlotStatusLabel(status: ForgeBatchSlotStatus) {
+  switch (status) {
+    case 'generating':
+      return 'Generating'
+    case 'retrying':
+      return 'Retrying'
+    case 'rate-limited':
+      return 'Rate Limited'
+    case 'finalizing':
+      return 'Finalizing'
+    case 'ready':
+      return 'Ready'
+    case 'failed':
+      return 'Failed'
+    default:
+      return 'Queued'
+  }
+}
+
+function getForgeSlotProgressTone(status: ForgeBatchSlotStatus) {
+  switch (status) {
+    case 'retrying':
+    case 'finalizing':
+    case 'generating':
+      return 'sky' as const
+    case 'rate-limited':
+      return 'amber' as const
+    case 'failed':
+      return 'rose' as const
+    default:
+      return 'neutral' as const
+  }
 }
 
 function enhancePrompt(prompt: string, activeMode: ForgeMode) {

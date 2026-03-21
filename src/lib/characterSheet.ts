@@ -1,4 +1,4 @@
-import { createDataUrl, fileToBase64 } from './browser'
+import { createDataUrl, fileToBase64, parseBase64DataUrl } from './browser'
 import type {
   CharacterSheetGenerationMode,
   CharacterSheetReferenceSlot,
@@ -21,10 +21,16 @@ export type CharacterSheetEncodedReference = {
   slot: CharacterSheetReferenceSlot
 }
 
+export type CharacterSheetInlineImage = {
+  data: string
+  mimeType: string
+}
+
 export type CharacterSheetRequestPayload = {
   aspectRatio: '16:9'
   candidateCount: 1
   consistencyEnabled: boolean
+  consistencyReference: CharacterSheetInlineImage | null
   generationMode: CharacterSheetGenerationMode
   modelId: string
   parentId: string | null
@@ -83,6 +89,7 @@ export async function buildCharacterSheetRequest(
   state: CharacterSheetState,
   modelId: string,
   styleId: string,
+  consistencySource: ForgeResult | null = null,
 ): Promise<CharacterSheetRequestPayload> {
   const references = await Promise.all(
     (['face', 'outfit', 'art-style'] as CharacterSheetReferenceSlot[])
@@ -103,11 +110,23 @@ export async function buildCharacterSheetRequest(
         slot,
       })),
   )
+  const consistencyReference =
+    state.consistencyEnabled && consistencySource
+      ? (() => {
+          const parsedReference = parseBase64DataUrl(consistencySource.dataUrl)
+
+          return {
+            data: parsedReference.base64,
+            mimeType: parsedReference.mimeType,
+          }
+        })()
+      : null
 
   return {
     aspectRatio: '16:9',
     candidateCount: 1,
     consistencyEnabled: state.consistencyEnabled,
+    consistencyReference,
     generationMode: state.generationMode,
     modelId,
     parentId: state.consistencyEnabled ? state.parentId : null,
@@ -120,15 +139,22 @@ export async function buildCharacterSheetRequest(
 }
 
 export async function generateCharacterSheet({
+  consistencySource,
   modelId,
   state,
   styleId,
 }: {
+  consistencySource?: ForgeResult | null
   modelId: string
   state: CharacterSheetState
   styleId: string
 }) {
-  const request = await buildCharacterSheetRequest(state, modelId, styleId)
+  const request = await buildCharacterSheetRequest(
+    state,
+    modelId,
+    styleId,
+    consistencySource ?? null,
+  )
   const response = await fetch('/api/character-sheet', {
     method: 'POST',
     headers: {

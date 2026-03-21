@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { createDataUrl, dataUrlToBlob, fileToBase64 } from './browser'
+import {
+  createDataUrl,
+  dataUrlToBlob,
+  fileToBase64,
+  parseBase64DataUrl,
+} from './browser'
 
 describe('browser encoding helpers', () => {
   it('encodes files to base64 using FileReader', async () => {
@@ -17,5 +22,12 @@ describe('browser encoding helpers', () => {
 
     expect(blob.type).toBe('text/plain')
     await expect(blob.text()).resolves.toBe('forge')
+  })
+
+  it('parses base64 data URLs without decoding the payload', () => {
+    expect(parseBase64DataUrl(createDataUrl('Zm9yZ2U=', 'text/plain'))).toEqual({
+      base64: 'Zm9yZ2U=',
+      mimeType: 'text/plain',
+    })
   })
 })

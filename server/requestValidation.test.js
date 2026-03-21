@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   validateActionAnimatorRequest,
   validateForgeRequest,
+  validateMaterialMapsRequest,
   validateVariantForgeIdeaRequest,
 } from './requestValidation.js'
 
@@ -160,6 +161,40 @@ describe('validateVariantForgeIdeaRequest', () => {
       validateVariantForgeIdeaRequest({
         variantFamily: 'tech',
         variantPreset: 'legendary',
+      }),
+    ).toThrow()
+  })
+})
+
+describe('validateMaterialMapsRequest', () => {
+  it('clamps strength sliders and defaults missing values', () => {
+    expect(
+      validateMaterialMapsRequest({
+        heightStrength: 164,
+        metallicStrength: -14,
+        sourceImage: {
+          data: validPngBase64,
+          mimeType: 'image/png',
+        },
+      }),
+    ).toMatchObject({
+      heightStrength: 100,
+      metallicStrength: 0,
+      normalStrength: 60,
+      roughnessStrength: 60,
+      sourceImage: {
+        mimeType: 'image/png',
+      },
+    })
+  })
+
+  it('rejects non-image material-map source payloads', () => {
+    expect(() =>
+      validateMaterialMapsRequest({
+        sourceImage: {
+          data: 'abc123',
+          mimeType: 'text/plain',
+        },
       }),
     ).toThrow()
   })

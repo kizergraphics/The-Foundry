@@ -390,6 +390,20 @@ export function validateForgeRequest(body) {
   }
 }
 
+function readClampedInteger(value, fieldName, { min, max, fallback }) {
+  if (value === undefined || value === null || value === '') {
+    return fallback
+  }
+
+  const numericValue = Number(value)
+
+  if (!Number.isFinite(numericValue)) {
+    throw buildValidationError(`${fieldName} must be a number.`)
+  }
+
+  return Math.max(min, Math.min(max, Math.round(numericValue)))
+}
+
 export function validateVariantForgeIdeaRequest(body) {
   const variantFamily =
     readOptionalEnum(body?.variantFamily, 'variantFamily', allowedVariantForgeFamilies) ??
@@ -429,6 +443,35 @@ export function validateVariantForgeIdeaRequest(body) {
   }
 }
 
+export function validateMaterialMapsRequest(body) {
+  return {
+    heightStrength: readClampedInteger(body?.heightStrength, 'heightStrength', {
+      fallback: 60,
+      max: 100,
+      min: 0,
+    }),
+    metallicStrength: readClampedInteger(body?.metallicStrength, 'metallicStrength', {
+      fallback: 60,
+      max: 100,
+      min: 0,
+    }),
+    normalStrength: readClampedInteger(body?.normalStrength, 'normalStrength', {
+      fallback: 60,
+      max: 100,
+      min: 0,
+    }),
+    prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
+    roughnessStrength: readClampedInteger(body?.roughnessStrength, 'roughnessStrength', {
+      fallback: 60,
+      max: 100,
+      min: 0,
+    }),
+    sourceImage: validateInlineImage(body?.sourceImage, 'sourceImage', maxTextureExpansionBytes),
+    sourceText: readOptionalTrimmedString(body?.sourceText, 'sourceText', maxPromptLength),
+    styleText: readOptionalTrimmedString(body?.styleText, 'styleText', maxStyleTextLength),
+  }
+}
+
 export function validateCharacterSheetRequest(body) {
   const generationMode = readOptionalEnum(
     body?.generationMode,
@@ -447,6 +490,9 @@ export function validateCharacterSheetRequest(body) {
   return {
     aspectRatio:
       body?.aspectRatio === '16:9' || body?.aspectRatio === '1:1' ? body.aspectRatio : '16:9',
+    consistencyReference: body?.consistencyReference
+      ? validateInlineImage(body.consistencyReference, 'consistencyReference')
+      : null,
     generationMode,
     modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
     parentId: readOptionalTrimmedString(body?.parentId, 'parentId', 200) || null,

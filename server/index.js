@@ -21,8 +21,13 @@ import {
   validateActionAnimatorStripRequest,
   validateCharacterSheetRequest,
   validateForgeRequest,
+  validateMaterialMapsRequest,
   validateVariantForgeIdeaRequest,
 } from './requestValidation.js'
+import {
+  buildMaterialMapsFromGeneratedImages,
+  readMaterialMapSourceMetadata,
+} from './materialMaps.js'
 import {
   getTelemetrySnapshot,
   getUsageSummary,
@@ -75,6 +80,7 @@ const routeModelDefaults = {
   '/api/action-animator-strip': 'gemini-3-pro',
   '/api/character-sheet': 'gemini-3-pro',
   '/api/forge': 'gemini-3-flash',
+  '/api/material-maps': 'gemini-3-pro',
   '/api/variant-forge-ideas': 'gemini-3-flash',
 }
 const routeModelAllowlist = {
@@ -82,6 +88,7 @@ const routeModelAllowlist = {
   '/api/action-animator-strip': ['gemini-3-pro', 'gemini-2.5-flash-image'],
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
+  '/api/material-maps': ['gemini-3-pro'],
   '/api/variant-forge-ideas': ['gemini-3-flash'],
 }
 const supportedForgeModes = forgeApiModes
@@ -92,11 +99,23 @@ const forgeGenerationTimeoutMs = clampTimeoutMs(
   Number(process.env.FORGE_GENERATION_TIMEOUT_MS ?? 90000),
   90000,
 )
+const textureLabMaxParallelRequests = Math.max(
+  1,
+  Math.min(Math.round(Number(process.env.TEXTURE_LAB_MAX_PARALLEL_REQUESTS ?? 1)), 2),
+)
+const textureLabGenerationTimeoutMs = clampTimeoutMs(
+  Number(process.env.TEXTURE_LAB_GENERATION_TIMEOUT_MS ?? 30000),
+  30000,
+)
 const variantForgeGenerationTimeoutMs = clampTimeoutMs(
   Number(process.env.VARIANT_FORGE_GENERATION_TIMEOUT_MS ?? 45000),
   45000,
 )
 const variantForgeMaxAttemptsPerImage = 2
+const textureLabMaxAttemptsPerImage = Math.max(
+  1,
+  Math.min(Math.round(Number(process.env.TEXTURE_LAB_MAX_ATTEMPTS ?? 1)), 2),
+)
 const forgeBatchInterRequestDelayMs = 250
 const forgeBatchRetryDelayMs = 1200
 const maxPromptOrchestrationWordCount = 24
@@ -623,8 +642,12 @@ app.post(
     const successfulRuns = []
     const normalizedErrors = []
     const noImageTexts = []
-    const batchWorkerCount = Math.min(candidateCount, forgeBatchMaxParallelRequests)
-    const attemptPolicy = resolveForgeAttemptPolicy(mode)
+    const batchWorkerCount = resolveForgeBatchWorkerCount(
+      mode,
+      requestedWorkflow,
+      candidateCount,
+    )
+    const attemptPolicy = resolveForgeAttemptPolicy(mode, requestedWorkflow)
     const attemptBatchSlotGeneration = async ({
       phase,
       slotIndex,
@@ -989,6 +1012,189 @@ app.post(
 )
 
 app.post(
+  '/api/material-maps',
+  optionalGenerationAuth,
+  forgeRateLimit,
+  forgeConcurrencyLimit,
+  parseForgeBody,
+  async (request, response) => {
+  if (!apiKey) {
+    response.status(500).json({
+      error:
+        'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
+    })
+    return
+  }
+
+  let validatedRequest
+
+  try {
+    validatedRequest = validateMaterialMapsRequest(request.body ?? {})
+  } catch (error) {
+    response.status(400).json(toValidationResponse(error))
+    return
+  }
+
+  const {
+    heightStrength,
+    metallicStrength,
+    normalStrength,
+    prompt,
+    roughnessStrength,
+    sourceImage,
+    sourceText,
+    styleText,
+  } = validatedRequest
+  const modelSelection = resolveModelForRoute('/api/material-maps')
+
+  if (!modelSelection.ok) {
+    response.status(500).json({
+      error: {
+        code: 'model_unavailable',
+        details: modelSelection.details,
+        message: modelSelection.message,
+        title: 'Material Maps Are Unavailable',
+      },
+    })
+    return
+  }
+
+  const ai = new GoogleGenAI({ apiKey })
+  const sourceImageBuffer = Buffer.from(sourceImage.data, 'base64')
+  const requestId = buildRequestId('material-maps')
+
+  try {
+    const { height: sourceHeight, width: sourceWidth } =
+      await readMaterialMapSourceMetadata(sourceImageBuffer)
+    const promptContext = buildMaterialMapContext({
+      prompt,
+      sourceText,
+      styleText,
+    })
+    const generationRequests = ['height', 'roughness', 'metallic'].map((mapKind) =>
+      withTimeout(
+        ai.models.generateContent({
+          model: modelSelection.providerModel,
+          contents: [
+            {
+              text: buildMaterialMapPrompt(mapKind, promptContext),
+            },
+            {
+              inlineData: {
+                mimeType: sourceImage.mimeType,
+                data: sourceImage.data,
+              },
+            },
+          ],
+          config: {
+            candidateCount: 1,
+            responseModalities: ['IMAGE', 'TEXT'],
+            systemInstruction: buildMaterialMapSystemInstruction(mapKind),
+          },
+        }),
+        forgeGenerationTimeoutMs,
+        `Material ${mapKind} map generation timed out.`,
+      ).then((generation) => ({
+        generation,
+        mapKind,
+      })),
+    )
+
+    logServerEvent(requestId, 'material map generation started', {
+      sourceHeight,
+      sourceWidth,
+    })
+
+    const generatedMaps = await Promise.all(generationRequests)
+    const imageBuffers = {}
+
+    for (const { generation, mapKind } of generatedMaps) {
+      const [generatedImage] = extractImages(generation)
+
+      if (!generatedImage) {
+        response
+          .status(422)
+          .json(buildNoImageResponseError('/api/material-maps', modelSelection, generation.text))
+        return
+      }
+
+      imageBuffers[mapKind] = Buffer.from(generatedImage.data, 'base64')
+    }
+
+    const finalizedMaps = await buildMaterialMapsFromGeneratedImages({
+      heightImageBuffer: imageBuffers.height,
+      heightStrength,
+      metallicImageBuffer: imageBuffers.metallic,
+      metallicStrength,
+      normalStrength,
+      roughnessImageBuffer: imageBuffers.roughness,
+      roughnessStrength,
+      sourceHeight,
+      sourceWidth,
+    })
+
+    await Promise.all(
+      generatedMaps.map(({ generation }) =>
+        recordUsageEvent({
+          model: modelSelection.modelId,
+          route: '/api/material-maps',
+          telemetryModel: resolveTelemetryModelId(
+            modelSelection.modelId,
+            '/api/material-maps',
+          ),
+          tokenCount: extractTotalTokenCount(generation),
+        }).catch((logError) => {
+          console.warn('Telemetry logging failed for /api/material-maps:', logError)
+        }),
+      ),
+    )
+
+    response.json({
+      maps: {
+        height: {
+          data: finalizedMaps.height.buffer.toString('base64'),
+          height: finalizedMaps.height.height,
+          id: 'material-height',
+          mimeType: finalizedMaps.height.mimeType,
+          width: finalizedMaps.height.width,
+        },
+        metallic: {
+          data: finalizedMaps.metallic.buffer.toString('base64'),
+          height: finalizedMaps.metallic.height,
+          id: 'material-metallic',
+          mimeType: finalizedMaps.metallic.mimeType,
+          width: finalizedMaps.metallic.width,
+        },
+        normal: {
+          data: finalizedMaps.normal.buffer.toString('base64'),
+          height: finalizedMaps.normal.height,
+          id: 'material-normal',
+          mimeType: finalizedMaps.normal.mimeType,
+          width: finalizedMaps.normal.width,
+        },
+        roughness: {
+          data: finalizedMaps.roughness.buffer.toString('base64'),
+          height: finalizedMaps.roughness.height,
+          id: 'material-roughness',
+          mimeType: finalizedMaps.roughness.mimeType,
+          width: finalizedMaps.roughness.width,
+        },
+      },
+      model: modelSelection.modelId,
+    })
+    logServerEvent(requestId, 'material map generation finished', {
+      sourceHeight,
+      sourceWidth,
+    })
+  } catch (error) {
+    const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
+
+    response.status(normalizedError.status).json(normalizedError.body)
+  }
+  },
+)
+
+app.post(
   '/api/character-sheet',
   optionalGenerationAuth,
   characterSheetRateLimit,
@@ -1014,6 +1220,7 @@ app.post(
 
   const {
     aspectRatio = '16:9',
+    consistencyReference,
     generationMode,
     modelId,
     parentId,
@@ -1081,7 +1288,21 @@ app.post(
     const generation = await ai.models.generateContent({
       model: modelSelection.providerModel,
       contents: [
-        { text: promptForGeneration },
+        {
+          text: consistencyReference
+            ? `${promptForGeneration}\n\nMaintain character identity, outfit structure, and palette continuity with the staged prior sheet reference.`
+            : promptForGeneration,
+        },
+        ...(consistencyReference
+          ? [
+              {
+                inlineData: {
+                  mimeType: consistencyReference.mimeType,
+                  data: consistencyReference.data,
+                },
+              },
+            ]
+          : []),
         ...validReferences.map((reference) => ({
           inlineData: {
             mimeType: reference.mimeType,
@@ -1813,6 +2034,58 @@ function buildSeamRepairPrompt({ prompt, styleText }) {
     .join(' ')
 }
 
+function buildMaterialMapContext({ prompt, sourceText, styleText }) {
+  return [
+    typeof sourceText === 'string' && sourceText.trim()
+      ? `Source generation notes: ${sourceText.trim()}.`
+      : null,
+    typeof prompt === 'string' && prompt.trim()
+      ? `Texture direction: ${prompt.trim()}.`
+      : null,
+    typeof styleText === 'string' && styleText.trim()
+      ? `Style guidance: ${styleText.trim()}.`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function buildMaterialMapPrompt(mapKind, promptContext) {
+  const mapDescription =
+    mapKind === 'height'
+      ? 'Generate a clean height map where brighter values are raised and darker values are recessed.'
+      : mapKind === 'roughness'
+        ? 'Generate a clean roughness map where brighter values are rougher and darker values are smoother.'
+        : 'Generate a clean metallic map where metallic surfaces are bright and non-metal surfaces stay dark.'
+
+  return [
+    `Material analysis task for the ${mapKind} map.`,
+    mapDescription,
+    'Use the supplied texture as the single source of truth for pattern placement, scale, and material breakup.',
+    'Do not add color coding, legends, labels, borders, lighting, or decorative overlays.',
+    'Return one production-ready map image only.',
+    promptContext || null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function buildMaterialMapSystemInstruction(mapKind) {
+  const outputRule =
+    mapKind === 'metallic'
+      ? 'Favor dark values for non-metals and reserve bright values for truly metallic regions.'
+      : mapKind === 'roughness'
+        ? 'Keep the output physically plausible and free of color tinting.'
+        : 'Keep height detail readable without introducing color tinting.'
+
+  return [
+    'You convert source textures into single-channel PBR utility maps.',
+    'Return exactly one grayscale material map image with no extra commentary.',
+    'Preserve the original material layout, texel density, and tile continuity.',
+    outputRule,
+  ].join(' ')
+}
+
 export function buildVariantForgePrompt({
   customDirection,
   preservePalette,
@@ -2025,7 +2298,14 @@ function buildPortraitStudioPrompt({ prompt, styleText }) {
     .join(' ')
 }
 
-function resolveForgeAttemptPolicy(mode) {
+function resolveForgeAttemptPolicy(mode, workflow = 'generate') {
+  if (mode === 'texture-lab' && workflow === 'generate') {
+    return {
+      maxAttemptsPerImage: textureLabMaxAttemptsPerImage,
+      timeoutMs: textureLabGenerationTimeoutMs,
+    }
+  }
+
   if (mode === 'variant-forge') {
     return {
       maxAttemptsPerImage: variantForgeMaxAttemptsPerImage,
@@ -2037,6 +2317,14 @@ function resolveForgeAttemptPolicy(mode) {
     maxAttemptsPerImage: forgeBatchMaxAttemptsPerImage,
     timeoutMs: forgeGenerationTimeoutMs,
   }
+}
+
+function resolveForgeBatchWorkerCount(mode, workflow = 'generate', candidateCount = 1) {
+  if (mode === 'texture-lab' && workflow === 'generate') {
+    return Math.min(candidateCount, textureLabMaxParallelRequests)
+  }
+
+  return Math.min(candidateCount, forgeBatchMaxParallelRequests)
 }
 
 function buildVfxForgePrompt({ frameCount, intensity, prompt, projectileType, styleText }) {

@@ -4,6 +4,23 @@ export function createDataUrl(data: string, mimeType: string): string {
   return `data:${mimeType};base64,${data}`
 }
 
+export function parseBase64DataUrl(dataUrl: string): {
+  base64: string
+  mimeType: string
+} {
+  const [metadata, encodedPayload] = dataUrl.split(',', 2)
+
+  if (!metadata || encodedPayload === undefined || !metadata.startsWith('data:')) {
+    throw new Error('Failed to load the generated image for post-processing.')
+  }
+
+  return {
+    base64: encodedPayload,
+    mimeType:
+      metadata.match(/^data:([^;]+);base64$/)?.[1] ?? 'application/octet-stream',
+  }
+}
+
 export async function fileToBase64(file: Blob): Promise<string> {
   const dataUrl = await blobToDataUrl(file)
   const separatorIndex = dataUrl.indexOf(',')
@@ -16,13 +33,7 @@ export async function fileToBase64(file: Blob): Promise<string> {
 }
 
 export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  const [metadata, encodedPayload] = dataUrl.split(',', 2)
-
-  if (!metadata || encodedPayload === undefined || !metadata.startsWith('data:')) {
-    throw new Error('Failed to load the generated image for post-processing.')
-  }
-
-  const mimeType = metadata.match(/^data:([^;]+);base64$/)?.[1] ?? 'application/octet-stream'
+  const { base64: encodedPayload, mimeType } = parseBase64DataUrl(dataUrl)
   const binaryString = atob(encodedPayload)
   const bytes = Uint8Array.from(binaryString, (character) => character.charCodeAt(0))
   return new Blob([bytes], { type: mimeType })

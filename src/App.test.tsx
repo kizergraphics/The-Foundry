@@ -1,5 +1,22 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const { downloadDataUrlMock, normalizeSquareTextureDataUrlMock } = vi.hoisted(() => ({
+  downloadDataUrlMock: vi.fn(),
+  normalizeSquareTextureDataUrlMock: vi.fn(async (source: string | Blob) =>
+    typeof source === 'string' ? source : '',
+  ),
+}))
+
+vi.mock('./lib/browser', async () => {
+  const actual = await vi.importActual<typeof import('./lib/browser')>('./lib/browser')
+
+  return {
+    ...actual,
+    downloadDataUrl: downloadDataUrlMock,
+    normalizeSquareTextureDataUrl: normalizeSquareTextureDataUrlMock,
+  }
+})
 
 import App from './App'
 
@@ -57,6 +74,8 @@ describe('App variant forge ideas', () => {
     cleanup()
     vi.unstubAllGlobals()
     fetchMock.mockReset()
+    downloadDataUrlMock.mockReset()
+    normalizeSquareTextureDataUrlMock.mockClear()
     window.localStorage.clear()
   })
 
@@ -104,5 +123,155 @@ describe('App variant forge ideas', () => {
     })
 
     expect(await screen.findByText('+ idea-4-alpha')).toBeInTheDocument()
+  })
+})
+
+describe('App Texture Lab material packs', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+  const textureBase64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9sXl16sAAAAASUVORK5CYII='
+
+  beforeEach(() => {
+    let materialMapRequestCount = 0
+
+    fetchMock.mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+
+      if (url === '/api/health') {
+        return buildJsonResponse({ ok: true })
+      }
+
+      if (url === '/api/usage/telemetry') {
+        return buildJsonResponse({
+          generatedAt: new Date('2026-03-19T12:00:00.000Z').toISOString(),
+          rows: [],
+          source: 'local',
+          timeZone: 'America/Los_Angeles',
+        })
+      }
+
+      if (url === '/api/variant-forge-ideas') {
+        return buildJsonResponse({
+          ideas: ['idea-a', 'idea-b', 'idea-c', 'idea-d'],
+          source: 'ai',
+        })
+      }
+
+      if (url === '/api/forge') {
+        return buildJsonResponse({
+          images: [
+            {
+              data: textureBase64,
+              id: 'texture-result-1',
+              mimeType: 'image/png',
+              text: 'weathered stone floor',
+            },
+          ],
+          model: 'gemini-3-pro',
+          prompt: 'weathered stone floor',
+        })
+      }
+
+      if (url === '/api/material-maps') {
+        materialMapRequestCount += 1
+
+        return buildJsonResponse({
+          maps: {
+            height: {
+              data: textureBase64,
+              height: 1,
+              id: `height-${materialMapRequestCount}`,
+              mimeType: 'image/png',
+              width: 1,
+            },
+            metallic: {
+              data: textureBase64,
+              height: 1,
+              id: `metallic-${materialMapRequestCount}`,
+              mimeType: 'image/png',
+              width: 1,
+            },
+            normal: {
+              data: textureBase64,
+              height: 1,
+              id: `normal-${materialMapRequestCount}`,
+              mimeType: 'image/png',
+              width: 1,
+            },
+            roughness: {
+              data: textureBase64,
+              height: 1,
+              id: `roughness-${materialMapRequestCount}`,
+              mimeType: 'image/png',
+              width: 1,
+            },
+          },
+          model: 'gemini-3-pro',
+        })
+      }
+
+      return buildJsonResponse({})
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+    window.localStorage.clear()
+    downloadDataUrlMock.mockReset()
+    normalizeSquareTextureDataUrlMock.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    fetchMock.mockReset()
+    downloadDataUrlMock.mockReset()
+    normalizeSquareTextureDataUrlMock.mockClear()
+    window.localStorage.clear()
+  })
+
+  it('shows Generate Maps for Texture Lab results and supports dirty, regenerate, and download flows', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Texture Lab/i }))
+    fireEvent.change(
+      screen.getByPlaceholderText(/Ornate steel longsword/i),
+      { target: { value: 'weathered stone floor' } },
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^FORGE/i }))
+
+    const [generateMapsButton] = await screen.findAllByRole('button', { name: /Generate Maps/i })
+    fireEvent.click(generateMapsButton)
+
+    const materialPackTitle = await screen.findByText('Material Pack')
+    const materialPack = materialPackTitle.closest('section')
+
+    expect(materialPack).not.toBeNull()
+    if (!materialPack) {
+      throw new Error('Expected the material pack section to render.')
+    }
+
+    await waitFor(() => {
+      expect(
+        within(materialPack).getByRole('button', { name: /Download All Maps/i }),
+      ).toBeEnabled()
+    })
+    fireEvent.change(within(materialPack).getByLabelText(/Height Strength/i), {
+      target: { value: '85' },
+    })
+    expect(within(materialPack).getByText('Needs Regeneration')).toBeInTheDocument()
+
+    fireEvent.click(within(materialPack).getByRole('button', { name: /Regenerate Maps/i }))
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === '/api/material-maps'),
+      ).toHaveLength(2)
+    })
+
+    fireEvent.click(within(materialPack).getByRole('button', { name: /Download Height/i }))
+    fireEvent.click(within(materialPack).getByRole('button', { name: /Download All Maps/i }))
+
+    await waitFor(() => {
+      expect(downloadDataUrlMock).toHaveBeenCalledTimes(5)
+    })
   })
 })

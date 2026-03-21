@@ -25,6 +25,12 @@ const baseStoredSettings = {
   prompt: 'hero sword',
   textureLab: {
     expansionTargetSize: 1024 as const,
+    materialMapDefaults: {
+      heightStrength: 60,
+      metallicStrength: 60,
+      normalStrength: 60,
+      roughnessStrength: 60,
+    },
     seamlessMode: false,
     workflow: 'generate' as const,
   },
@@ -344,6 +350,62 @@ describe('persistStoredState', () => {
         },
       },
       variantPreset: 'broken',
+    })
+  })
+
+  it('restores persisted texture material-map defaults', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          ...baseStoredSettings,
+          activeMode: 'texture-lab',
+          textureLab: {
+            ...baseStoredSettings.textureLab,
+            materialMapDefaults: {
+              heightStrength: 72,
+              metallicStrength: 18,
+              normalStrength: 91,
+              roughnessStrength: 44,
+            },
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.textureLab.materialMapDefaults).toEqual({
+      heightStrength: 72,
+      metallicStrength: 18,
+      normalStrength: 91,
+      roughnessStrength: 44,
+    })
+  })
+
+  it('falls back missing texture material-map defaults to the app defaults', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          ...baseStoredSettings,
+          activeMode: 'texture-lab',
+          textureLab: {
+            expansionTargetSize: 1024,
+            seamlessMode: true,
+            workflow: 'generate',
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.textureLab.materialMapDefaults).toEqual({
+      heightStrength: 60,
+      metallicStrength: 60,
+      normalStrength: 60,
+      roughnessStrength: 60,
     })
   })
 })

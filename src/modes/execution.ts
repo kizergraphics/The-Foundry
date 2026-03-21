@@ -1,6 +1,7 @@
 import {
   buildTextureExpansionInput,
   createDataUrl,
+  dataUrlToBlob,
   fileToBase64,
 } from '../lib/browser'
 import type {
@@ -9,6 +10,8 @@ import type {
   ForgeState,
   ReferenceAsset,
   ReferenceSlot,
+  TextureMaterialMapDefaults,
+  TextureMaterialMapKey,
 } from '../lib/forge'
 
 export type ForgeApiResponse = {
@@ -31,6 +34,39 @@ export type ForgeApiResponse = {
   prompt?: string
 }
 
+export type MaterialMapsApiResponse = {
+  error?:
+    | string
+    | {
+        code?: string
+        details?: string[]
+        message?: string
+        retryAfterSeconds?: number
+        title?: string
+      }
+  maps?: Partial<
+    Record<
+      TextureMaterialMapKey,
+      {
+        data: string
+        id: string
+        mimeType: string
+        height: number
+        width: number
+      }
+    >
+  >
+  model?: string
+}
+
+export type MaterialMapResult = {
+  dataUrl: string
+  height: number
+  id: string
+  mimeType: string
+  width: number
+}
+
 export async function postForgeRequest(body: Record<string, unknown>) {
   const response = await fetch('/api/forge', {
     method: 'POST',
@@ -47,6 +83,22 @@ export async function postForgeRequest(body: Record<string, unknown>) {
   }
 }
 
+export async function postMaterialMapsRequest(body: Record<string, unknown>) {
+  const response = await fetch('/api/material-maps', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  const payload = (await response.json()) as MaterialMapsApiResponse | undefined
+
+  return {
+    ok: response.ok,
+    payload,
+  }
+}
+
 export function normalizeForgeApiResults(payload: ForgeApiResponse): ForgeResult[] {
   return (payload.images ?? []).map((image) => ({
     dataUrl: createDataUrl(image.data, image.mimeType),
@@ -56,12 +108,31 @@ export function normalizeForgeApiResults(payload: ForgeApiResponse): ForgeResult
   }))
 }
 
+export function normalizeMaterialMapsApiResults(
+  payload: MaterialMapsApiResponse,
+): Partial<Record<TextureMaterialMapKey, MaterialMapResult>> {
+  return Object.fromEntries(
+    Object.entries(payload.maps ?? {}).map(([key, image]) => [
+      key,
+      {
+        dataUrl: createDataUrl(image.data, image.mimeType),
+        height: image.height,
+        id: image.id,
+        mimeType: image.mimeType,
+        width: image.width,
+      },
+    ]),
+  ) as Partial<Record<TextureMaterialMapKey, MaterialMapResult>>
+}
+
 export async function buildStandardForgeRequest({
+  generationCount,
   mode,
   modelId,
   state,
   styleText,
 }: {
+  generationCount?: number
   mode: ForgeMode
   modelId: string
   state: ForgeState
@@ -79,7 +150,7 @@ export async function buildStandardForgeRequest({
   )
 
   return {
-    generationCount: state.generationCount,
+    generationCount: generationCount ?? state.generationCount,
     modelId,
     mode,
     prompt: state.prompt.trim(),
@@ -92,6 +163,31 @@ export async function buildStandardForgeRequest({
       mode === 'texture-lab' && state.textureLab.workflow === 'generate'
         ? state.textureLab.expansionTargetSize
         : undefined,
+  }
+}
+
+export async function buildMaterialMapsRequest({
+  prompt,
+  result,
+  strengths,
+  styleText,
+}: {
+  prompt: string
+  result: ForgeResult
+  strengths: TextureMaterialMapDefaults
+  styleText: string
+}) {
+  const sourceBlob = await dataUrlToBlob(result.dataUrl)
+
+  return {
+    ...strengths,
+    prompt: prompt.trim(),
+    sourceImage: {
+      data: await fileToBase64(sourceBlob),
+      mimeType: sourceBlob.type || result.mimeType,
+    },
+    sourceText: result.text?.trim() ?? '',
+    styleText: styleText.trim(),
   }
 }
 
