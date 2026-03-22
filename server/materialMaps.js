@@ -167,10 +167,11 @@ function toSingleChannelBuffer(data, channels) {
 
 function adjustHeightMap(data, strength) {
   const contrast = 0.45 + (strength / 100) * 1.85
+  const blend = Math.min(1, strength / defaultMaterialMapStrengths.heightStrength)
   const output = Buffer.alloc(data.length)
 
   for (let index = 0; index < data.length; index += 1) {
-    output[index] = clampChannel(128 + (data[index] - 128) * contrast)
+    output[index] = clampChannel(128 + (data[index] - 128) * contrast * blend)
   }
 
   return output
@@ -203,8 +204,12 @@ function adjustMetallicMap(data, strength) {
 }
 
 function buildNormalMapFromHeightData(heightData, width, height, strength) {
+  if (strength <= 0) {
+    return buildFlatNormalMap(width, height)
+  }
+
   const output = Buffer.alloc(width * height * 3)
-  const intensity = 0.3 + (strength / 100) * 5.7
+  const intensity = (strength / 100) * 6
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
@@ -224,6 +229,18 @@ function buildNormalMapFromHeightData(heightData, width, height, strength) {
       output[offset + 1] = clampChannel(((ny / length) * 0.5 + 0.5) * 255)
       output[offset + 2] = clampChannel(((nz / length) * 0.5 + 0.5) * 255)
     }
+  }
+
+  return output
+}
+
+function buildFlatNormalMap(width, height) {
+  const output = Buffer.alloc(width * height * 3)
+
+  for (let index = 0; index < output.length; index += 3) {
+    output[index] = 128
+    output[index + 1] = 128
+    output[index + 2] = 255
   }
 
   return output

@@ -50,6 +50,7 @@ export function TextureMaterialPack({
 }: TextureMaterialPackProps) {
   const hasAnyMaps = materialMapOrder.some((mapKey) => Boolean(maps[mapKey]))
   const hasAllMaps = materialMapOrder.every((mapKey) => Boolean(maps[mapKey]))
+  const canRegenerate = !isLoading && (Boolean(error) || isDirty || !hasAllMaps)
   const statusLabel = isLoading
     ? 'Generating'
     : error
@@ -68,7 +69,7 @@ export function TextureMaterialPack({
             Material Pack
           </p>
           <p className="mt-2 text-sm text-zinc-300">
-            Generate PBR-ready maps inline from this Texture Lab result and download each PNG separately.
+            Preview strength changes live in the viewer, then regenerate to bake fresh PNG maps for download.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -77,7 +78,7 @@ export function TextureMaterialPack({
           </span>
           <button
             type="button"
-            disabled={isLoading || (!isDirty && !error)}
+            disabled={!canRegenerate}
             onClick={onRegenerate}
             className="rounded-full border border-sky-300/20 bg-sky-400/10 px-3 py-1.5 text-xs text-sky-50 transition hover:border-sky-300/35 hover:bg-sky-400/16 disabled:cursor-not-allowed disabled:opacity-60"
           >
@@ -102,7 +103,11 @@ export function TextureMaterialPack({
       ) : null}
 
       <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-4">
-        <TextureMaterialViewer maps={maps} sourceDataUrl={sourceResult.dataUrl} />
+        <TextureMaterialViewer
+          maps={maps}
+          sourceDataUrl={sourceResult.dataUrl}
+          strengths={strengths}
+        />
 
         <div className="space-y-4">
           <article className="rounded-[22px] border border-white/10 bg-white/[0.03] p-3">
@@ -118,7 +123,7 @@ export function TextureMaterialPack({
             </div>
             <p className="mt-3 text-xs leading-5 text-zinc-400">
               The source texture anchors all generated maps and stays unchanged while the viewer
-              applies the current material response live.
+              applies the current live response. Regenerate when you want the baked PNGs to match.
             </p>
           </article>
 
@@ -173,7 +178,7 @@ export function TextureMaterialPack({
                   step={1}
                   value={strengths[strengthKey]}
                   disabled={isLoading}
-                  onChange={(event) => onStrengthChange(strengthKey, Number(event.target.value))}
+                  onInput={(event) => onStrengthChange(strengthKey, Number(event.currentTarget.value))}
                   className="mt-3 w-full cursor-pointer accent-sky-400 disabled:cursor-not-allowed"
                 />
                 <p className="mt-3 text-xs leading-5 text-zinc-500">

@@ -1,5 +1,5 @@
 import { memo, Suspense, useMemo, useState } from 'react'
-import { Bounds, Html, OrbitControls, useTexture } from '@react-three/drei'
+import { Html, OrbitControls, useTexture } from '@react-three/drei'
 import { Canvas } from '@react-three/fiber'
 import { Lightbulb, Move3d } from 'lucide-react'
 import {
@@ -9,7 +9,7 @@ import {
   Texture,
 } from 'three'
 
-import type { TextureMaterialMapKey } from '../lib/forge'
+import type { TextureMaterialMapDefaults, TextureMaterialMapKey } from '../lib/forge'
 import type { MaterialMapResult } from '../modes/execution'
 
 const materialMapOrder: TextureMaterialMapKey[] = [
@@ -32,11 +32,13 @@ const emptyTextureDataUrl =
 type TextureMaterialViewerProps = {
   maps: Partial<Record<TextureMaterialMapKey, MaterialMapResult>>
   sourceDataUrl: string
+  strengths: TextureMaterialMapDefaults
 }
 
 export const TextureMaterialViewer = memo(function TextureMaterialViewer({
   maps,
   sourceDataUrl,
+  strengths,
 }: TextureMaterialViewerProps) {
   const [lightAzimuth, setLightAzimuth] = useState(38)
   const [lightElevation, setLightElevation] = useState(42)
@@ -90,9 +92,16 @@ export const TextureMaterialViewer = memo(function TextureMaterialViewer({
                   lightIntensity={lightIntensity / 100}
                   maps={maps}
                   sourceDataUrl={sourceDataUrl}
+                  strengths={strengths}
                 />
               </Suspense>
-              <OrbitControls enableDamping makeDefault maxDistance={6} minDistance={1.7} />
+              <OrbitControls
+                enableDamping
+                makeDefault
+                maxDistance={6}
+                minDistance={1.7}
+                target={[0, 0.1, 0]}
+              />
             </Canvas>
           ) : (
             <ViewerFallback hasAnyMaps={hasAnyMaps} sourceDataUrl={sourceDataUrl} />
@@ -133,6 +142,7 @@ type MaterialPreviewSceneProps = {
   lightIntensity: number
   maps: Partial<Record<TextureMaterialMapKey, MaterialMapResult>>
   sourceDataUrl: string
+  strengths: TextureMaterialMapDefaults
 }
 
 function MaterialPreviewScene({
@@ -141,6 +151,7 @@ function MaterialPreviewScene({
   lightIntensity,
   maps,
   sourceDataUrl,
+  strengths,
 }: MaterialPreviewSceneProps) {
   const [baseColorTexture, heightTexture, normalTexture, roughnessTexture, metallicTexture] =
     useTexture([
@@ -158,6 +169,14 @@ function MaterialPreviewScene({
   configureMaterialTexture(metallicTexture)
 
   const lightPosition = buildLightPosition(lightAzimuth, lightElevation, 4.4)
+  const hasHeightMap = Boolean(maps.height) && strengths.heightStrength > 0
+  const hasNormalMap = Boolean(maps.normal) && strengths.normalStrength > 0
+  const hasRoughnessMap = Boolean(maps.roughness) && strengths.roughnessStrength > 0
+  const hasMetallicMap = Boolean(maps.metallic) && strengths.metallicStrength > 0
+  const displacementScale = hasHeightMap ? (strengths.heightStrength / 100) * 0.33 : 0
+  const normalScale = hasNormalMap ? strengths.normalStrength / 60 : 0
+  const roughnessStrength = strengths.roughnessStrength / 100
+  const metallicStrength = strengths.metallicStrength / 100
 
   return (
     <>
@@ -166,29 +185,28 @@ function MaterialPreviewScene({
       <directionalLight position={lightPosition} intensity={lightIntensity} />
       <directionalLight position={[-2.6, 1.4, -2.4]} intensity={0.35} color="#bfd7ff" />
 
-      <Bounds fit clip observe margin={1.2}>
-        <group>
-          <mesh rotation={[-0.92, 0.42, 0.04]} position={[0, 0.1, 0]}>
-            <planeGeometry args={[3, 3, 256, 256]} />
-            <meshStandardMaterial
-              displacementMap={maps.height ? heightTexture : null}
-              displacementScale={maps.height ? 0.2 : 0}
-              map={baseColorTexture}
-              metalness={maps.metallic ? 1 : 0.08}
-              metalnessMap={maps.metallic ? metallicTexture : null}
-              normalMap={maps.normal ? normalTexture : null}
-              roughness={maps.roughness ? 1 : 0.84}
-              roughnessMap={maps.roughness ? roughnessTexture : null}
-              side={DoubleSide}
-            />
-          </mesh>
+      <group>
+        <mesh rotation={[-0.92, 0.42, 0.04]} position={[0, 0.1, 0]}>
+          <planeGeometry args={[3, 3, 256, 256]} />
+          <meshStandardMaterial
+            displacementMap={hasHeightMap ? heightTexture : null}
+            displacementScale={displacementScale}
+            map={baseColorTexture}
+            metalness={hasMetallicMap ? metallicStrength : 0.08}
+            metalnessMap={hasMetallicMap ? metallicTexture : null}
+            normalMap={hasNormalMap ? normalTexture : null}
+            normalScale={[normalScale, normalScale]}
+            roughness={hasRoughnessMap ? 0.84 + roughnessStrength * 0.16 : 0.84}
+            roughnessMap={hasRoughnessMap ? roughnessTexture : null}
+            side={DoubleSide}
+          />
+        </mesh>
 
-          <mesh position={[0, -1.15, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-            <circleGeometry args={[4.6, 64]} />
-            <meshBasicMaterial color="#0a0f17" />
-          </mesh>
-        </group>
-      </Bounds>
+        <mesh position={[0, -1.15, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <circleGeometry args={[4.6, 64]} />
+          <meshBasicMaterial color="#0a0f17" />
+        </mesh>
+      </group>
     </>
   )
 }
@@ -266,7 +284,7 @@ function LightControl({
           className="w-full cursor-pointer accent-sky-400"
           max={max}
           min={min}
-          onChange={(event) => onChange(Number(event.target.value))}
+          onInput={(event) => onChange(Number(event.currentTarget.value))}
           step={1}
           type="range"
           value={value}

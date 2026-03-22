@@ -76,6 +76,26 @@ function buildImageGeneration(base64, mimeType = 'image/png') {
   }
 }
 
+function buildTextOnlyGeneration(text) {
+  return {
+    candidates: [
+      {
+        content: {
+          parts: [
+            {
+              text,
+            },
+          ],
+        },
+      },
+    ],
+    text,
+    usageMetadata: {
+      totalTokenCount: 123,
+    },
+  }
+}
+
 describe('Texture Lab batch scheduling', () => {
   it('caps Texture Lab worker count at 2 by default', async () => {
     const serverModule = await loadServerModule({
@@ -496,6 +516,176 @@ describe('API hardening', () => {
     expect(normalMap.width).toBe(4)
     expect(normalMap.height).toBe(4)
     expect(decodedNormal.channels).toBe(3)
+  })
+
+  it('falls back to another image-capable model when a material map attempt returns no inline image', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateContent.mockReset()
+
+    const sourceImageBase64 = await createPngBase64(4, 4, [
+      0, 0, 0, 60, 60, 60, 180, 180, 180, 255, 255, 255,
+      0, 0, 0, 60, 60, 60, 180, 180, 180, 255, 255, 255,
+      0, 0, 0, 60, 60, 60, 180, 180, 180, 255, 255, 255,
+      0, 0, 0, 60, 60, 60, 180, 180, 180, 255, 255, 255,
+    ])
+    const generatedHeightBase64 = await createPngBase64(2, 2, [
+      20, 20, 20, 220, 220, 220,
+      20, 20, 20, 220, 220, 220,
+    ])
+    const generatedRoughnessBase64 = await createPngBase64(2, 2, [
+      80, 30, 10, 120, 60, 20,
+      160, 90, 30, 220, 140, 50,
+    ])
+    const generatedMetallicBase64 = await createPngBase64(2, 2, [
+      5, 40, 80, 25, 70, 110,
+      45, 100, 140, 85, 150, 200,
+    ])
+
+    __mock.generateContent.mockImplementation(async ({ contents, model }) => {
+      const prompt = contents?.[0]?.text ?? ''
+
+      if (prompt.includes('height map')) {
+        if (model === 'gemini-3-pro-image-preview') {
+          return buildTextOnlyGeneration('Here is a material analysis without inline image output.')
+        }
+
+        return buildImageGeneration(generatedHeightBase64)
+      }
+
+      if (prompt.includes('roughness map')) {
+        return buildImageGeneration(generatedRoughnessBase64)
+      }
+
+      if (prompt.includes('metallic map')) {
+        return buildImageGeneration(generatedMetallicBase64)
+      }
+
+      throw new Error(`Unexpected prompt in test: ${prompt}`)
+    })
+
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/material-maps')
+      .send({
+        heightStrength: 90,
+        metallicStrength: 10,
+        normalStrength: 75,
+        prompt: 'weathered brushed metal floor',
+        roughnessStrength: 40,
+        sourceImage: {
+          data: sourceImageBase64,
+          mimeType: 'image/png',
+        },
+        styleText: 'neutral production texture',
+      })
+
+    expect(response.status).toBe(200)
+    expect(Object.keys(response.body.maps)).toEqual([
+      'height',
+      'metallic',
+      'normal',
+      'roughness',
+    ])
+    expect(
+      __mock.generateContent.mock.calls.some(
+        ([requestBody]) =>
+          requestBody?.model === 'gemini-2.5-flash-image' &&
+          requestBody?.contents?.[0]?.text?.includes('height map'),
+      ),
+    ).toBe(true)
+  })
+
+  it('regenerates all AI utility maps on every material-map request and rebuilds normal from current strengths', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateContent.mockReset()
+
+    const sourceImageBase64 = await createPngBase64(4, 4, [
+      0, 0, 0, 60, 60, 60, 180, 180, 180, 255, 255, 255,
+      0, 0, 0, 60, 60, 60, 180, 180, 180, 255, 255, 255,
+      0, 0, 0, 60, 60, 60, 180, 180, 180, 255, 255, 255,
+      0, 0, 0, 60, 60, 60, 180, 180, 180, 255, 255, 255,
+    ])
+    const generatedHeightBase64 = await createPngBase64(2, 2, [
+      20, 20, 20, 220, 220, 220,
+      20, 20, 20, 220, 220, 220,
+    ])
+    const generatedRoughnessBase64 = await createPngBase64(2, 2, [
+      80, 30, 10, 120, 60, 20,
+      160, 90, 30, 220, 140, 50,
+    ])
+    const generatedMetallicBase64 = await createPngBase64(2, 2, [
+      5, 40, 80, 25, 70, 110,
+      45, 100, 140, 85, 150, 200,
+    ])
+
+    __mock.generateContent
+      .mockResolvedValueOnce(buildImageGeneration(generatedHeightBase64))
+      .mockResolvedValueOnce(buildImageGeneration(generatedRoughnessBase64))
+      .mockResolvedValueOnce(buildImageGeneration(generatedMetallicBase64))
+      .mockResolvedValueOnce(buildImageGeneration(generatedHeightBase64))
+      .mockResolvedValueOnce(buildImageGeneration(generatedRoughnessBase64))
+      .mockResolvedValueOnce(buildImageGeneration(generatedMetallicBase64))
+
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    const lowHeightResponse = await request(app)
+      .post('/api/material-maps')
+      .send({
+        heightStrength: 0,
+        metallicStrength: 10,
+        normalStrength: 60,
+        prompt: 'weathered brushed metal floor',
+        roughnessStrength: 40,
+        sourceImage: {
+          data: sourceImageBase64,
+          mimeType: 'image/png',
+        },
+        styleText: 'neutral production texture',
+      })
+    const highHeightResponse = await request(app)
+      .post('/api/material-maps')
+      .send({
+        heightStrength: 100,
+        metallicStrength: 10,
+        normalStrength: 60,
+        prompt: 'weathered brushed metal floor',
+        roughnessStrength: 40,
+        sourceImage: {
+          data: sourceImageBase64,
+          mimeType: 'image/png',
+        },
+        styleText: 'neutral production texture',
+      })
+
+    expect(lowHeightResponse.status).toBe(200)
+    expect(highHeightResponse.status).toBe(200)
+    expect(__mock.generateContent).toHaveBeenCalledTimes(6)
+    expect(Object.keys(lowHeightResponse.body.maps)).toEqual([
+      'height',
+      'metallic',
+      'normal',
+      'roughness',
+    ])
+    expect(Object.keys(highHeightResponse.body.maps)).toEqual([
+      'height',
+      'metallic',
+      'normal',
+      'roughness',
+    ])
+
+    const lowHeightNormal = await sharp(Buffer.from(lowHeightResponse.body.maps.normal.data, 'base64'))
+      .raw()
+      .toBuffer()
+    const highHeightNormal = await sharp(Buffer.from(highHeightResponse.body.maps.normal.data, 'base64'))
+      .raw()
+      .toBuffer()
+
+    expect(Buffer.compare(lowHeightNormal, highHeightNormal)).not.toBe(0)
   })
 })
 

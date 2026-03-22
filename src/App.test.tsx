@@ -254,8 +254,38 @@ describe('App Texture Lab material packs', () => {
         within(materialPack).getByRole('button', { name: /Download All Maps/i }),
       ).toBeEnabled()
     })
+
+    const materialMapRequestsAfterFirstGenerate = fetchMock.mock.calls.filter(
+      ([url]) => url === '/api/material-maps',
+    )
+    const initialMaterialMapRequest = JSON.parse(
+      String(materialMapRequestsAfterFirstGenerate[0]?.[1]?.body ?? '{}'),
+    )
+
+    expect(initialMaterialMapRequest.heightStrength).toBe(60)
+    expect(initialMaterialMapRequest.normalStrength).toBe(60)
+
     fireEvent.change(within(materialPack).getByLabelText(/Height Strength/i), {
       target: { value: '85' },
+    })
+    expect(within(materialPack).getByText('Needs Regeneration')).toBeInTheDocument()
+    expect(within(materialPack).getByRole('button', { name: /Regenerate Maps/i })).toBeEnabled()
+
+    fireEvent.change(within(materialPack).getByLabelText(/Height Strength/i), {
+      target: { value: '60' },
+    })
+
+    await waitFor(() => {
+      expect(within(materialPack).queryByText('Needs Regeneration')).not.toBeInTheDocument()
+    })
+    expect(within(materialPack).getByText('Ready')).toBeInTheDocument()
+    expect(within(materialPack).getByRole('button', { name: /Regenerate Maps/i })).toBeDisabled()
+
+    fireEvent.change(within(materialPack).getByLabelText(/Height Strength/i), {
+      target: { value: '0' },
+    })
+    fireEvent.change(within(materialPack).getByLabelText(/Normal Strength/i), {
+      target: { value: '0' },
     })
     expect(within(materialPack).getByText('Needs Regeneration')).toBeInTheDocument()
 
@@ -266,6 +296,16 @@ describe('App Texture Lab material packs', () => {
         fetchMock.mock.calls.filter(([url]) => url === '/api/material-maps'),
       ).toHaveLength(2)
     })
+
+    const materialMapRequestsAfterRegenerate = fetchMock.mock.calls.filter(
+      ([url]) => url === '/api/material-maps',
+    )
+    const regenerateMaterialMapRequest = JSON.parse(
+      String(materialMapRequestsAfterRegenerate[1]?.[1]?.body ?? '{}'),
+    )
+
+    expect(regenerateMaterialMapRequest.heightStrength).toBe(0)
+    expect(regenerateMaterialMapRequest.normalStrength).toBe(0)
 
     fireEvent.click(within(materialPack).getByRole('button', { name: /Download Height/i }))
     fireEvent.click(within(materialPack).getByRole('button', { name: /Download All Maps/i }))

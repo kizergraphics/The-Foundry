@@ -99,7 +99,7 @@ describe('TextureMaterialPack', () => {
     fireEvent.click(renderedPack.getAllByRole('button', { name: /Regenerate Maps/i })[0])
     fireEvent.click(renderedPack.getByRole('button', { name: /Download All Maps/i }))
     fireEvent.click(renderedPack.getByRole('button', { name: /Download Height/i }))
-    fireEvent.change(renderedPack.getByLabelText(/Height Strength/i), {
+    fireEvent.input(renderedPack.getByLabelText(/Height Strength/i), {
       target: { value: '84' },
     })
 

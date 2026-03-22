@@ -88,7 +88,7 @@ const routeModelAllowlist = {
   '/api/action-animator-strip': ['gemini-3-pro', 'gemini-2.5-flash-image'],
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
-  '/api/material-maps': ['gemini-3-pro'],
+  '/api/material-maps': ['gemini-3-pro', 'gemini-2.5-flash-image', 'gemini-3-flash'],
   '/api/variant-forge-ideas': ['gemini-3-flash'],
 }
 const supportedForgeModes = forgeApiModes
@@ -1095,32 +1095,14 @@ app.post(
       styleText,
     })
     const generationRequests = ['height', 'roughness', 'metallic'].map((mapKind) =>
-      withTimeout(
-        ai.models.generateContent({
-          model: modelSelection.providerModel,
-          contents: [
-            {
-              text: buildMaterialMapPrompt(mapKind, promptContext),
-            },
-            {
-              inlineData: {
-                mimeType: sourceImage.mimeType,
-                data: sourceImage.data,
-              },
-            },
-          ],
-          config: {
-            candidateCount: 1,
-            responseModalities: ['IMAGE', 'TEXT'],
-            systemInstruction: buildMaterialMapSystemInstruction(mapKind),
-          },
-        }),
-        forgeGenerationTimeoutMs,
-        `Material ${mapKind} map generation timed out.`,
-      ).then((generation) => ({
-        generation,
+      generateMaterialMapImageWithFallback({
+        ai,
         mapKind,
-      })),
+        preferredModelId: modelSelection.modelId,
+        promptContext,
+        requestId,
+        sourceImage,
+      }),
     )
 
     logServerEvent(requestId, 'material map generation started', {
@@ -1131,17 +1113,31 @@ app.post(
     const generatedMaps = await Promise.all(generationRequests)
     const imageBuffers = {}
 
-    for (const { generation, mapKind } of generatedMaps) {
-      const [generatedImage] = extractImages(generation)
+    for (const generatedMap of generatedMaps) {
+      if (!generatedMap.ok) {
+        if (generatedMap.failureKind === 'no-image') {
+          response
+            .status(422)
+            .json(
+              buildNoImageResponseError(
+                '/api/material-maps',
+                generatedMap.modelSelection,
+                generatedMap.generationText,
+                [`Attempted models: ${generatedMap.attemptedModelIds.join(', ')}`],
+              ),
+            )
+          return
+        }
 
-      if (!generatedImage) {
-        response
-          .status(422)
-          .json(buildNoImageResponseError('/api/material-maps', modelSelection, generation.text))
+        const normalizedError = normalizeGeminiError(
+          generatedMap.error,
+          generatedMap.modelSelection.modelId,
+        )
+        response.status(normalizedError.status).json(normalizedError.body)
         return
       }
 
-      imageBuffers[mapKind] = Buffer.from(generatedImage.data, 'base64')
+      imageBuffers[generatedMap.mapKind] = Buffer.from(generatedMap.generatedImage.data, 'base64')
     }
 
     const finalizedMaps = await buildMaterialMapsFromGeneratedImages({
@@ -1157,12 +1153,12 @@ app.post(
     })
 
     await Promise.all(
-      generatedMaps.map(({ generation }) =>
+      generatedMaps.map(({ generation, modelSelection: successfulModelSelection }) =>
         recordUsageEvent({
-          model: modelSelection.modelId,
+          model: successfulModelSelection.modelId,
           route: '/api/material-maps',
           telemetryModel: resolveTelemetryModelId(
-            modelSelection.modelId,
+            successfulModelSelection.modelId,
             '/api/material-maps',
           ),
           tokenCount: extractTotalTokenCount(generation),
@@ -2806,6 +2802,15 @@ function resolveModelForRoute(routeKey, requestedModelId) {
   }
 }
 
+function buildRouteModelFallbackSequence(routeKey, preferredModelId) {
+  const allowedModels = routeModelAllowlist[routeKey] ?? []
+
+  return [
+    preferredModelId,
+    ...allowedModels.filter((modelId) => modelId !== preferredModelId),
+  ]
+}
+
 function resolveTelemetryModelId(modelId, routeKey) {
   if (routeKey === '/internal/prompt-orchestrator') {
     return 'gemini-3-flash-text'
@@ -2842,7 +2847,7 @@ function extractTotalTokenCount(result) {
   return Number.isFinite(tokenCount) && tokenCount > 0 ? Math.round(tokenCount) : 0
 }
 
-function buildNoImageResponseError(routeKey, modelSelection, generationText) {
+function buildNoImageResponseError(routeKey, modelSelection, generationText, extraDetails = []) {
   const incompatibleSignal = looksLikeToolDelegation(generationText)
   const recommendedModelIds = routeModelAllowlist[routeKey] ?? []
   const recommendations = recommendedModelIds
@@ -2852,6 +2857,7 @@ function buildNoImageResponseError(routeKey, modelSelection, generationText) {
   const details = [
     `Selected model alias: ${modelSelection.modelId}`,
     `Provider model: ${modelSelection.providerModel}`,
+    ...extraDetails,
   ]
 
   if (recommendations.length) {
@@ -3178,6 +3184,121 @@ async function generateAnimatorSpriteSheet({
       'Frames are sampled directly from the generated clip with feet, lighting, centering, and background constraints injected server-side.',
     prompt: normalizedPrompt,
     spriteSheetBase64,
+  }
+}
+
+async function generateMaterialMapImageWithFallback({
+  ai,
+  mapKind,
+  preferredModelId,
+  promptContext,
+  requestId,
+  sourceImage,
+}) {
+  const attemptedModelIds = []
+  let lastGenerationText = ''
+  let lastNoImageSelection = null
+  let lastError = null
+
+  for (const candidateModelId of buildRouteModelFallbackSequence(
+    '/api/material-maps',
+    preferredModelId,
+  )) {
+    const modelSelection = resolveModelForRoute('/api/material-maps', candidateModelId)
+
+    if (!modelSelection.ok) {
+      continue
+    }
+
+    attemptedModelIds.push(modelSelection.modelId)
+
+    try {
+      const generation = await withTimeout(
+        ai.models.generateContent({
+          model: modelSelection.providerModel,
+          contents: [
+            {
+              text: buildMaterialMapPrompt(mapKind, promptContext),
+            },
+            {
+              inlineData: {
+                mimeType: sourceImage.mimeType,
+                data: sourceImage.data,
+              },
+            },
+          ],
+          config: {
+            candidateCount: 1,
+            responseModalities: ['IMAGE', 'TEXT'],
+            systemInstruction: buildMaterialMapSystemInstruction(mapKind),
+          },
+        }),
+        forgeGenerationTimeoutMs,
+        `Material ${mapKind} map generation timed out.`,
+      )
+      const [generatedImage] = extractImages(generation)
+
+      if (generatedImage) {
+        if (attemptedModelIds.length > 1) {
+          logServerEvent(requestId, 'material map fallback succeeded', {
+            attemptedModels: attemptedModelIds,
+            mapKind,
+            resolvedModel: modelSelection.modelId,
+          })
+        }
+
+        return {
+          attemptedModelIds,
+          generatedImage,
+          generation,
+          mapKind,
+          modelSelection,
+          ok: true,
+        }
+      }
+
+      lastGenerationText = generation.text ?? lastGenerationText
+      lastNoImageSelection = modelSelection
+      logServerEvent(requestId, 'material map generation returned no image', {
+        attemptedModels: attemptedModelIds,
+        mapKind,
+        model: modelSelection.modelId,
+        providerModel: modelSelection.providerModel,
+      })
+    } catch (error) {
+      lastError = {
+        error,
+        modelSelection,
+      }
+      logServerEvent(requestId, 'material map generation attempt failed', {
+        attemptedModels: attemptedModelIds,
+        mapKind,
+        model: modelSelection.modelId,
+        providerModel: modelSelection.providerModel,
+      })
+    }
+  }
+
+  if (lastNoImageSelection) {
+    return {
+      attemptedModelIds,
+      failureKind: 'no-image',
+      generationText: lastGenerationText,
+      mapKind,
+      modelSelection: lastNoImageSelection,
+      ok: false,
+    }
+  }
+
+  return {
+    attemptedModelIds,
+    error: lastError?.error ?? new Error(`Material ${mapKind} map generation failed.`),
+    failureKind: 'error',
+    mapKind,
+    modelSelection:
+      lastError?.modelSelection ??
+      resolveModelForRoute('/api/material-maps', preferredModelId),
+    ok: false,
   }
 }
 

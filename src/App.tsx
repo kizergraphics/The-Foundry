@@ -197,6 +197,7 @@ type TextureMaterialPackState = {
   dirty: boolean
   error: ForgeErrorInfo | null
   isVisible: boolean
+  lastBakedStrengths: TextureMaterialMapDefaults | null
   maps: Partial<Record<TextureMaterialMapKey, MaterialMapResult>>
   status: 'idle' | 'loading' | 'ready' | 'error'
   strengths: TextureMaterialMapDefaults
@@ -326,11 +327,10 @@ function buildTextureMaterialPackState(
     dirty: false,
     error: null,
     isVisible: true,
+    lastBakedStrengths: null,
     maps: {},
     status: 'idle',
-    strengths: {
-      ...defaults,
-    },
+    strengths: cloneTextureMaterialStrengths(defaults),
   }
 }
 
@@ -356,6 +356,37 @@ function sleep(delayMs: number) {
 
 function hasGeneratedTextureMaterialMaps(pack: TextureMaterialPackState | undefined) {
   return textureMaterialMapOrder.some((mapKey) => Boolean(pack?.maps[mapKey]))
+}
+
+function cloneTextureMaterialStrengths(
+  strengths: TextureMaterialMapDefaults,
+): TextureMaterialMapDefaults {
+  return {
+    ...strengths,
+  }
+}
+
+function areTextureMaterialStrengthsEqual(
+  left: TextureMaterialMapDefaults,
+  right: TextureMaterialMapDefaults | null,
+) {
+  if (!right) {
+    return false
+  }
+
+  return (
+    left.heightStrength === right.heightStrength &&
+    left.normalStrength === right.normalStrength &&
+    left.roughnessStrength === right.roughnessStrength &&
+    left.metallicStrength === right.metallicStrength
+  )
+}
+
+function getTextureMaterialPackDirty(
+  strengths: TextureMaterialMapDefaults,
+  lastBakedStrengths: TextureMaterialMapDefaults | null,
+) {
+  return Boolean(lastBakedStrengths) && !areTextureMaterialStrengthsEqual(strengths, lastBakedStrengths)
 }
 
 function buildHydratedForgeState(
@@ -1628,17 +1659,18 @@ function App() {
       const existingPack =
         previousPacks[resultId] ??
         buildTextureMaterialPackState(state.textureLab.materialMapDefaults)
+      const nextStrengths = {
+        ...existingPack.strengths,
+        [key]: Math.max(0, Math.min(100, Math.round(value))),
+      }
 
       return {
         ...previousPacks,
         [resultId]: {
           ...existingPack,
-          dirty: hasGeneratedTextureMaterialMaps(existingPack) || existingPack.status === 'error',
+          dirty: getTextureMaterialPackDirty(nextStrengths, existingPack.lastBakedStrengths),
           isVisible: true,
-          strengths: {
-            ...existingPack.strengths,
-            [key]: Math.max(0, Math.min(100, Math.round(value))),
-          },
+          strengths: nextStrengths,
         },
       }
     })
@@ -1660,9 +1692,7 @@ function App() {
           error: null,
           isVisible: true,
           status: 'loading',
-          strengths: {
-            ...strengths,
-          },
+          strengths: cloneTextureMaterialStrengths(strengths),
         },
       }
     })
@@ -1695,11 +1725,10 @@ function App() {
           dirty: false,
           error: null,
           isVisible: true,
+          lastBakedStrengths: cloneTextureMaterialStrengths(strengths),
           maps: normalizedMaps,
           status: 'ready',
-          strengths: {
-            ...strengths,
-          },
+          strengths: cloneTextureMaterialStrengths(strengths),
         },
       }))
       setNotice('Material maps are ready below the selected texture.')
@@ -1716,13 +1745,11 @@ function App() {
           ...previousPacks,
           [result.id]: {
             ...existingPack,
-            dirty: hasGeneratedTextureMaterialMaps(existingPack) || existingPack.status === 'error',
+            dirty: getTextureMaterialPackDirty(strengths, existingPack.lastBakedStrengths),
             error: nextError,
             isVisible: true,
             status: 'error',
-            strengths: {
-              ...strengths,
-            },
+            strengths: cloneTextureMaterialStrengths(strengths),
           },
         }
       })

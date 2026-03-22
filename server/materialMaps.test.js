@@ -126,6 +126,82 @@ describe('buildMaterialMapsFromGeneratedImages', () => {
       measureDeviation(lowStrengthRaw.data),
     )
   })
+
+  it('flattens the baked height and normal maps when their strengths are zero', async () => {
+    const sourceWidth = 4
+    const sourceHeight = 4
+    const variedImageBuffer = await createRgbPng(sourceWidth, sourceHeight, [
+      10, 20, 30, 70, 80, 90, 140, 150, 160, 220, 230, 240,
+      20, 30, 40, 80, 90, 100, 150, 160, 170, 230, 240, 250,
+      30, 40, 50, 90, 100, 110, 160, 170, 180, 240, 250, 255,
+      40, 50, 60, 100, 110, 120, 170, 180, 190, 250, 255, 255,
+    ])
+
+    const maps = await buildMaterialMapsFromGeneratedImages({
+      heightImageBuffer: variedImageBuffer,
+      heightStrength: 0,
+      metallicImageBuffer: variedImageBuffer,
+      metallicStrength: 60,
+      normalStrength: 0,
+      roughnessImageBuffer: variedImageBuffer,
+      roughnessStrength: 60,
+      sourceHeight,
+      sourceWidth,
+    })
+    const rawHeight = await sharp(maps.height.buffer)
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+    const rawNormal = await sharp(maps.normal.buffer)
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+
+    expect(hasUniformChannelValue(rawHeight.data, rawHeight.info.channels, 128)).toBe(true)
+    expect(isFlatNormal(rawNormal.data)).toBe(true)
+  })
+
+  it('rebuilds the derived normal map from the finalized height output each time', async () => {
+    const sourceWidth = 4
+    const sourceHeight = 4
+    const gradientImageBuffer = await createRgbPng(sourceWidth, sourceHeight, [
+      10, 10, 10, 60, 60, 60, 140, 140, 140, 240, 240, 240,
+      10, 10, 10, 60, 60, 60, 140, 140, 140, 240, 240, 240,
+      10, 10, 10, 60, 60, 60, 140, 140, 140, 240, 240, 240,
+      10, 10, 10, 60, 60, 60, 140, 140, 140, 240, 240, 240,
+    ])
+
+    const flatHeightMaps = await buildMaterialMapsFromGeneratedImages({
+      heightImageBuffer: gradientImageBuffer,
+      heightStrength: 0,
+      metallicImageBuffer: gradientImageBuffer,
+      metallicStrength: 60,
+      normalStrength: 60,
+      roughnessImageBuffer: gradientImageBuffer,
+      roughnessStrength: 60,
+      sourceHeight,
+      sourceWidth,
+    })
+    const raisedHeightMaps = await buildMaterialMapsFromGeneratedImages({
+      heightImageBuffer: gradientImageBuffer,
+      heightStrength: 100,
+      metallicImageBuffer: gradientImageBuffer,
+      metallicStrength: 60,
+      normalStrength: 60,
+      roughnessImageBuffer: gradientImageBuffer,
+      roughnessStrength: 60,
+      sourceHeight,
+      sourceWidth,
+    })
+    const flatNormal = await sharp(flatHeightMaps.normal.buffer)
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+    const raisedNormal = await sharp(raisedHeightMaps.normal.buffer)
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+
+    expect(measureNormalDeviation(raisedNormal.data)).toBeGreaterThan(
+      measureNormalDeviation(flatNormal.data),
+    )
+  })
 })
 
 function isGrayscale(buffer, channels) {
@@ -140,4 +216,38 @@ function isGrayscale(buffer, channels) {
   }
 
   return true
+}
+
+function hasUniformChannelValue(buffer, channels, expectedValue) {
+  for (let index = 0; index < buffer.length; index += channels) {
+    for (let channelIndex = 0; channelIndex < channels; channelIndex += 1) {
+      if (buffer[index + channelIndex] !== expectedValue) {
+        return false
+      }
+    }
+  }
+
+  return true
+}
+
+function isFlatNormal(buffer) {
+  for (let index = 0; index < buffer.length; index += 3) {
+    if (buffer[index] !== 128 || buffer[index + 1] !== 128 || buffer[index + 2] !== 255) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function measureNormalDeviation(buffer) {
+  let totalDeviation = 0
+
+  for (let index = 0; index < buffer.length; index += 3) {
+    totalDeviation += Math.abs(buffer[index] - 128)
+    totalDeviation += Math.abs(buffer[index + 1] - 128)
+    totalDeviation += Math.abs(buffer[index + 2] - 255)
+  }
+
+  return totalDeviation / (buffer.length / 3)
 }
