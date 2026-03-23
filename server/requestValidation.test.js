@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import {
   validateActionAnimatorRequest,
+  validateVfxExportRequest,
   validateForgeRequest,
   validateMaterialMapsRequest,
   validateVariantForgeIdeaRequest,
+  validateVfxRecipeRequest,
 } from './requestValidation.js'
 
 const validPngBase64 =
@@ -164,6 +166,24 @@ describe('validateVariantForgeIdeaRequest', () => {
       }),
     ).toThrow()
   })
+
+  it('accepts VFX forge texture-generation fields and defaults URP pipeline values', () => {
+    expect(
+      validateForgeRequest({
+        effectLabel: 'Fireball',
+        exportTarget: 'particle-system',
+        mode: 'vfx-forge',
+        textureKind: 'flipbook',
+        textureOutputs: ['flipbook', 'noise'],
+      }),
+    ).toMatchObject({
+      effectLabel: 'Fireball',
+      exportTarget: 'particle-system',
+      textureKind: 'flipbook',
+      textureOutputs: ['flipbook', 'noise'],
+      unityPipeline: 'urp',
+    })
+  })
 })
 
 describe('validateMaterialMapsRequest', () => {
@@ -195,6 +215,73 @@ describe('validateMaterialMapsRequest', () => {
           data: 'abc123',
           mimeType: 'text/plain',
         },
+      }),
+    ).toThrow()
+  })
+})
+
+describe('validateVfxRecipeRequest', () => {
+  it('accepts recipe payloads with valid texture kinds', () => {
+    expect(
+      validateVfxRecipeRequest({
+        effectLabel: 'Arcane Gate',
+        exportTarget: 'vfx-graph',
+        frameCount: 12,
+        intensity: 72,
+        looping: true,
+        textureOutputs: ['swirl', 'noise', 'dissolve-mask'],
+        textures: [
+          {
+            data: validPngBase64,
+            kind: 'swirl',
+            mimeType: 'image/png',
+          },
+          {
+            data: validPngBase64,
+            kind: 'noise',
+            mimeType: 'image/png',
+          },
+        ],
+        unityPipeline: 'urp',
+      }),
+    ).toMatchObject({
+      effectLabel: 'Arcane Gate',
+      exportTarget: 'vfx-graph',
+      textureOutputs: ['swirl', 'noise', 'dissolve-mask'],
+      unityPipeline: 'urp',
+    })
+  })
+
+  it('rejects invalid VFX texture kinds', () => {
+    expect(() =>
+      validateVfxRecipeRequest({
+        textureOutputs: ['flipbook'],
+        textures: [
+          {
+            data: validPngBase64,
+            kind: 'lava-map',
+            mimeType: 'image/png',
+          },
+        ],
+        unitySolution: 'particle-system',
+      }),
+    ).toThrow()
+  })
+})
+
+describe('validateVfxExportRequest', () => {
+  it('rejects unsupported unity solutions', () => {
+    expect(() =>
+      validateVfxExportRequest({
+        textureOutputs: ['flipbook'],
+        textures: [
+          {
+            data: validPngBase64,
+            kind: 'flipbook',
+            mimeType: 'image/png',
+          },
+        ],
+        unitySolution: 'shuriken-pro',
       }),
     ).toThrow()
   })

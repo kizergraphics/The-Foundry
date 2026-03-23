@@ -23,11 +23,19 @@ import {
   validateForgeRequest,
   validateMaterialMapsRequest,
   validateVariantForgeIdeaRequest,
+  validateVfxExportRequest,
+  validateVfxRecipeRequest,
 } from './requestValidation.js'
 import {
   buildMaterialMapsFromGeneratedImages,
   readMaterialMapSourceMetadata,
 } from './materialMaps.js'
+import {
+  buildVfxExportBundle,
+  buildVfxForgePrompt as buildVfxForgePromptForRequest,
+  buildVfxRecipeManifest,
+  resolveVfxForgeSystemInstruction as resolveVfxForgeSystemInstructionForRequest,
+} from './vfxForge.js'
 import {
   getTelemetrySnapshot,
   getUsageSummary,
@@ -45,6 +53,7 @@ import {
   variantForgeDefaultPresetByFamily,
 } from '../shared/variantForgeCatalog.js'
 import { forgeApiModes } from '../shared/modeCatalog.js'
+import { resolveVfxEffectLabel } from '../shared/vfxForgeCatalog.js'
 import { variantForgeIdeaSuggestionCount } from '../shared/variantForgeIdeas.js'
 
 dotenv.config()
@@ -323,6 +332,8 @@ app.post(
 
   const {
     customDirection,
+    effectLabel,
+    exportTarget,
     mode,
     modelId,
     prompt,
@@ -330,7 +341,7 @@ app.post(
     preserveSilhouette,
     generationCount,
     intensity,
-    projectileType,
+    looping,
     frameCount,
     references = [],
     styleId,
@@ -338,8 +349,11 @@ app.post(
     systemInstruction,
     seamRepair,
     seamlessMode,
+    textureKind,
+    textureOutputs,
     textureSize,
     textureExpansion,
+    unityPipeline,
     variantFamily,
     variantIntensity,
     variantOptions,
@@ -450,12 +464,15 @@ app.post(
               styleText: providedStyleText,
             })
         : mode === 'vfx-forge'
-          ? buildVfxForgePrompt({
+          ? buildVfxForgePromptForRequest({
+              effectLabel,
+              exportTarget,
               frameCount,
               intensity,
+              looping,
               prompt: normalizedPrompt,
-              projectileType,
               styleText: providedStyleText,
+              textureKind,
             })
         : await buildForgePromptWithBestPractices({
             ai,
@@ -488,7 +505,11 @@ app.post(
         : mode === 'portrait-studio'
           ? resolvePortraitStudioSystemInstruction(systemInstruction)
         : mode === 'vfx-forge'
-          ? resolveVfxForgeSystemInstruction(systemInstruction, { frameCount })
+          ? resolveVfxForgeSystemInstructionForRequest(systemInstruction, {
+              frameCount,
+              looping,
+              textureKind,
+            })
           : mode === 'texture-lab'
           ? resolveTextureGenerationSystemInstruction(systemInstruction, {
               seamlessMode: Boolean(seamlessMode),
@@ -1031,6 +1052,62 @@ app.post(
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
+  },
+)
+
+app.post(
+  '/api/vfx-recipe',
+  optionalGenerationAuth,
+  forgeRateLimit,
+  forgeConcurrencyLimit,
+  parseForgeBody,
+  async (request, response) => {
+    let validatedRequest
+
+    try {
+      validatedRequest = validateVfxRecipeRequest(request.body ?? {})
+    } catch (error) {
+      response.status(400).json(toValidationResponse(error))
+      return
+    }
+
+    response.json({
+      recipe: buildVfxRecipeManifest(validatedRequest),
+    })
+  },
+)
+
+app.post(
+  '/api/vfx-export',
+  optionalGenerationAuth,
+  forgeRateLimit,
+  forgeConcurrencyLimit,
+  parseForgeBody,
+  async (request, response) => {
+    let validatedRequest
+
+    try {
+      validatedRequest = validateVfxExportRequest(request.body ?? {})
+    } catch (error) {
+      response.status(400).json(toValidationResponse(error))
+      return
+    }
+
+    const bundle = await buildVfxExportBundle(validatedRequest)
+    const normalizedEffectLabel = resolveVfxEffectLabel(validatedRequest.effectLabel)
+    const fileName = [
+      'kizer-forge',
+      'vfx',
+      normalizedEffectLabel,
+      'bundle.zip',
+    ]
+      .join('-')
+      .toLowerCase()
+      .replace(/[^a-zA-Z0-9.-]+/g, '-')
+
+    response.setHeader('Content-Type', 'application/zip')
+    response.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
+    response.send(bundle)
   },
 )
 

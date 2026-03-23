@@ -5,6 +5,14 @@ import {
   variantForgeFamilies,
 } from '../shared/variantForgeCatalog.js'
 import { forgeApiModes } from '../shared/modeCatalog.js'
+import {
+  getDefaultVfxTextureOutputs,
+  isVfxExportTarget,
+  isUnityPipeline,
+  isUnitySolution,
+  isVfxTextureKind,
+  vfxTextureKinds,
+} from '../shared/vfxForgeCatalog.js'
 
 const maxPromptLength = 4000
 const maxStyleTextLength = 400
@@ -12,6 +20,7 @@ const maxSystemInstructionLength = 4000
 const maxReferenceNameLength = 200
 const maxBase64ImageBytes = 6 * 1024 * 1024
 const maxTextureExpansionBytes = 8 * 1024 * 1024
+const maxVfxTextureCount = 4
 const allowedImageMimeTypes = new Set([
   'image/jpeg',
   'image/png',
@@ -116,6 +125,40 @@ function readBoolean(value, fieldName, fallback) {
   return value
 }
 
+function readStringArray(value, fieldName, { allowEmpty = true, maxCount, validator } = {}) {
+  if (value === undefined || value === null) {
+    return []
+  }
+
+  if (!Array.isArray(value)) {
+    throw buildValidationError(`${fieldName} must be an array.`)
+  }
+
+  if (typeof maxCount === 'number' && value.length > maxCount) {
+    throw buildValidationError(`${fieldName} has too many entries.`)
+  }
+
+  const normalizedValues = value.map((entry, index) => {
+    if (typeof entry !== 'string') {
+      throw buildValidationError(`${fieldName}[${index}] must be a string.`)
+    }
+
+    const normalizedEntry = entry.trim()
+
+    if (!allowEmpty && normalizedEntry.length === 0) {
+      throw buildValidationError(`${fieldName}[${index}] must not be empty.`)
+    }
+
+    if (validator && !validator(normalizedEntry)) {
+      throw buildValidationError(`${fieldName}[${index}] contains an unsupported value.`)
+    }
+
+    return normalizedEntry
+  })
+
+  return Array.from(new Set(normalizedValues.filter(Boolean)))
+}
+
 function readVariantForgeOptions(value, variantFamily) {
   if (value === undefined || value === null || value === '') {
     return []
@@ -162,7 +205,7 @@ function readActionAnimatorFrameSize(value, fieldName) {
 
   if (frameSize !== 512 && frameSize !== 1080) {
     throw buildValidationError(`${fieldName} contains an unsupported value.`, [
-      `Allowed values: 512, 1080`,
+      'Allowed values: 512, 1080',
     ])
   }
 
@@ -260,6 +303,65 @@ function validateReferenceList(references, { maxCount, roleRequired = false, slo
   })
 }
 
+function validateVfxTextureList(value, fieldName = 'textures') {
+  if (!Array.isArray(value)) {
+    throw buildValidationError(`${fieldName} must be an array.`)
+  }
+
+  if (value.length === 0 || value.length > maxVfxTextureCount) {
+    throw buildValidationError(`${fieldName} must include between 1 and 4 textures.`)
+  }
+
+  const seenKinds = new Set()
+
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw buildValidationError(`${fieldName}[${index}] must be an object.`)
+    }
+
+    const kind = readOptionalTrimmedString(entry.kind, `${fieldName}[${index}].kind`, 40)
+
+    if (!kind || !isVfxTextureKind(kind)) {
+      throw buildValidationError(`${fieldName}[${index}].kind contains an unsupported value.`, [
+        `Allowed values: ${vfxTextureKinds.join(', ')}`,
+      ])
+    }
+
+    if (seenKinds.has(kind)) {
+      throw buildValidationError(`${fieldName}[${index}].kind must be unique.`)
+    }
+
+    seenKinds.add(kind)
+
+    return {
+      ...validateInlineImage(entry, `${fieldName}[${index}]`, maxTextureExpansionBytes),
+      kind,
+      resultId: readOptionalTrimmedString(entry.resultId, `${fieldName}[${index}].resultId`, 200),
+    }
+  })
+}
+
+function validateOptionalPreviewList(value) {
+  if (value === undefined || value === null) {
+    return []
+  }
+
+  if (!Array.isArray(value)) {
+    throw buildValidationError('previews must be an array.')
+  }
+
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw buildValidationError(`previews[${index}] must be an object.`)
+    }
+
+    return {
+      ...validateInlineImage(entry, `previews[${index}]`, maxTextureExpansionBytes),
+      label: readOptionalTrimmedString(entry.label, `previews[${index}].label`, 80),
+    }
+  })
+}
+
 export function validateForgeRequest(body) {
   const mode = readOptionalEnum(body?.mode, 'mode', supportedForgeModes)
 
@@ -298,7 +400,36 @@ export function validateForgeRequest(body) {
     ])
   }
 
+  const exportTarget =
+    body?.exportTarget !== undefined || body?.unitySolution !== undefined || mode === 'vfx-forge'
+      ? isVfxExportTarget(body?.exportTarget)
+        ? body.exportTarget
+        : isUnitySolution(body?.unitySolution)
+          ? body.unitySolution
+          : mode === 'vfx-forge'
+            ? 'none'
+            : undefined
+      : undefined
+  const textureKind =
+    body?.textureKind !== undefined || mode === 'vfx-forge'
+      ? readOptionalTrimmedString(body?.textureKind, 'textureKind', 40)
+      : undefined
+
+  if (mode === 'vfx-forge' && textureKind && !isVfxTextureKind(textureKind)) {
+    throw buildValidationError('textureKind contains an unsupported value.', [
+      `Allowed values: ${vfxTextureKinds.join(', ')}`,
+    ])
+  }
+
   return {
+    customDirection:
+      body?.customDirection !== undefined || mode === 'variant-forge'
+        ? readOptionalTrimmedString(body?.customDirection, 'customDirection', 400)
+        : undefined,
+    effectLabel:
+      body?.effectLabel !== undefined || mode === 'vfx-forge'
+        ? readOptionalTrimmedString(body?.effectLabel, 'effectLabel', 120)
+        : undefined,
     frameCount: readInteger(body?.frameCount, 'frameCount', {
       fallback: 8,
       max: 30,
@@ -314,12 +445,12 @@ export function validateForgeRequest(body) {
       max: 100,
       min: 0,
     }),
+    looping:
+      body?.looping !== undefined || mode === 'vfx-forge'
+        ? readBoolean(body?.looping, 'looping', true)
+        : undefined,
     mode,
     modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
-    customDirection:
-      body?.customDirection !== undefined || mode === 'variant-forge'
-        ? readOptionalTrimmedString(body?.customDirection, 'customDirection', 400)
-        : undefined,
     preservePalette:
       body?.preservePalette !== undefined || mode === 'variant-forge'
         ? readBoolean(body?.preservePalette, 'preservePalette', false)
@@ -328,7 +459,6 @@ export function validateForgeRequest(body) {
       body?.preserveSilhouette !== undefined || mode === 'variant-forge'
         ? readBoolean(body?.preserveSilhouette, 'preserveSilhouette', true)
         : undefined,
-    projectileType: readOptionalTrimmedString(body?.projectileType, 'projectileType', 120),
     prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
     rarity: readOptionalTrimmedString(body?.rarity, 'rarity', 40),
     references: validateReferenceList(body?.references, {
@@ -356,17 +486,6 @@ export function validateForgeRequest(body) {
       'systemInstruction',
       maxSystemInstructionLength,
     ),
-    variantFamily,
-    variantIntensity:
-      body?.variantIntensity !== undefined || mode === 'variant-forge'
-        ? readInteger(body?.variantIntensity, 'variantIntensity', {
-            fallback: 60,
-            max: 100,
-            min: 0,
-          })
-        : undefined,
-    variantOptions,
-    variantPreset,
     textureExpansion: body?.textureExpansion
       ? {
           canvasImage: validateInlineImage(
@@ -381,11 +500,38 @@ export function validateForgeRequest(body) {
           ),
         }
       : undefined,
+    textureKind,
+    textureOutputs:
+      body?.textureOutputs !== undefined || mode === 'vfx-forge'
+        ? readStringArray(body?.textureOutputs, 'textureOutputs', {
+            allowEmpty: false,
+            maxCount: maxVfxTextureCount,
+            validator: isVfxTextureKind,
+          })
+        : undefined,
     textureSize: readInteger(body?.textureSize, 'textureSize', {
       fallback: 1024,
       max: 1024,
       min: 512,
     }),
+    unityPipeline:
+      body?.unityPipeline !== undefined || mode === 'vfx-forge'
+        ? isUnityPipeline(body?.unityPipeline)
+          ? body.unityPipeline
+          : 'urp'
+        : undefined,
+    exportTarget,
+    variantFamily,
+    variantIntensity:
+      body?.variantIntensity !== undefined || mode === 'variant-forge'
+        ? readInteger(body?.variantIntensity, 'variantIntensity', {
+            fallback: 60,
+            max: 100,
+            min: 0,
+          })
+        : undefined,
+    variantOptions,
+    variantPreset,
     workflow,
   }
 }
@@ -558,6 +704,55 @@ export function validateActionAnimatorStripRequest(body) {
     modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
     prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
   }
+}
+
+function validateVfxRecipeLikeRequest(body) {
+  const exportTarget = isUnitySolution(body?.exportTarget)
+    ? body.exportTarget
+    : isUnitySolution(body?.unitySolution)
+      ? body.unitySolution
+      : undefined
+
+  if (!exportTarget) {
+    throw buildValidationError('exportTarget contains an unsupported value.', [
+      'Allowed values: particle-system, vfx-graph',
+    ])
+  }
+
+  const textureOutputs = readStringArray(body?.textureOutputs, 'textureOutputs', {
+    allowEmpty: false,
+    maxCount: maxVfxTextureCount,
+    validator: isVfxTextureKind,
+  })
+
+  return {
+    effectLabel: readOptionalTrimmedString(body?.effectLabel, 'effectLabel', 120),
+    frameCount: readInteger(body?.frameCount, 'frameCount', {
+      fallback: 8,
+      max: 30,
+      min: 4,
+    }),
+    intensity: readInteger(body?.intensity, 'intensity', {
+      fallback: 60,
+      max: 100,
+      min: 0,
+    }),
+    looping: readBoolean(body?.looping, 'looping', true),
+    previews: validateOptionalPreviewList(body?.previews),
+    prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
+    textureOutputs: textureOutputs.length > 0 ? textureOutputs : getDefaultVfxTextureOutputs(),
+    textures: validateVfxTextureList(body?.textures, 'textures'),
+    unityPipeline: isUnityPipeline(body?.unityPipeline) ? body.unityPipeline : 'urp',
+    exportTarget,
+  }
+}
+
+export function validateVfxRecipeRequest(body) {
+  return validateVfxRecipeLikeRequest(body)
+}
+
+export function validateVfxExportRequest(body) {
+  return validateVfxRecipeLikeRequest(body)
 }
 
 export function toValidationResponse(error) {

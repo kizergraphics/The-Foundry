@@ -13,6 +13,8 @@ import type {
   VariantForgeFamilyCustomDirectionMap,
   VariantForgeOptionStateMap,
   VariantForgePreset,
+  VfxExportTarget,
+  VfxTextureKind,
 } from './forge'
 import { isForgeMode } from '../../shared/modeCatalog.js'
 import {
@@ -33,6 +35,16 @@ import {
   isVariantForgeFamily,
   isVariantForgePresetForFamily,
 } from '../../shared/variantForgeCatalog.js'
+import {
+  defaultVfxExportTarget,
+  defaultVfxFrameCount,
+  defaultVfxIntensity,
+  defaultVfxLooping,
+  getDefaultVfxTextureOutputs,
+  isUnitySolution,
+  isVfxExportTarget,
+  isVfxTextureKind,
+} from '../../shared/vfxForgeCatalog.js'
 
 type StoredActionAnimatorSettings = {
   actionType: ActionAnimatorActionType
@@ -84,10 +96,13 @@ type StoredSettings = {
   }
   variantForge: StoredVariantForgeSettings
   vfxForge: {
+    effectLabel: string
+    exportTarget: VfxExportTarget
     frameCount: number
     intensity: number
+    looping: boolean
     prompt: string
-    projectileType: string
+    textureOutputs: VfxTextureKind[]
   }
 }
 
@@ -201,6 +216,22 @@ function readStoredTextureMaterialMapDefaults(value: unknown): TextureMaterialMa
   }
 }
 
+function readStoredVfxTextureOutputs(
+  value: unknown,
+): VfxTextureKind[] {
+  if (!Array.isArray(value)) {
+    return getDefaultVfxTextureOutputs()
+  }
+
+  const normalizedKinds = Array.from(
+    new Set(value.filter((entry): entry is VfxTextureKind => isVfxTextureKind(entry))),
+  )
+
+  return normalizedKinds.length > 0
+    ? normalizedKinds
+    : getDefaultVfxTextureOutputs()
+}
+
 export function loadStoredState(): StoredState | null {
   if (typeof window === 'undefined') {
     return null
@@ -267,6 +298,28 @@ export function loadStoredState(): StoredState | null {
               [storedVariantFamily]: legacyVariantCustomDirection,
             }
           : {}
+    const legacyVfxForgeSettings = parsed.settings?.vfxForge as
+      | ({
+          effectArchetype?: unknown
+          exportTarget?: unknown
+          projectileType?: unknown
+          unitySolution?: unknown
+        } & Record<string, unknown>)
+      | undefined
+    const legacyProjectileType =
+      typeof legacyVfxForgeSettings?.projectileType === 'string' &&
+      legacyVfxForgeSettings.projectileType.trim().length > 0
+        ? legacyVfxForgeSettings.projectileType
+        : ''
+    const storedVfxExportTarget = isVfxExportTarget(parsed.settings?.vfxForge?.exportTarget)
+      ? parsed.settings.vfxForge.exportTarget
+      : isUnitySolution(legacyVfxForgeSettings?.unitySolution)
+        ? legacyVfxForgeSettings.unitySolution
+        : defaultVfxExportTarget
+    const storedVfxEffectLabel =
+      typeof parsed.settings?.vfxForge?.effectLabel === 'string'
+        ? parsed.settings.vfxForge.effectLabel
+        : legacyProjectileType || ''
 
     return {
       recentPrompts: Array.isArray(parsed.recentPrompts)
@@ -381,25 +434,27 @@ export function loadStoredState(): StoredState | null {
           variantPreset: storedVariantPreset,
         },
         vfxForge: {
+          effectLabel: storedVfxEffectLabel,
+          exportTarget: storedVfxExportTarget,
           frameCount:
             typeof parsed.settings?.vfxForge?.frameCount === 'number' &&
             Number.isFinite(parsed.settings.vfxForge.frameCount)
               ? clampFrameCount(parsed.settings.vfxForge.frameCount)
-              : 8,
+              : defaultVfxFrameCount,
           intensity:
             typeof parsed.settings?.vfxForge?.intensity === 'number' &&
             Number.isFinite(parsed.settings.vfxForge.intensity)
               ? Math.max(0, Math.min(100, Math.round(parsed.settings.vfxForge.intensity)))
-              : 60,
+              : defaultVfxIntensity,
+          looping:
+            typeof parsed.settings?.vfxForge?.looping === 'boolean'
+              ? parsed.settings.vfxForge.looping
+              : defaultVfxLooping,
           prompt:
             typeof parsed.settings?.vfxForge?.prompt === 'string'
               ? parsed.settings.vfxForge.prompt
               : '',
-          projectileType:
-            typeof parsed.settings?.vfxForge?.projectileType === 'string' &&
-            parsed.settings.vfxForge.projectileType.trim().length > 0
-              ? parsed.settings.vfxForge.projectileType
-              : 'Fireball',
+          textureOutputs: readStoredVfxTextureOutputs(parsed.settings?.vfxForge?.textureOutputs),
         },
       },
       session:

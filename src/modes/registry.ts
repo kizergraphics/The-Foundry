@@ -12,6 +12,12 @@ import {
   type TextureExpansionTargetSize,
 } from '../lib/forge'
 import { formatVariantForgeLabel } from '../../shared/variantForgeCatalog.js'
+import {
+  getVfxExportTargetLabel,
+  getVfxTextureLabel,
+  resolveVfxEffectLabel,
+  type VfxTextureKind,
+} from '../../shared/vfxForgeCatalog.js'
 
 export type ForgeBriefItem = {
   label: string
@@ -124,11 +130,11 @@ export function getModePresentation({
           ? 'Variant Forge output slot'
           : flags.isPortraitStudioMode
             ? 'Portrait Studio contact sheet'
-            : flags.isUvLabMode
-              ? 'UV layout, processed mesh, and preview'
-              : flags.isVfxForgeMode
-                ? 'VFX Forge spritesheet output'
-                : 'Output slots for the current forge pass',
+              : flags.isUvLabMode
+                ? 'UV layout, processed mesh, and preview'
+                : flags.isVfxForgeMode
+                  ? 'VFX Forge texture ingredient outputs'
+                  : 'Output slots for the current forge pass',
     useWideControlGrid: !flags.isActionAnimatorMode && !flags.isCharacterSheetMode,
   }
 }
@@ -235,20 +241,33 @@ export function buildTextureLabPromptPreview(
 }
 
 export function buildVfxForgePromptPreview(
-  projectileType: string,
+  effectLabel: string,
+  textureOutputs: VfxTextureKind[],
+  exportTarget: typeof initialState.vfxForge.exportTarget,
+  looping: boolean,
   intensity: number,
   frameCount: number,
   prompt: string,
 ) {
-  const normalizedProjectileType = projectileType.trim() || 'Fireball'
+  const normalizedEffectLabel = resolveVfxEffectLabel(effectLabel)
   const normalizedPrompt = prompt.trim()
+  const normalizedTextureOutputs = textureOutputs.length > 0
+    ? textureOutputs.map((kind) => getVfxTextureLabel(kind)).join(', ')
+    : 'None selected'
 
   return [
-    'Generate a 2D projectile spritesheet.',
-    `Projectile: ${normalizedProjectileType}.`,
+    'Generate game-ready VFX texture ingredients.',
+    `Effect: ${normalizedEffectLabel}.`,
+    `Texture outputs: ${normalizedTextureOutputs}.`,
+    exportTarget !== 'none'
+      ? `Export target: ${getVfxExportTargetLabel(exportTarget)}.`
+      : 'No Unity export target selected.',
+    looping ? 'Author the textures for a looping in-game effect.' : 'Author the textures for a one-shot effect.',
     `Intensity: ${Math.max(0, Math.min(100, Math.round(intensity)))}/100.`,
     normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
-    `Background: pure #000000 black. Layout: ${Math.max(4, Math.min(30, Math.round(frameCount)))} frames in one horizontal row.`,
+    textureOutputs.includes('flipbook')
+      ? `If a flipbook is requested, use a pure #000000 black background and ${Math.max(4, Math.min(30, Math.round(frameCount)))} frames in one horizontal row.`
+      : 'Frame count only applies when a flipbook output is enabled.',
   ]
     .filter(Boolean)
     .join(' ')
@@ -292,7 +311,10 @@ function getModePromptPreview(
 
   if (flags.isVfxForgeMode) {
     return buildVfxForgePromptPreview(
-      state.vfxForge.projectileType,
+      state.vfxForge.effectLabel,
+      state.vfxForge.textureOutputs,
+      state.vfxForge.exportTarget,
+      state.vfxForge.looping,
       state.vfxForge.intensity,
       state.vfxForge.frameCount,
       state.vfxForge.prompt,
@@ -333,7 +355,10 @@ function getModeActivePromptValue(
 
   if (flags.isVfxForgeMode) {
     return buildVfxForgePromptPreview(
-      state.vfxForge.projectileType,
+      state.vfxForge.effectLabel,
+      state.vfxForge.textureOutputs,
+      state.vfxForge.exportTarget,
+      state.vfxForge.looping,
       state.vfxForge.intensity,
       state.vfxForge.frameCount,
       state.vfxForge.prompt,
@@ -416,7 +441,9 @@ function getIsReadyForApi(state: ForgeState, flags: ModeFlags) {
   }
 
   if (flags.isVfxForgeMode) {
-    return state.vfxForge.projectileType.trim().length > 0
+    return (
+      state.vfxForge.textureOutputs.length > 0
+    )
   }
 
   return state.prompt.trim().length > 0
@@ -586,20 +613,24 @@ function getBriefItems(state: ForgeState, flags: ModeFlags): ForgeBriefItem[] {
   if (flags.isVfxForgeMode) {
     return [
       {
-        label: 'Projectile',
-        value: state.vfxForge.projectileType.trim() || 'Not set',
+        label: 'Effect',
+        value: resolveVfxEffectLabel(state.vfxForge.effectLabel),
       },
       {
-        label: 'Direction',
-        value: state.vfxForge.prompt.trim() || 'Default timing',
+        label: 'Export',
+        value: getVfxExportTargetLabel(state.vfxForge.exportTarget),
       },
       {
         label: 'Intensity',
         value: `${state.vfxForge.intensity}/100`,
       },
       {
-        label: 'Layout',
-        value: `${state.vfxForge.frameCount} x 1 strip`,
+        label: 'Textures',
+        value: state.vfxForge.textureOutputs.map((kind) => getVfxTextureLabel(kind)).join(', '),
+      },
+      {
+        label: 'Looping',
+        value: state.vfxForge.looping ? 'Yes' : 'No',
       },
     ]
   }
@@ -649,7 +680,7 @@ function getPrimaryActionLabel({
     }
 
     if (flags.isVfxForgeMode) {
-      return 'FORGING VFX'
+      return 'GENERATING TEXTURES'
     }
 
     return 'FORGING'
@@ -680,7 +711,7 @@ function getPrimaryActionLabel({
   }
 
   if (flags.isVfxForgeMode) {
-    return 'FORGE VFX'
+    return 'GENERATE TEXTURES'
   }
 
   return 'FORGE'
@@ -725,7 +756,9 @@ function getPrimaryActionDescription({
     }
 
     if (flags.isVfxForgeMode) {
-      return `Generating a ${state.vfxForge.frameCount}-frame projectile spritesheet`
+      return state.vfxForge.exportTarget === 'none'
+        ? `Generating ${state.vfxForge.textureOutputs.length} VFX output${state.vfxForge.textureOutputs.length === 1 ? '' : 's'} for 2D workflow use`
+        : `Generating ${state.vfxForge.textureOutputs.length} VFX output${state.vfxForge.textureOutputs.length === 1 ? '' : 's'} for ${getVfxExportTargetLabel(state.vfxForge.exportTarget)} export`
     }
 
     return 'Sending prompt and references to Gemini'
@@ -759,7 +792,9 @@ function getPrimaryActionDescription({
     }
 
     if (flags.isVfxForgeMode) {
-      return `Projectile sheet request staged for ${state.vfxForge.frameCount} frames`
+      return state.vfxForge.exportTarget === 'none'
+        ? `${state.vfxForge.textureOutputs.length} VFX output${state.vfxForge.textureOutputs.length === 1 ? '' : 's'} staged for generation`
+        : `${state.vfxForge.textureOutputs.length} VFX output${state.vfxForge.textureOutputs.length === 1 ? '' : 's'} staged for ${getVfxExportTargetLabel(state.vfxForge.exportTarget)} export`
     }
 
     return 'Request staged for API execution'
@@ -792,7 +827,7 @@ function getPrimaryActionDescription({
   }
 
   if (flags.isVfxForgeMode) {
-    return 'Enter a projectile type to prepare the VFX spritesheet request'
+    return 'Choose at least one output to prepare the VFX generation pass'
   }
 
   return 'Add a prompt to prepare the request'
@@ -837,7 +872,7 @@ function getReadinessLabel({
     }
 
     if (flags.isVfxForgeMode) {
-      return 'Config ready'
+      return 'Texture plan ready'
     }
 
     return 'Prompt ready'
@@ -856,7 +891,7 @@ function getReadinessLabel({
   }
 
   if (flags.isVfxForgeMode) {
-    return 'Config required'
+    return 'Effect config required'
   }
 
   return 'Prompt required'

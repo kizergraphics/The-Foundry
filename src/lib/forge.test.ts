@@ -110,4 +110,36 @@ describe('forgeReducer', () => {
       elemental: 'Use wind-blown flora and drifting leaves.',
     })
   })
+
+  it('updates the VFX export target without disturbing other settings', () => {
+    const nextState = forgeReducer(initialState, {
+      type: 'set-vfx-export-target',
+      exportTarget: 'vfx-graph',
+    })
+
+    expect(nextState.vfxForge).toMatchObject({
+      effectLabel: '',
+      exportTarget: 'vfx-graph',
+      frameCount: 8,
+      intensity: 60,
+      looping: true,
+      textureOutputs: ['flipbook'],
+    })
+  })
+
+  it('adds and removes freeform VFX texture outputs', () => {
+    const withFlipbookDisabled = forgeReducer(initialState, {
+      type: 'set-vfx-texture-output',
+      enabled: false,
+      kind: 'flipbook',
+    })
+    const withSwirlEnabled = forgeReducer(withFlipbookDisabled, {
+      type: 'set-vfx-texture-output',
+      enabled: true,
+      kind: 'swirl',
+    })
+
+    expect(withFlipbookDisabled.vfxForge.textureOutputs).toEqual([])
+    expect(withSwirlEnabled.vfxForge.textureOutputs).toEqual(['swirl'])
+  })
 })

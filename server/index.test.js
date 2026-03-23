@@ -1,3 +1,4 @@
+import JSZip from 'jszip'
 import request from 'supertest'
 import sharp from 'sharp'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -93,6 +94,18 @@ function buildTextOnlyGeneration(text) {
     usageMetadata: {
       totalTokenCount: 123,
     },
+  }
+}
+
+function buildBinaryParser() {
+  return (response, callback) => {
+    const chunks = []
+    response.on('data', (chunk) => {
+      chunks.push(chunk)
+    })
+    response.on('end', () => {
+      callback(null, Buffer.concat(chunks))
+    })
   }
 }
 
@@ -686,6 +699,121 @@ describe('API hardening', () => {
       .toBuffer()
 
     expect(Buffer.compare(lowHeightNormal, highHeightNormal)).not.toBe(0)
+  })
+})
+
+describe('VFX recipe export routes', () => {
+  it('returns deterministic VFX recipe manifests for both solution types', async () => {
+    const app = await loadApp()
+
+    const basePayload = {
+      effectLabel: 'Fireball',
+      exportTarget: 'particle-system',
+      frameCount: 8,
+      intensity: 60,
+      looping: true,
+      textureOutputs: ['flipbook', 'noise'],
+      textures: [
+        {
+          data: await createPngBase64(1, 1, [255, 180, 80]),
+          kind: 'flipbook',
+          mimeType: 'image/png',
+        },
+        {
+          data: await createPngBase64(1, 1, [90, 90, 90]),
+          kind: 'noise',
+          mimeType: 'image/png',
+        },
+      ],
+      unityPipeline: 'urp',
+    }
+
+    const particleResponse = await request(app)
+      .post('/api/vfx-recipe')
+      .send({
+        ...basePayload,
+        exportTarget: 'particle-system',
+      })
+    const graphResponse = await request(app)
+      .post('/api/vfx-recipe')
+      .send({
+        ...basePayload,
+        exportTarget: 'vfx-graph',
+      })
+
+    expect(particleResponse.status).toBe(200)
+    expect(graphResponse.status).toBe(200)
+    expect(particleResponse.body.recipe).toMatchObject({
+      recipeVersion: '1.0.0',
+      recipeKind: 'generic',
+      unityPipeline: 'urp',
+      exportTarget: 'particle-system',
+    })
+    expect(graphResponse.body.recipe).toMatchObject({
+      recipeVersion: '1.0.0',
+      recipeKind: 'generic',
+      unityPipeline: 'urp',
+      exportTarget: 'vfx-graph',
+    })
+    expect(particleResponse.body.recipe.textures[0].fileName).toContain('textures/fireball-flipbook.png')
+    expect(graphResponse.body.recipe.vfxGraphConfig.exposedProperties.length).toBeGreaterThan(0)
+  })
+
+  it('packages VFX export bundles with sanitized filenames and required files', async () => {
+    const app = await loadApp()
+    const response = await request(app)
+      .post('/api/vfx-export')
+      .buffer(true)
+      .parse(buildBinaryParser())
+      .send({
+        effectLabel: 'Arcane Gate / Beta',
+        exportTarget: 'particle-system',
+        frameCount: 12,
+        intensity: 70,
+        looping: true,
+        textureOutputs: ['swirl', 'noise', 'dissolve-mask'],
+        textures: [
+          {
+            data: await createPngBase64(1, 1, [120, 180, 255]),
+            kind: 'swirl',
+            mimeType: 'image/png',
+          },
+          {
+            data: await createPngBase64(1, 1, [80, 80, 80]),
+            kind: 'noise',
+            mimeType: 'image/png',
+          },
+          {
+            data: await createPngBase64(1, 1, [255, 255, 255]),
+            kind: 'dissolve-mask',
+            mimeType: 'image/png',
+          },
+        ],
+        unityPipeline: 'urp',
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.headers['content-type']).toContain('application/zip')
+    expect(response.headers['content-disposition']).toContain(
+      'kizer-forge-vfx-arcane-gate-beta-bundle.zip',
+    )
+
+    const zip = await JSZip.loadAsync(response.body)
+    const fileNames = Object.keys(zip.files).sort()
+
+    expect(fileNames).toEqual(
+      expect.arrayContaining([
+        'README.md',
+        'manifest.json',
+        'preview/arcane-gate-beta-dissolve-mask.png',
+        'preview/arcane-gate-beta-noise.png',
+        'preview/arcane-gate-beta-swirl.png',
+        'recipe.json',
+        'textures/arcane-gate-beta-dissolve-mask.png',
+        'textures/arcane-gate-beta-noise.png',
+        'textures/arcane-gate-beta-swirl.png',
+      ]),
+    )
   })
 })
 

@@ -45,6 +45,7 @@ import {
   copyResultToClipboard,
   createDataUrl,
   dataUrlToFile,
+  downloadBlob,
   downloadDataUrl,
   downloadResult,
   normalizeSquareTextureDataUrl,
@@ -109,6 +110,17 @@ import {
   appendVariantForgeIdeaToDirection,
   formatVariantForgeLabel,
 } from '../shared/variantForgeCatalog.js'
+import {
+  getVfxExportTargetLabel,
+  getVfxTextureLabel,
+  resolveVfxEffectLabel,
+  vfxTextureKinds,
+} from '../shared/vfxForgeCatalog.js'
+import type {
+  VfxExportTarget,
+  VfxRecipeManifest,
+  VfxTextureKind,
+} from '../shared/vfxForgeCatalog.js'
 import type { VariantForgeIdeaResponseSource } from '../shared/variantForgeIdeas.js'
 import {
   getAvailableModelsForMode,
@@ -130,6 +142,7 @@ import {
   buildPortraitStudioRequest,
   buildStandardForgeRequest,
   buildTextureExpansionRequest,
+  buildVfxRecipeRequest,
   buildVariantForgeRequest,
   buildVfxForgeRequest,
   normalizeMaterialMapsApiResults,
@@ -137,7 +150,10 @@ import {
   postMaterialMapsRequest,
   type MaterialMapResult,
   postForgeRequest,
+  postVfxExportRequest,
+  postVfxRecipeRequest,
   type ForgeApiResponse,
+  type VfxTexturePayload,
 } from './modes/execution'
 
 type ServiceHealth = {
@@ -202,6 +218,8 @@ type TextureMaterialPackState = {
   status: 'idle' | 'loading' | 'ready' | 'error'
   strengths: TextureMaterialMapDefaults
 }
+
+type VfxTextureResultMap = Partial<Record<VfxTextureKind, ForgeResult>>
 
 type ForgeBatchSlotStatus =
   | 'queued'
@@ -344,6 +362,22 @@ function buildForgeBatchSlots(count: number): ForgeBatchSlotState[] {
   }))
 }
 
+function collectVfxTexturePayloads(textureResults: VfxTextureResultMap): VfxTexturePayload[] {
+  return vfxTextureKinds.flatMap((kind) => {
+    const result = textureResults[kind]
+
+    return result
+      ? [
+          {
+            kind,
+            mimeType: result.mimeType,
+            result,
+          },
+        ]
+      : []
+  })
+}
+
 function collectForgeBatchResults(slots: ForgeBatchSlotState[]) {
   return slots.flatMap((slot) => (slot.result ? [slot.result] : []))
 }
@@ -484,10 +518,13 @@ function buildStoredStateSnapshot(
         variantPreset: state.variantForge.variantPreset,
       },
       vfxForge: {
+        effectLabel: state.vfxForge.effectLabel,
+        exportTarget: state.vfxForge.exportTarget,
         frameCount: state.vfxForge.frameCount,
         intensity: state.vfxForge.intensity,
+        looping: state.vfxForge.looping,
         prompt: state.vfxForge.prompt,
-        projectileType: state.vfxForge.projectileType,
+        textureOutputs: state.vfxForge.textureOutputs,
       },
     },
     session:
@@ -526,6 +563,10 @@ function App() {
     Record<string, TextureMaterialPackState>
   >({})
   const [repairingResultId, setRepairingResultId] = useState<string | null>(null)
+  const [vfxRecipeManifest, setVfxRecipeManifest] = useState<VfxRecipeManifest | null>(null)
+  const [vfxTextureResults, setVfxTextureResults] = useState<VfxTextureResultMap>({})
+  const [isBuildingVfxRecipe, setIsBuildingVfxRecipe] = useState(false)
+  const [isDownloadingVfxBundle, setIsDownloadingVfxBundle] = useState(false)
   const [hasRestoredState, setHasRestoredState] = useState(false)
   const [lastTextureLabRun, setLastTextureLabRun] =
     useState<TextureLabRunContext | null>(null)
@@ -661,6 +702,26 @@ function App() {
     variantForgeIdeaSelections[state.variantForge.variantFamily] ??
     buildVariantForgeFallbackIdeaState(state.variantForge.variantFamily)
   const activeVariantForgeIdeaSuggestions = activeVariantForgeIdeaState.ideas
+  const activeVfxEffectLabel = resolveVfxEffectLabel(state.vfxForge.effectLabel)
+  const selectedVfxTextureResults = state.vfxForge.textureOutputs.flatMap((kind) => {
+    const result = vfxTextureResults[kind]
+
+    return result
+      ? [
+          {
+            kind,
+            result,
+          },
+        ]
+      : []
+  })
+  const canBuildVfxRecipe =
+    state.vfxForge.exportTarget !== 'none' &&
+    selectedVfxTextureResults.length > 0 &&
+    selectedVfxTextureResults.length === state.vfxForge.textureOutputs.length &&
+    !isForging
+  const canDownloadVfxBundle =
+    canBuildVfxRecipe && vfxRecipeManifest !== null && !isDownloadingVfxBundle
 
   useEffect(() => {
     if (!isVariantForgeMode) {
@@ -669,13 +730,28 @@ function App() {
 
     void refreshVariantForgeIdeas()
   }, [isVariantForgeMode, state.variantForge.variantFamily, state.variantForge.variantPreset])
+  useEffect(() => {
+    setVfxRecipeManifest(null)
+  }, [
+    state.vfxForge.effectLabel,
+    state.vfxForge.exportTarget,
+    state.vfxForge.frameCount,
+    state.vfxForge.intensity,
+    state.vfxForge.looping,
+    state.vfxForge.prompt,
+    state.vfxForge.textureOutputs,
+  ])
   const hasForgeSlots = forgeSlots.length > 0
   const visibleResultsCount = hasForgeSlots
     ? collectForgeBatchResults(forgeSlots).length
     : results.length
   const isShowingResults = visibleResultsCount > 0 || hasForgeSlots
   const activeGenerationCount =
-    isSingleResultMode ? 1 : state.generationCount
+    isVfxForgeMode
+      ? Math.max(1, state.vfxForge.textureOutputs.length)
+      : isSingleResultMode
+        ? 1
+        : state.generationCount
   const reservedOutputs = Array.from(
     {
       length: hasForgeSlots
@@ -956,10 +1032,13 @@ function App() {
     state.variantForge.preserveSilhouette,
     state.variantForge.variantFamily,
     state.variantForge.variantPreset,
+    state.vfxForge.effectLabel,
+    state.vfxForge.exportTarget,
     state.vfxForge.frameCount,
     state.vfxForge.intensity,
+    state.vfxForge.looping,
     state.vfxForge.prompt,
-    state.vfxForge.projectileType,
+    state.vfxForge.textureOutputs,
     lastResultMode,
   ])
 
@@ -1514,26 +1593,52 @@ function App() {
       }
 
       if (isVfxForgeMode) {
-        const { ok, payload } = await postForgeRequest(
-          buildVfxForgeRequest({
-            modelId: activeModel,
-            state: state.vfxForge,
-            styleText: activeStyleInput.trim(),
+        const generatedTextures = await Promise.all(
+          state.vfxForge.textureOutputs.map(async (textureKind) => {
+            const { ok, payload } = await postForgeRequest(
+              buildVfxForgeRequest({
+                modelId: activeModel,
+                state: state.vfxForge,
+                styleText: activeStyleInput.trim(),
+                textureKind,
+              }),
+            )
+
+            if (!ok || !payload?.images?.length) {
+              throw toForgeError(payload?.error)
+            }
+
+            const [normalizedResult] = normalizeForgeApiResults(payload)
+
+            return {
+              kind: textureKind,
+              model: payload.model ?? null,
+              prompt: payload.prompt ?? promptPreview,
+              result: {
+                ...normalizedResult,
+                id: `${textureKind}-${normalizedResult.id}`,
+                text:
+                  normalizedResult.text?.trim().length
+                    ? `${getVfxTextureLabel(textureKind)} texture. ${normalizedResult.text}`
+                    : `${getVfxTextureLabel(textureKind)} texture generated for ${activeVfxEffectLabel}.`,
+              },
+            }
           }),
         )
+        const nextVfxTextureResults = Object.fromEntries(
+          generatedTextures.map((entry) => [entry.kind, entry.result]),
+        ) as VfxTextureResultMap
 
-        if (!ok || !payload?.images?.length) {
-          throw toForgeError(payload?.error)
-        }
-
+        setVfxTextureResults(nextVfxTextureResults)
+        setVfxRecipeManifest(null)
         finalizeForgeRun(
-          normalizeForgeApiResults(payload),
-          payload.model ?? null,
-          payload.prompt ?? promptPreview,
-          'VFX Forge generated an additive-ready projectile strip.',
+          generatedTextures.map((entry) => entry.result),
+          generatedTextures[0]?.model ?? null,
+          generatedTextures[0]?.prompt ?? promptPreview,
+          `VFX Forge generated ${generatedTextures.length} texture output${generatedTextures.length === 1 ? '' : 's'} for ${activeVfxEffectLabel}.`,
           {
             runContext: null,
-            telemetryModel: payload.model,
+            telemetryModel: generatedTextures[0]?.model ?? null,
             trackTelemetry: true,
           },
         )
@@ -1636,14 +1741,94 @@ function App() {
   }, [])
 
   const handleDownload = useCallback((result: ForgeResult, index: number) => {
+    const vfxTextureKind = isVfxForgeMode
+      ? Object.entries(vfxTextureResults).find(([, entry]) => entry?.id === result.id)?.[0]
+      : null
     const extension = result.mimeType.includes('svg')
       ? 'svg'
       : result.mimeType.includes('png')
         ? 'png'
         : 'jpg'
+    if (isVfxForgeMode && vfxTextureKind) {
+      const effectSlug = slugifyFileSegment(state.vfxForge.effectLabel, 'effect')
+      downloadResult(
+        result,
+        `kizer-forge-vfx-${effectSlug}-${String(vfxTextureKind)}.${extension}`,
+      )
+      setNotice(`Downloaded ${getVfxTextureLabel(vfxTextureKind)} texture.`)
+      return
+    }
+
     downloadResult(result, `kizer-forge-${state.activeMode}-${index + 1}.${extension}`)
     setNotice(`Downloaded candidate ${index + 1}.`)
-  }, [state.activeMode])
+  }, [
+    isVfxForgeMode,
+    state.activeMode,
+    state.vfxForge.effectLabel,
+    vfxTextureResults,
+  ])
+
+  const handleBuildVfxRecipe = useCallback(async () => {
+    if (!canBuildVfxRecipe || isBuildingVfxRecipe) {
+      return
+    }
+
+    setIsBuildingVfxRecipe(true)
+    setError(null)
+
+    try {
+      const { ok, payload } = await postVfxRecipeRequest(
+        await buildVfxRecipeRequest({
+          recipeState: state.vfxForge,
+          textures: collectVfxTexturePayloads(vfxTextureResults),
+        }),
+      )
+
+      if (!ok || !payload?.recipe) {
+        throw toForgeError(payload?.error, 'Recipe Build Failed')
+      }
+
+      setVfxRecipeManifest(payload.recipe)
+      setNotice(
+        `${payload.recipe.displayName} recipe built for ${getVfxExportTargetLabel(payload.recipe.exportTarget)}.`,
+      )
+    } catch (recipeError) {
+      setError(toForgeError(recipeError, 'Recipe Build Failed'))
+    } finally {
+      setIsBuildingVfxRecipe(false)
+    }
+  }, [canBuildVfxRecipe, isBuildingVfxRecipe, state.vfxForge, vfxTextureResults])
+
+  const handleDownloadVfxBundle = useCallback(async () => {
+    if (!canBuildVfxRecipe || isDownloadingVfxBundle) {
+      return
+    }
+
+    setIsDownloadingVfxBundle(true)
+    setError(null)
+
+    try {
+      const requestBody = await buildVfxRecipeRequest({
+        recipeState: state.vfxForge,
+        textures: collectVfxTexturePayloads(vfxTextureResults),
+      })
+      const { blob, ok, payload } = await postVfxExportRequest(requestBody)
+
+      if (!ok || !blob) {
+        throw toForgeError(payload?.error, 'Bundle Export Failed')
+      }
+
+      downloadBlob(
+        blob,
+        `kizer-forge-vfx-${slugifyFileSegment(state.vfxForge.effectLabel, 'effect')}-bundle.zip`,
+      )
+      setNotice('Downloaded the Unity recipe export bundle.')
+    } catch (bundleError) {
+      setError(toForgeError(bundleError, 'Bundle Export Failed'))
+    } finally {
+      setIsDownloadingVfxBundle(false)
+    }
+  }, [canBuildVfxRecipe, isDownloadingVfxBundle, state.vfxForge, vfxTextureResults])
 
   const handleTextureMaterialStrengthChange = useCallback((
     resultId: string,
@@ -1875,16 +2060,16 @@ function App() {
           expectedCount: state.vfxForge.frameCount,
         },
       )
-      const projectileSlug = slugifyFileSegment(
-        state.vfxForge.projectileType,
-        'projectile',
+      const effectSlug = slugifyFileSegment(
+        state.vfxForge.effectLabel,
+        'effect',
       )
 
       frameDataUrls.forEach((dataUrl, frameIndex) => {
         window.setTimeout(() => {
           downloadDataUrl(
             dataUrl,
-            `kizer-forge-vfx-forge-${index + 1}-${projectileSlug}-frame-${String(frameIndex + 1).padStart(2, '0')}.png`,
+            `kizer-forge-vfx-forge-${index + 1}-${effectSlug}-frame-${String(frameIndex + 1).padStart(2, '0')}.png`,
           )
         }, frameIndex * 120)
       })
@@ -1893,7 +2078,7 @@ function App() {
     } catch (downloadError) {
       setError(toForgeError(downloadError, 'VFX Frame Download Failed'))
     }
-  }, [state.vfxForge.frameCount, state.vfxForge.projectileType])
+  }, [state.vfxForge.effectLabel, state.vfxForge.frameCount])
 
   async function hydrateLatestCharacterSheetInto(
     action:
@@ -2035,6 +2220,17 @@ function App() {
             state.textureLab.expansionTargetSize,
           )
         : rawMockResults
+
+    if (isVfxForgeMode) {
+      setVfxTextureResults(
+        Object.fromEntries(
+          state.vfxForge.textureOutputs.flatMap((kind, index) =>
+            mockResults[index] ? [[kind, mockResults[index]]] : [],
+          ),
+        ) as VfxTextureResultMap,
+      )
+      setVfxRecipeManifest(null)
+    }
 
     finalizeForgeRun(
       mockResults,
@@ -2388,22 +2584,42 @@ function App() {
                 ) : isVfxForgeMode ? (
                   <div className={controlPanelFullSpanClassName}>
                     <VfxForgePanel
+                      canBuildRecipe={canBuildVfxRecipe}
+                      canDownloadBundle={canDownloadVfxBundle}
+                      effectLabel={state.vfxForge.effectLabel}
+                      exportTarget={state.vfxForge.exportTarget}
                       frameCount={state.vfxForge.frameCount}
+                      generatedTextureCount={selectedVfxTextureResults.length}
                       intensity={state.vfxForge.intensity}
+                      isBuildingRecipe={isBuildingVfxRecipe}
+                      isDownloadingBundle={isDownloadingVfxBundle}
+                      looping={state.vfxForge.looping}
+                      onBuildRecipe={() => void handleBuildVfxRecipe()}
+                      onDownloadBundle={() => void handleDownloadVfxBundle()}
+                      onEffectLabelChange={(effectLabel) =>
+                        dispatch({ type: 'set-vfx-effect-label', effectLabel })
+                      }
+                      onExportTargetChange={(exportTarget) =>
+                        dispatch({ type: 'set-vfx-export-target', exportTarget })
+                      }
                       onFrameCountChange={(frameCount) =>
                         dispatch({ type: 'set-vfx-frame-count', frameCount })
                       }
-                      projectileType={state.vfxForge.projectileType}
                       onIntensityChange={(intensity) =>
                         dispatch({ type: 'set-vfx-intensity', intensity })
+                      }
+                      onLoopingChange={(enabled) =>
+                        dispatch({ type: 'set-vfx-looping', enabled })
                       }
                       onPromptChange={(prompt) =>
                         dispatch({ type: 'set-vfx-prompt', prompt })
                       }
-                      onProjectileTypeChange={(projectileType) =>
-                        dispatch({ type: 'set-vfx-projectile-type', projectileType })
+                      onTextureOutputChange={(kind, enabled) =>
+                        dispatch({ type: 'set-vfx-texture-output', enabled, kind })
                       }
                       prompt={state.vfxForge.prompt}
+                      recipeManifest={vfxRecipeManifest}
+                      textureOutputs={state.vfxForge.textureOutputs}
                     />
                   </div>
                 ) : (
@@ -2637,9 +2853,15 @@ function App() {
                       }
                     >
                       {hasForgeSlots
-                        ? forgeSlots.map((slot, index) => {
+                          ? forgeSlots.map((slot, index) => {
                             if (slot.result) {
                               const result = slot.result
+                              const vfxTextureKind =
+                                isVfxForgeMode
+                                  ? (Object.entries(vfxTextureResults).find(
+                                      ([, entry]) => entry?.id === result.id,
+                                    )?.[0] as VfxTextureKind | undefined)
+                                  : undefined
 
                               return (
                                 <GeneratedResultCard
@@ -2652,9 +2874,9 @@ function App() {
                                   extraActionLabel={
                                     isPortraitStudioMode
                                       ? 'Download Faces'
-                                      : isVfxForgeMode
+                                      : isVfxForgeMode && vfxTextureKind === 'flipbook'
                                         ? 'Download Frames'
-                                        : isTextureLabMode
+                                      : isTextureLabMode
                                           ? 'Generate Maps'
                                           : undefined
                                   }
@@ -2675,9 +2897,9 @@ function App() {
                                   onExtraAction={
                                     isPortraitStudioMode
                                       ? handleDownloadPortraitFaces
-                                      : isVfxForgeMode
+                                      : isVfxForgeMode && vfxTextureKind === 'flipbook'
                                         ? handleDownloadVfxFrames
-                                        : isTextureLabMode
+                                      : isTextureLabMode
                                           ? handleGenerateMaterialMaps
                                           : undefined
                                   }
@@ -2730,8 +2952,16 @@ function App() {
                             )
                           })
                         : isShowingResults
-                          ? results.map((result, index) => (
-                              <GeneratedResultCard
+                          ? results.map((result, index) => {
+                              const vfxTextureKind =
+                                isVfxForgeMode
+                                  ? (Object.entries(vfxTextureResults).find(
+                                      ([, entry]) => entry?.id === result.id,
+                                    )?.[0] as VfxTextureKind | undefined)
+                                  : undefined
+
+                              return (
+                                <GeneratedResultCard
                                 key={result.id}
                                 canRepairSeams={
                                   isTextureLabMode &&
@@ -2741,7 +2971,7 @@ function App() {
                                 extraActionLabel={
                                   isPortraitStudioMode
                                     ? 'Download Faces'
-                                    : isVfxForgeMode
+                                    : isVfxForgeMode && vfxTextureKind === 'flipbook'
                                       ? 'Download Frames'
                                       : isTextureLabMode
                                         ? 'Generate Maps'
@@ -2764,7 +2994,7 @@ function App() {
                                 onExtraAction={
                                   isPortraitStudioMode
                                     ? handleDownloadPortraitFaces
-                                    : isVfxForgeMode
+                                    : isVfxForgeMode && vfxTextureKind === 'flipbook'
                                       ? handleDownloadVfxFrames
                                       : isTextureLabMode
                                         ? handleGenerateMaterialMaps
@@ -2794,7 +3024,8 @@ function App() {
                                   />
                                 ) : null}
                               </GeneratedResultCard>
-                            ))
+                              )
+                            })
                           : reservedOutputs.map((index) => (
                               <PlaceholderCard
                                 key={index}
@@ -4666,76 +4897,226 @@ function PortraitStudioPanel({
 }
 
 type VfxForgePanelProps = {
+  canBuildRecipe: boolean
+  canDownloadBundle: boolean
+  effectLabel: string
+  exportTarget: VfxExportTarget
   frameCount: number
+  generatedTextureCount: number
   intensity: number
+  isBuildingRecipe: boolean
+  isDownloadingBundle: boolean
+  looping: boolean
+  onBuildRecipe: () => void
+  onDownloadBundle: () => void
+  onEffectLabelChange: (effectLabel: string) => void
+  onExportTargetChange: (exportTarget: VfxExportTarget) => void
   onFrameCountChange: (frameCount: number) => void
   onIntensityChange: (intensity: number) => void
+  onLoopingChange: (enabled: boolean) => void
   onPromptChange: (prompt: string) => void
-  onProjectileTypeChange: (projectileType: string) => void
+  onTextureOutputChange: (kind: VfxTextureKind, enabled: boolean) => void
   prompt: string
-  projectileType: string
+  recipeManifest: VfxRecipeManifest | null
+  textureOutputs: VfxTextureKind[]
 }
 
 function VfxForgePanel({
+  canBuildRecipe,
+  canDownloadBundle,
+  effectLabel,
+  exportTarget,
   frameCount,
+  generatedTextureCount,
   intensity,
+  isBuildingRecipe,
+  isDownloadingBundle,
+  looping,
+  onBuildRecipe,
+  onDownloadBundle,
+  onEffectLabelChange,
+  onExportTargetChange,
   onFrameCountChange,
   onIntensityChange,
+  onLoopingChange,
   onPromptChange,
-  onProjectileTypeChange,
+  onTextureOutputChange,
   prompt,
-  projectileType,
+  recipeManifest,
+  textureOutputs,
 }: VfxForgePanelProps) {
+  const normalizedEffectLabel = resolveVfxEffectLabel(effectLabel)
+  const hasFlipbookOutput = textureOutputs.includes('flipbook')
+  const canRenderRecipeSection = exportTarget !== 'none'
+
   return (
     <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
       <div className="grid gap-4 xl:grid-cols-2">
-        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-            Projectile Type
-          </label>
-          <input
-            type="text"
-            value={projectileType}
-            onChange={(event) => onProjectileTypeChange(event.target.value)}
-            placeholder="Ex: Fireball, Plasma Lance, Frost Bolt"
-            className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
-          />
-        </div>
+        <section className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4 xl:col-span-2">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+                Effect
+              </p>
+              <p className="mt-2 text-sm text-zinc-400">
+                Keep the setup freeform. Name the effect if you want, then steer the look and motion with custom direction.
+              </p>
+            </div>
+            <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-zinc-300">
+              {normalizedEffectLabel}
+            </span>
+          </div>
+          <div className="mt-4 grid gap-4 xl:grid-cols-2">
+            <div className="rounded-[18px] border border-white/10 bg-black/20 p-4">
+              <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+                Effect Label
+              </label>
+              <input
+                type="text"
+                value={effectLabel}
+                onChange={(event) => onEffectLabelChange(event.target.value)}
+                placeholder="Ex: Rift Bloom, Ember Ring, Ion Lance"
+                className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/30 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
+              />
+              <p className="mt-3 text-sm leading-6 text-zinc-400">
+                Optional. Blank labels fall back to Custom Effect for prompts, files, and export manifests.
+              </p>
+            </div>
+            <div className="rounded-[18px] border border-white/10 bg-black/20 p-4">
+              <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+                Direction
+              </label>
+              <textarea
+                value={prompt}
+                onChange={(event) => onPromptChange(event.target.value)}
+                placeholder="Ex: soft charge-up, bright core on frame 4, trailing embers, then a quick dissolve at the end."
+                rows={5}
+                className="mt-3 w-full resize-none rounded-[20px] border border-white/10 bg-black/30 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35 focus:bg-black/40"
+              />
+            </div>
+          </div>
+        </section>
 
-        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-            Behavior Steering
-          </label>
-          <p className="mt-2 text-sm text-zinc-400">
-            Optional guidance for timing, arc shape, bursts, trail behavior, charge-up, or dissipation.
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4 xl:col-span-2">
+          <div className="flex items-center justify-between">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Outputs
+            </p>
+            <span className="text-xs text-zinc-400">
+              {generatedTextureCount}/{textureOutputs.length} generated
+            </span>
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {vfxTextureKinds.map((kind) => {
+              const isChecked = textureOutputs.includes(kind)
+
+              return (
+                <label
+                  key={kind}
+                  className={`rounded-[18px] border px-4 py-3 text-sm transition ${
+                    isChecked
+                      ? 'border-sky-300/25 bg-sky-400/10 text-sky-50'
+                      : 'border-white/10 bg-black/20 text-zinc-300'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <span>
+                      <span className="block font-medium">{getVfxTextureLabel(kind)}</span>
+                      <span className="mt-1 block text-xs text-zinc-400">
+                        {kind === 'flipbook'
+                          ? 'Sprite sheet / animation strip output'
+                          : 'Optional support texture'}
+                      </span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={(event) => onTextureOutputChange(kind, event.target.checked)}
+                      className="mt-1 accent-sky-400"
+                    />
+                  </div>
+                </label>
+              )
+            })}
+          </div>
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Every output is optional. Turn on only what you need, including flipbook-only sprite sheet passes for 2D workflows.
           </p>
-          <textarea
-            value={prompt}
-            onChange={(event) => onPromptChange(event.target.value)}
-            placeholder="Ex: slow charge-up, tight corkscrew trail, bright core at frame 5, then embers breaking apart by the final frame."
-            rows={5}
-            className="mt-4 w-full resize-none rounded-[20px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35 focus:bg-black/30"
-          />
         </div>
 
         <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
           <div className="flex items-center justify-between">
             <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-              Frames
+              Playback
             </p>
-            <span className="text-xs text-zinc-400">{frameCount}</span>
+            <span className="text-xs text-zinc-400">{looping ? 'Looping' : 'One-shot'}</span>
           </div>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            <ModeToggleButton
+              icon={Play}
+              isActive={looping}
+              label="Looping"
+              onClick={() => onLoopingChange(true)}
+            />
+            <ModeToggleButton
+              icon={Sparkles}
+              isActive={!looping}
+              label="One-shot"
+              onClick={() => onLoopingChange(false)}
+            />
+          </div>
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Looping is ideal for reusable ambient or travel effects. One-shot is better for bursts and impact moments.
+          </p>
+        </div>
+
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex items-center justify-between">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Export Target
+            </p>
+            <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] uppercase tracking-[0.22em] text-zinc-300">
+              {getVfxExportTargetLabel(exportTarget)}
+            </span>
+          </div>
+          <div className="mt-4 grid gap-2 sm:grid-cols-3">
+            {([
+              ['none', 'None'],
+              ['particle-system', 'Particle System'],
+              ['vfx-graph', 'VFX Graph'],
+            ] as Array<[VfxExportTarget, string]>).map(([target, label]) => (
+              <ModeToggleButton
+                key={target}
+                icon={target === 'none' ? Box : Play}
+                isActive={exportTarget === target}
+                label={label}
+                onClick={() => onExportTargetChange(target)}
+              />
+            ))}
+          </div>
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Choose None for pure 2D texture generation. Pick a Unity target only when you want the generic recipe bundle tools.
+          </p>
+        </div>
+
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Frames
+          </label>
           <input
             type="range"
             min={4}
             max={30}
             step={1}
             value={frameCount}
+            disabled={!hasFlipbookOutput}
             onChange={(event) => onFrameCountChange(Number(event.target.value))}
-            className="mt-4 w-full cursor-pointer accent-sky-400"
+            className="mt-3 w-full cursor-pointer accent-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
           />
           <p className="mt-3 text-sm leading-6 text-zinc-400">
-            Controls the width of the returned horizontal strip. Higher counts give smoother timing but wider sheets.
+            {hasFlipbookOutput
+              ? 'Used when a flipbook output is selected. Higher counts give smoother timing but wider strips.'
+              : 'Enable Flipbook output to use sprite-sheet frame controls.'}
           </p>
         </div>
 
@@ -4756,9 +5137,62 @@ function VfxForgePanel({
             className="mt-4 w-full cursor-pointer accent-sky-400"
           />
           <p className="mt-3 text-sm leading-6 text-zinc-400">
-            Output is constrained to a {frameCount}-frame horizontal strip on a pure black background for additive blending.
+            Pushes the result toward calmer utility maps or more aggressive, high-energy effects.
           </p>
         </div>
+
+        {canRenderRecipeSection ? (
+          <section className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4 xl:col-span-2">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+                  Unity Export
+                </p>
+                <p className="mt-2 text-sm text-zinc-400">
+                  Generate textures first, then build a generic URP recipe manifest and download the bundle for {getVfxExportTargetLabel(exportTarget)}.
+                </p>
+              </div>
+              <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-zinc-300">
+                {getVfxExportTargetLabel(exportTarget)}
+              </span>
+            </div>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              <button
+                type="button"
+                onClick={onBuildRecipe}
+                disabled={!canBuildRecipe || isBuildingRecipe}
+                className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <FileText className={`size-4 ${isBuildingRecipe ? 'animate-pulse' : ''}`} strokeWidth={1.7} />
+                {isBuildingRecipe ? 'Building Recipe' : 'Build Recipe'}
+              </button>
+              <button
+                type="button"
+                onClick={onDownloadBundle}
+                disabled={!canDownloadBundle}
+                className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-sky-300/20 bg-sky-400/10 px-4 py-3 text-sm text-sky-50 transition hover:border-sky-300/35 hover:bg-sky-400/16 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Download className={`size-4 ${isDownloadingBundle ? 'animate-pulse' : ''}`} strokeWidth={1.7} />
+                {isDownloadingBundle ? 'Packaging Bundle' : 'Download Bundle'}
+              </button>
+              <div className="rounded-[18px] border border-white/10 bg-black/20 px-4 py-3 text-sm text-zinc-300">
+                Recipe status: {recipeManifest ? 'Ready to export.' : 'Build recipe after texture generation.'}
+              </div>
+            </div>
+            {recipeManifest ? (
+              <ul className="mt-4 space-y-2 text-sm text-zinc-300">
+                {recipeManifest.importNotes.map((note) => (
+                  <li
+                    key={note}
+                    className="rounded-[16px] border border-white/10 bg-black/20 px-4 py-3"
+                  >
+                    {note}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </section>
+        ) : null}
       </div>
     </section>
   )

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { buildRecentPrompts, loadStoredState, persistStoredState } from './persistence'
+import type { VfxTextureKind } from './forge'
 
 const baseStoredSettings = {
   actionAnimator: {
@@ -53,10 +54,13 @@ const baseStoredSettings = {
     variantPreset: 'worn' as const,
   },
   vfxForge: {
+    effectLabel: 'Fireball',
+    exportTarget: 'particle-system' as const,
     frameCount: 8,
     intensity: 60,
+    looping: true,
     prompt: '',
-    projectileType: 'Fireball',
+    textureOutputs: ['flipbook', 'dissolve-mask', 'noise'] as VfxTextureKind[],
   },
 }
 
@@ -282,6 +286,32 @@ describe('persistStoredState', () => {
         elemental: 'Lean into wind and drifting leaves.',
       },
       variantFamily: 'elemental',
+    })
+  })
+
+  it('migrates legacy projectileType into the projectile effect label', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          ...baseStoredSettings,
+          activeMode: 'vfx-forge',
+          vfxForge: {
+            frameCount: 8,
+            intensity: 60,
+            prompt: 'slow corkscrew',
+            projectileType: 'Frost Bolt',
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.vfxForge).toMatchObject({
+      effectLabel: 'Frost Bolt',
+      exportTarget: 'none',
+      textureOutputs: ['flipbook'],
     })
   })
 

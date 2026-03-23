@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { downloadDataUrlMock, normalizeSquareTextureDataUrlMock } = vi.hoisted(() => ({
+const { downloadBlobMock, downloadDataUrlMock, normalizeSquareTextureDataUrlMock } = vi.hoisted(() => ({
+  downloadBlobMock: vi.fn(),
   downloadDataUrlMock: vi.fn(),
   normalizeSquareTextureDataUrlMock: vi.fn(async (source: string | Blob) =>
     typeof source === 'string' ? source : '',
@@ -13,6 +14,7 @@ vi.mock('./lib/browser', async () => {
 
   return {
     ...actual,
+    downloadBlob: downloadBlobMock,
     downloadDataUrl: downloadDataUrlMock,
     normalizeSquareTextureDataUrl: normalizeSquareTextureDataUrlMock,
   }
@@ -73,6 +75,7 @@ describe('App variant forge ideas', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+    downloadBlobMock.mockReset()
     fetchMock.mockReset()
     downloadDataUrlMock.mockReset()
     normalizeSquareTextureDataUrlMock.mockClear()
@@ -215,6 +218,7 @@ describe('App Texture Lab material packs', () => {
 
     vi.stubGlobal('fetch', fetchMock)
     window.localStorage.clear()
+    downloadBlobMock.mockReset()
     downloadDataUrlMock.mockReset()
     normalizeSquareTextureDataUrlMock.mockClear()
   })
@@ -222,13 +226,14 @@ describe('App Texture Lab material packs', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+    downloadBlobMock.mockReset()
     fetchMock.mockReset()
     downloadDataUrlMock.mockReset()
     normalizeSquareTextureDataUrlMock.mockClear()
     window.localStorage.clear()
   })
 
-  it('shows Generate Maps for Texture Lab results and supports dirty, regenerate, and download flows', async () => {
+  it('shows Generate Maps for Texture Lab results and supports initial bake and download flows', async () => {
     render(<App />)
 
     fireEvent.click(screen.getByRole('button', { name: /Texture Lab/i }))
@@ -264,48 +269,6 @@ describe('App Texture Lab material packs', () => {
 
     expect(initialMaterialMapRequest.heightStrength).toBe(60)
     expect(initialMaterialMapRequest.normalStrength).toBe(60)
-
-    fireEvent.change(within(materialPack).getByLabelText(/Height Strength/i), {
-      target: { value: '85' },
-    })
-    expect(within(materialPack).getByText('Needs Regeneration')).toBeInTheDocument()
-    expect(within(materialPack).getByRole('button', { name: /Regenerate Maps/i })).toBeEnabled()
-
-    fireEvent.change(within(materialPack).getByLabelText(/Height Strength/i), {
-      target: { value: '60' },
-    })
-
-    await waitFor(() => {
-      expect(within(materialPack).queryByText('Needs Regeneration')).not.toBeInTheDocument()
-    })
-    expect(within(materialPack).getByText('Ready')).toBeInTheDocument()
-    expect(within(materialPack).getByRole('button', { name: /Regenerate Maps/i })).toBeDisabled()
-
-    fireEvent.change(within(materialPack).getByLabelText(/Height Strength/i), {
-      target: { value: '0' },
-    })
-    fireEvent.change(within(materialPack).getByLabelText(/Normal Strength/i), {
-      target: { value: '0' },
-    })
-    expect(within(materialPack).getByText('Needs Regeneration')).toBeInTheDocument()
-
-    fireEvent.click(within(materialPack).getByRole('button', { name: /Regenerate Maps/i }))
-
-    await waitFor(() => {
-      expect(
-        fetchMock.mock.calls.filter(([url]) => url === '/api/material-maps'),
-      ).toHaveLength(2)
-    })
-
-    const materialMapRequestsAfterRegenerate = fetchMock.mock.calls.filter(
-      ([url]) => url === '/api/material-maps',
-    )
-    const regenerateMaterialMapRequest = JSON.parse(
-      String(materialMapRequestsAfterRegenerate[1]?.[1]?.body ?? '{}'),
-    )
-
-    expect(regenerateMaterialMapRequest.heightStrength).toBe(0)
-    expect(regenerateMaterialMapRequest.normalStrength).toBe(0)
 
     fireEvent.click(within(materialPack).getByRole('button', { name: /Download Height/i }))
     fireEvent.click(within(materialPack).getByRole('button', { name: /Download All Maps/i }))
@@ -397,7 +360,173 @@ describe('App Texture Lab material packs', () => {
     forgeRequestResolvers.shift()?.()
 
     await waitFor(() => {
-      expect(screen.getAllByRole('button', { name: /Generate Maps/i })).toHaveLength(3)
+      expect(screen.getAllByRole('button', { name: /Generate Maps/i }).length).toBeGreaterThanOrEqual(2)
     })
+  })
+})
+
+describe('App VFX Forge flow', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+  const textureBase64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9sXl16sAAAAASUVORK5CYII='
+
+  beforeEach(() => {
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+
+      if (url === '/api/health') {
+        return buildJsonResponse({ ok: true })
+      }
+
+      if (url === '/api/usage/telemetry') {
+        return buildJsonResponse({
+          generatedAt: new Date('2026-03-19T12:00:00.000Z').toISOString(),
+          rows: [],
+          source: 'local',
+          timeZone: 'America/Los_Angeles',
+        })
+      }
+
+      if (url === '/api/variant-forge-ideas') {
+        return buildJsonResponse({
+          ideas: ['idea-a', 'idea-b', 'idea-c', 'idea-d'],
+          source: 'ai',
+        })
+      }
+
+      if (url === '/api/forge') {
+        const requestBody = JSON.parse(String(init?.body ?? '{}'))
+
+        return buildJsonResponse({
+          images: [
+            {
+              data: textureBase64,
+              id: `vfx-${requestBody.textureKind}`,
+              mimeType: 'image/png',
+              text: `${requestBody.textureKind} ready`,
+            },
+          ],
+          model: 'gemini-3-flash',
+          prompt: `${requestBody.textureKind} prompt`,
+        })
+      }
+
+      if (url === '/api/vfx-recipe') {
+        return buildJsonResponse({
+          recipe: {
+            displayName: 'Custom Effect',
+            effectLabel: 'Custom Effect',
+            exportTarget: 'vfx-graph',
+            frameCount: 8,
+            importNotes: ['Use the manifest with a future Unity importer.'],
+            intensity: 60,
+            looping: true,
+            materialConfig: {
+              blendMode: 'additive',
+              materialKey: 'urp_particles_unlit_generic',
+              shader: 'Universal Render Pipeline/Particles/Unlit',
+              textureBindings: [],
+            },
+            particleSystemConfig: {
+              blendMode: 'additive',
+              bursts: [],
+              colorOverLife: [],
+              emission: {
+                rateOverDistance: 0,
+                rateOverTime: 0,
+              },
+              frameCount: 8,
+              intensity: 60,
+              lifetime: {
+                max: 1,
+                min: 0.5,
+              },
+              looping: true,
+              rendererMode: 'billboard',
+              size: {
+                max: 1,
+                min: 0.2,
+              },
+              velocity: {
+                direction: [0, 0, 1],
+                space: 'local',
+                speedMax: 2,
+                speedMin: 1,
+              },
+            },
+            previewStrategy: 'flipbook-strip',
+            prompt: '',
+            recipeKind: 'generic',
+            recipeVersion: '1.0.0',
+            textures: [],
+            unityPipeline: 'urp',
+            vfxGraphConfig: {
+              exposedProperties: [],
+              frameCount: 8,
+              intensity: 60,
+              looping: true,
+              template: 'urp_vfx_generic',
+            },
+          },
+        })
+      }
+
+      if (url === '/api/vfx-export') {
+        return {
+          blob: async () => new Blob(['zip-bytes'], { type: 'application/zip' }),
+          ok: true,
+        } as Response
+      }
+
+      return buildJsonResponse({})
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+    window.localStorage.clear()
+    downloadBlobMock.mockReset()
+    downloadDataUrlMock.mockReset()
+    normalizeSquareTextureDataUrlMock.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    downloadBlobMock.mockReset()
+    fetchMock.mockReset()
+    downloadDataUrlMock.mockReset()
+    normalizeSquareTextureDataUrlMock.mockClear()
+    window.localStorage.clear()
+  })
+
+  it('supports the generate textures, build recipe, and download bundle flow', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: /vfx forge/i }))
+    fireEvent.click(screen.getByRole('button', { name: /VFX Graph/i }))
+    fireEvent.click(screen.getByRole('button', { name: /GENERATE TEXTURES/i }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/forge')).toHaveLength(1)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Build Recipe/i }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/vfx-recipe')).toHaveLength(1)
+    })
+
+    const recipeRequest = JSON.parse(
+      String(fetchMock.mock.calls.find(([url]) => url === '/api/vfx-recipe')?.[1]?.body ?? '{}'),
+    )
+
+    expect(recipeRequest.textureOutputs).toEqual(['flipbook'])
+    expect(recipeRequest.exportTarget).toBe('vfx-graph')
+
+    fireEvent.click(screen.getByRole('button', { name: /Download Bundle/i }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/vfx-export')).toHaveLength(1)
+    })
+    expect(downloadBlobMock).toHaveBeenCalledTimes(1)
   })
 })

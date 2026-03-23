@@ -13,6 +13,10 @@ import type {
   TextureMaterialMapDefaults,
   TextureMaterialMapKey,
 } from '../lib/forge'
+import type {
+  VfxRecipeManifest,
+  VfxTextureKind,
+} from '../../shared/vfxForgeCatalog.js'
 
 export type ForgeApiResponse = {
   error?:
@@ -67,6 +71,25 @@ export type MaterialMapResult = {
   width: number
 }
 
+export type VfxRecipeApiResponse = {
+  error?:
+    | string
+    | {
+        code?: string
+        details?: string[]
+        message?: string
+        retryAfterSeconds?: number
+        title?: string
+      }
+  recipe?: VfxRecipeManifest
+}
+
+export type VfxTexturePayload = {
+  kind: VfxTextureKind
+  mimeType: string
+  result: ForgeResult
+}
+
 export async function postForgeRequest(body: Record<string, unknown>) {
   const response = await fetch('/api/forge', {
     method: 'POST',
@@ -96,6 +119,38 @@ export async function postMaterialMapsRequest(body: Record<string, unknown>) {
   return {
     ok: response.ok,
     payload,
+  }
+}
+
+export async function postVfxRecipeRequest(body: Record<string, unknown>) {
+  const response = await fetch('/api/vfx-recipe', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  const payload = (await response.json()) as VfxRecipeApiResponse | undefined
+
+  return {
+    ok: response.ok,
+    payload,
+  }
+}
+
+export async function postVfxExportRequest(body: Record<string, unknown>) {
+  const response = await fetch('/api/vfx-export', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  return {
+    blob: response.ok ? await response.blob() : null,
+    ok: response.ok,
+    payload: response.ok ? null : ((await response.json()) as VfxRecipeApiResponse | undefined),
   }
 }
 
@@ -309,21 +364,57 @@ export async function buildTextureExpansionRequest({
 
 export function buildVfxForgeRequest({
   modelId,
+  textureKind,
   state,
   styleText,
 }: {
   modelId: string
+  textureKind: VfxTextureKind
   state: ForgeState['vfxForge']
   styleText: string
 }) {
   return {
+    effectLabel: state.effectLabel.trim(),
+    exportTarget: state.exportTarget !== 'none' ? state.exportTarget : undefined,
     generationCount: 1,
     frameCount: state.frameCount,
     intensity: state.intensity,
+    looping: state.looping,
     mode: 'vfx-forge',
     modelId,
-    projectileType: state.projectileType.trim(),
     prompt: state.prompt.trim(),
     styleText,
+    textureKind,
+  }
+}
+
+export async function buildVfxRecipeRequest({
+  recipeState,
+  textures,
+}: {
+  recipeState: ForgeState['vfxForge']
+  textures: VfxTexturePayload[]
+}) {
+  return {
+    effectLabel: recipeState.effectLabel.trim(),
+    exportTarget: recipeState.exportTarget,
+    frameCount: recipeState.frameCount,
+    intensity: recipeState.intensity,
+    looping: recipeState.looping,
+    prompt: recipeState.prompt.trim(),
+    textureOutputs: recipeState.textureOutputs,
+    textures: await Promise.all(
+      textures.map(async ({ kind, mimeType, result }) => {
+        const blob = await dataUrlToBlob(result.dataUrl)
+
+        return {
+          data: await fileToBase64(blob),
+          kind,
+          mimeType: blob.type || mimeType,
+          resultId: result.id,
+        }
+      }),
+    ),
+    unityPipeline: 'urp',
   }
 }

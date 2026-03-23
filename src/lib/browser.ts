@@ -618,6 +618,17 @@ export function downloadDataUrl(dataUrl: string, fileName: string) {
   link.click()
 }
 
+export function downloadBlob(blob: Blob, fileName: string) {
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = fileName
+  link.click()
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl)
+  }, 0)
+}
+
 async function loadImage(file: Blob): Promise<HTMLImageElement> {
   const objectUrl = URL.createObjectURL(file)
 

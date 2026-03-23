@@ -18,6 +18,15 @@ import {
   variantForgeFamilies,
   variantForgePresetCatalog,
 } from '../../shared/variantForgeCatalog.js'
+import {
+  defaultVfxExportTarget,
+  defaultVfxFrameCount,
+  defaultVfxIntensity,
+  defaultVfxLooping,
+  getDefaultVfxTextureOutputs,
+  type VfxExportTarget,
+  type VfxTextureKind,
+} from '../../shared/vfxForgeCatalog.js'
 import type {
   VariantForgeFamily,
   VariantForgePreset,
@@ -29,6 +38,10 @@ export type {
   VariantForgePreset,
   VariantForgeRarityPreset,
 } from '../../shared/variantForgeCatalog.js'
+export type {
+  VfxExportTarget,
+  VfxTextureKind,
+} from '../../shared/vfxForgeCatalog.js'
 
 export type ReferenceSlot = 'style' | 'subject'
 export type CharacterSheetReferenceSlot = 'face' | 'outfit' | 'art-style'
@@ -132,10 +145,13 @@ export type PortraitStudioState = {
 }
 
 export type VfxForgeState = {
+  effectLabel: string
+  exportTarget: VfxExportTarget
   frameCount: number
   intensity: number
+  looping: boolean
   prompt: string
-  projectileType: string
+  textureOutputs: VfxTextureKind[]
 }
 
 export type UvLabState = {
@@ -208,10 +224,13 @@ export type ForgeAction =
   | { type: 'set-variant-forge-custom-direction'; customDirection: string }
   | { type: 'set-portrait-studio-image'; asset: ReferenceAsset | null }
   | { type: 'set-portrait-studio-prompt'; prompt: string }
+  | { type: 'set-vfx-effect-label'; effectLabel: string }
+  | { type: 'set-vfx-export-target'; exportTarget: VfxExportTarget }
   | { type: 'set-vfx-frame-count'; frameCount: number }
-  | { type: 'set-vfx-projectile-type'; projectileType: string }
   | { type: 'set-vfx-intensity'; intensity: number }
+  | { type: 'set-vfx-looping'; enabled: boolean }
   | { type: 'set-vfx-prompt'; prompt: string }
+  | { type: 'set-vfx-texture-output'; kind: VfxTextureKind; enabled: boolean }
   | { type: 'set-uv-lab-mesh'; asset: ModelAsset | null }
   | { type: 'set-uv-lab-atlas-size'; size: UvLabAtlasSize }
   | { type: 'set-uv-lab-padding-px'; paddingPx: number }
@@ -344,15 +363,15 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     label: 'VFX Forge',
     eyebrow: 'Effects',
     description:
-      'Generates horizontal projectile sheets with additive-friendly black backgrounds and clear effect timing.',
+      'Builds URP-first VFX texture ingredients plus typed Unity recipe bundles for 3D-space effects.',
     instruction:
-      '2D projectile spritesheet, pure black background, 8 horizontal frames, soft glowing particle edges',
+      'Generate effect textures for URP particle systems and VFX Graph setups, then export a typed recipe bundle with importer hints.',
     surfaceClassName:
       'from-orange-400/16 via-slate-950/80 to-slate-950/95 ring-orange-300/20',
     previewAspectClassName: 'aspect-[8/1]',
     previewImageClassName: 'object-contain',
     icon: Flame,
-    focus: 'Projectile loops, FX timing, engine-ready sheets',
+    focus: 'Projectile, explosion, portal, and beam recipes for URP',
   },
   visualizer: {
     label: 'Visualizer',
@@ -495,10 +514,13 @@ export const initialState: ForgeState = {
     referencePrompt: '',
   },
   vfxForge: {
-    frameCount: 8,
-    intensity: 60,
+    effectLabel: '',
+    exportTarget: defaultVfxExportTarget,
+    frameCount: defaultVfxFrameCount,
+    intensity: defaultVfxIntensity,
+    looping: defaultVfxLooping,
     prompt: '',
-    projectileType: 'Fireball',
+    textureOutputs: getDefaultVfxTextureOutputs(),
   },
 }
 
@@ -774,12 +796,20 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           prompt: action.prompt,
         },
       }
-    case 'set-vfx-projectile-type':
+    case 'set-vfx-effect-label':
       return {
         ...state,
         vfxForge: {
           ...state.vfxForge,
-          projectileType: action.projectileType,
+          effectLabel: action.effectLabel,
+        },
+      }
+    case 'set-vfx-export-target':
+      return {
+        ...state,
+        vfxForge: {
+          ...state.vfxForge,
+          exportTarget: action.exportTarget,
         },
       }
     case 'set-vfx-frame-count':
@@ -798,6 +828,14 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           intensity: clampIntensity(action.intensity),
         },
       }
+    case 'set-vfx-looping':
+      return {
+        ...state,
+        vfxForge: {
+          ...state.vfxForge,
+          looping: action.enabled,
+        },
+      }
     case 'set-vfx-prompt':
       return {
         ...state,
@@ -806,6 +844,19 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           prompt: action.prompt,
         },
       }
+    case 'set-vfx-texture-output': {
+      const nextTextureOutputs = action.enabled
+        ? Array.from(new Set([...state.vfxForge.textureOutputs, action.kind]))
+        : state.vfxForge.textureOutputs.filter((kind) => kind !== action.kind)
+
+      return {
+        ...state,
+        vfxForge: {
+          ...state.vfxForge,
+          textureOutputs: nextTextureOutputs,
+        },
+      }
+    }
     case 'set-uv-lab-mesh':
       return {
         ...state,

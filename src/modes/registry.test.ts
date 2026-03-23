@@ -53,4 +53,31 @@ describe('mode registry helpers', () => {
     expect(presentation.primaryActionLabel).toBe('FORGE VARIANT')
     expect(presentation.resultGridTitle).toBe('Variant Forge output slot')
   })
+
+  it('derives VFX forge readiness and copy from the new recipe flow', () => {
+    const presentation = getModePresentation({
+      isForging: false,
+      selectedModelSupported: true,
+      state: {
+        ...initialState,
+        activeMode: 'vfx-forge',
+        vfxForge: {
+          ...initialState.vfxForge,
+          effectLabel: '',
+          exportTarget: 'none',
+          textureOutputs: ['flipbook', 'noise'],
+        },
+      },
+      styleText: '',
+    })
+
+    expect(presentation.headerInputLabel).toBe('Config')
+    expect(presentation.primaryActionLabel).toBe('GENERATE TEXTURES')
+    expect(presentation.readinessLabel).toBe('Texture plan ready')
+    expect(presentation.resultGridTitle).toBe('VFX Forge texture ingredient outputs')
+    expect(presentation.briefItems[0]).toMatchObject({
+      label: 'Effect',
+      value: 'Custom Effect',
+    })
+  })
 })
