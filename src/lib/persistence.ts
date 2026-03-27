@@ -45,6 +45,11 @@ import {
   isVfxExportTarget,
   isVfxTextureKind,
 } from '../../shared/vfxForgeCatalog.js'
+import {
+  getDefaultUiLayout,
+  sanitizeUiLayout,
+  type UiLayoutState,
+} from './uiLayout'
 
 type StoredActionAnimatorSettings = {
   actionType: ActionAnimatorActionType
@@ -90,6 +95,7 @@ type StoredSettings = {
     seamlessMode: boolean
     workflow: TextureLabWorkflow
   }
+  uiLayout: UiLayoutState
   uvLab: {
     atlasSize: UvLabAtlasSize
     paddingPx: number
@@ -413,6 +419,10 @@ export function loadStoredState(): StoredState | null {
               ? 'expand'
               : 'generate',
         },
+        uiLayout:
+          parsed.settings?.uiLayout !== undefined
+            ? sanitizeUiLayout(parsed.settings.uiLayout)
+            : getDefaultUiLayout(),
         uvLab: {
           atlasSize: clampUvAtlasSize(parsed.settings?.uvLab?.atlasSize ?? 2048),
           paddingPx: clampUvPaddingPx(parsed.settings?.uvLab?.paddingPx ?? 8),

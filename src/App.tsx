@@ -2,6 +2,8 @@ import {
   lazy,
   startTransition,
   Suspense,
+  type CSSProperties,
+  type ReactNode,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -10,6 +12,28 @@ import {
   useState,
 } from 'react'
 import {
+  closestCenter,
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+  type UniqueIdentifier,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  arrayMove,
+  horizontalListSortingStrategy,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import {
   AlertCircle,
   Box,
   ChevronRight,
@@ -17,6 +41,7 @@ import {
   FileText,
   Fingerprint,
   Gem,
+  GripVertical,
   Hammer,
   ImagePlus,
   LoaderCircle,
@@ -59,6 +84,25 @@ import {
   loadStoredState,
   persistStoredState,
 } from './lib/persistence'
+import {
+  getDefaultUiLayout,
+  getEffectiveModePanelLayout,
+  layoutControlZoneOrder,
+  layoutShellZoneOrder,
+  layoutWorkspaceZoneOrder,
+  resetAllUiLayouts,
+  resetModePanelLayout,
+  sanitizeUiLayout,
+  setModePanelLayout,
+  setModeTabOrder,
+  setShellLayout,
+  type LayoutControlZoneId,
+  type LayoutPanelItemId,
+  type LayoutShellItemId,
+  type LayoutShellZoneId,
+  type LayoutWorkspaceZoneId,
+  type UiLayoutState,
+} from './lib/uiLayout'
 import {
   forgeReducer,
   getActionAnimatorNormalizedSizeOptions,
@@ -238,6 +282,18 @@ type ForgeBatchSlotState = {
   status: ForgeBatchSlotStatus
 }
 
+type LayoutItemDescriptor<TId extends string> = {
+  content: ReactNode
+  id: TId
+  label: string
+  testId?: string
+}
+
+type ActiveDragState = {
+  context: 'control' | 'shell' | 'tabs' | 'workspace'
+  label: string
+} | null
+
 const portraitStudioExpressionLabels = [
   'neutral',
   'angry',
@@ -262,6 +318,38 @@ const textureLabClientBatchMaxParallelSlots = 1
 const textureLabClientInterSlotDelayMs = 250
 const textureLabClientRetryDelayMs = 1200
 const textureLabClientMaxRetryDelayMs = 10000
+const shellZoneKeyPrefix = 'shell:'
+const controlZoneKeyPrefix = 'control:'
+const workspaceZoneKeyPrefix = 'workspace:'
+const shellItemLabels: Record<LayoutShellItemId, string> = {
+  'control-panel': 'Control Panel',
+  'header-summary': 'Header Summary',
+  'mode-tabs': 'Mode Tabs',
+  'workspace-panel': 'Workspace Panel',
+}
+const panelItemLabels: Record<LayoutPanelItemId, string> = {
+  'action-animator-panel': 'Action Animator Panel',
+  'batch-panel': 'Generation Count',
+  'character-sheet-panel': 'Character Sheet Panel',
+  'forge-action': 'Forge Action',
+  'forge-brief': 'Forge Brief',
+  'model-selector': 'Model Selector',
+  'portrait-direction': 'Portrait Direction',
+  'portrait-studio-panel': 'Portrait Studio Panel',
+  'prompt-panel': 'Prompt Panel',
+  'result-grid': 'Result Grid',
+  'style-input': 'Style Input',
+  'style-reference': 'Style Reference',
+  'subject-reference': 'Subject Reference',
+  'texture-expansion': 'Texture Expansion',
+  'texture-workflow': 'Texture Workflow',
+  'top-panel': 'Top Panel',
+  'uv-brief': 'UV Brief',
+  'uv-lab-panel': 'UV Lab Panel',
+  'uv-workspace': 'UV Workspace',
+  'variant-forge-panel': 'Variant Forge Panel',
+  'vfx-forge-panel': 'VFX Forge Panel',
+}
 
 type TelemetryWindowState = {
   sessionMaxByModel: Record<string, number>
@@ -272,6 +360,179 @@ const telemetryWindowStorageKey = 'kizer-forge-telemetry-window'
 const telemetryWindowDurationMs = 24 * 60 * 60 * 1000
 const UvLabWorkspace = lazy(() => import('./components/UvLabWorkspace'))
 const telemetryRefreshIntervalMs = 10000
+
+function getShellZoneKey(zoneId: LayoutShellZoneId) {
+  return `${shellZoneKeyPrefix}${zoneId}`
+}
+
+function getControlZoneKey(zoneId: LayoutControlZoneId) {
+  return `${controlZoneKeyPrefix}${zoneId}`
+}
+
+function getWorkspaceZoneKey(zoneId: LayoutWorkspaceZoneId) {
+  return `${workspaceZoneKeyPrefix}${zoneId}`
+}
+
+function parseShellZoneKey(id: UniqueIdentifier): LayoutShellZoneId | null {
+  const value = String(id)
+
+  if (!value.startsWith(shellZoneKeyPrefix)) {
+    return null
+  }
+
+  const zoneId = value.slice(shellZoneKeyPrefix.length)
+
+  return layoutShellZoneOrder.includes(zoneId as LayoutShellZoneId)
+    ? (zoneId as LayoutShellZoneId)
+    : null
+}
+
+function parseControlZoneKey(id: UniqueIdentifier): LayoutControlZoneId | null {
+  const value = String(id)
+
+  if (!value.startsWith(controlZoneKeyPrefix)) {
+    return null
+  }
+
+  const zoneId = value.slice(controlZoneKeyPrefix.length)
+
+  return layoutControlZoneOrder.includes(zoneId as LayoutControlZoneId)
+    ? (zoneId as LayoutControlZoneId)
+    : null
+}
+
+function parseWorkspaceZoneKey(id: UniqueIdentifier): LayoutWorkspaceZoneId | null {
+  const value = String(id)
+
+  if (!value.startsWith(workspaceZoneKeyPrefix)) {
+    return null
+  }
+
+  const zoneId = value.slice(workspaceZoneKeyPrefix.length)
+
+  return layoutWorkspaceZoneOrder.includes(zoneId as LayoutWorkspaceZoneId)
+    ? (zoneId as LayoutWorkspaceZoneId)
+    : null
+}
+
+function findItemZone<TZone extends string, TItem extends string>(
+  layout: Record<TZone, TItem[]>,
+  zoneOrder: readonly TZone[],
+  itemId: UniqueIdentifier,
+) {
+  const value = String(itemId) as TItem
+
+  return zoneOrder.find((zoneId) => layout[zoneId].includes(value)) ?? null
+}
+
+function reorderSortableLayout<TZone extends string, TItem extends string>({
+  activeId,
+  overId,
+  parseZoneKey,
+  layout,
+  zoneOrder,
+}: {
+  activeId: UniqueIdentifier
+  layout: Record<TZone, TItem[]>
+  overId: UniqueIdentifier | null
+  parseZoneKey: (id: UniqueIdentifier) => TZone | null
+  zoneOrder: readonly TZone[]
+}) {
+  if (!overId) {
+    return null
+  }
+
+  const activeZone = findItemZone(layout, zoneOrder, activeId)
+
+  if (!activeZone) {
+    return null
+  }
+
+  const targetZone = parseZoneKey(overId) ?? findItemZone(layout, zoneOrder, overId)
+
+  if (!targetZone) {
+    return null
+  }
+
+  const activeItemId = String(activeId) as TItem
+  const overItemId = String(overId) as TItem
+
+  if (activeZone === targetZone && parseZoneKey(overId) === null) {
+    const items = layout[activeZone]
+    const oldIndex = items.indexOf(activeItemId)
+    const newIndex = items.indexOf(overItemId)
+
+    if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) {
+      return null
+    }
+
+    return {
+      ...layout,
+      [activeZone]: arrayMove(items, oldIndex, newIndex),
+    }
+  }
+
+  const nextLayout = Object.fromEntries(
+    zoneOrder.map((zoneId) => [zoneId, [...layout[zoneId]]]),
+  ) as Record<TZone, TItem[]>
+  const activeItems = nextLayout[activeZone]
+  const activeIndex = activeItems.indexOf(activeItemId)
+
+  if (activeIndex === -1) {
+    return null
+  }
+
+  activeItems.splice(activeIndex, 1)
+
+  const targetItems = nextLayout[targetZone]
+  const targetIndex =
+    parseZoneKey(overId) !== null ? targetItems.length : targetItems.indexOf(overItemId)
+
+  targetItems.splice(targetIndex >= 0 ? targetIndex : targetItems.length, 0, activeItemId)
+
+  if (
+    activeZone === targetZone &&
+    targetItems.every((itemId, index) => itemId === layout[targetZone][index])
+  ) {
+    return null
+  }
+
+  if (
+    activeZone !== targetZone &&
+    zoneOrder.every(
+      (zoneId) =>
+        nextLayout[zoneId].length === layout[zoneId].length &&
+        nextLayout[zoneId].every((itemId, index) => itemId === layout[zoneId][index]),
+    )
+  ) {
+    return null
+  }
+
+  return nextLayout
+}
+
+function reorderSortableList<TItem extends string>({
+  activeId,
+  items,
+  overId,
+}: {
+  activeId: UniqueIdentifier
+  items: TItem[]
+  overId: UniqueIdentifier | null
+}) {
+  if (!overId) {
+    return null
+  }
+
+  const activeIndex = items.indexOf(String(activeId) as TItem)
+  const overIndex = items.indexOf(String(overId) as TItem)
+
+  if (activeIndex === -1 || overIndex === -1 || activeIndex === overIndex) {
+    return null
+  }
+
+  return arrayMove(items, activeIndex, overIndex)
+}
 
 function loadTelemetryWindowState(now = Date.now()): TelemetryWindowState {
   if (typeof window === 'undefined') {
@@ -468,6 +729,7 @@ function buildHydratedForgeState(
 
 function buildStoredStateSnapshot(
   state: typeof initialState,
+  uiLayout: UiLayoutState,
   recentPrompts: string[],
   lastSavedAt: string | null,
   lastResultMode: ForgeMode | null,
@@ -504,6 +766,7 @@ function buildStoredStateSnapshot(
         seamlessMode: state.textureLab.seamlessMode,
         workflow: state.textureLab.workflow,
       },
+      uiLayout,
       uvLab: {
         atlasSize: state.uvLab.atlasSize,
         paddingPx: state.uvLab.paddingPx,
@@ -577,6 +840,8 @@ function App() {
   const [styleInputByMode, setStyleInputByMode] = useState<
     Partial<Record<ForgeMode, string>>
   >({})
+  const [uiLayout, setUiLayout] = useState<UiLayoutState>(() => getDefaultUiLayout())
+  const [activeDragState, setActiveDragState] = useState<ActiveDragState>(null)
   const [activeModel, setActiveModel] = useState<ModelId>(
     getModeDefaultModel(initialState.activeMode, initialState.actionAnimator.pipeline),
   )
@@ -698,6 +963,42 @@ function App() {
     resultGridTitle,
     useWideControlGrid,
   } = modePresentation
+  const shellLayout = uiLayout.global.shell
+  const orderedModeTabs = uiLayout.global.modeTabs
+  const modePanelLayout = getEffectiveModePanelLayout(uiLayout, state.activeMode)
+  const canResetCurrentModeLayout = Boolean(uiLayout.byMode[state.activeMode])
+  const canResetAllLayouts =
+    JSON.stringify(uiLayout) !== JSON.stringify(getDefaultUiLayout())
+  const shellSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 6,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  )
+  const panelSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 6,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  )
+  const tabSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 6,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  )
   const activeVariantForgeIdeaState =
     variantForgeIdeaSelections[state.variantForge.variantFamily] ??
     buildVariantForgeFallbackIdeaState(state.variantForge.variantFamily)
@@ -804,6 +1105,7 @@ function App() {
       setServerModel(storedState.session?.serverModel ?? null)
       setServerPrompt(storedState.session?.serverPrompt ?? null)
       setLastSavedAt(storedState.session?.savedAt ?? null)
+      setUiLayout(sanitizeUiLayout(storedState.settings.uiLayout))
       if (storedState.session) {
         setLastResultMode(storedState.session.mode ?? null)
         setNotice('Restored the latest forge settings from this browser.')
@@ -964,6 +1266,128 @@ function App() {
     }))
   }, [state.activeMode])
 
+  const handleShellDragStart = useCallback((event: DragStartEvent) => {
+    const itemId = String(event.active.id) as LayoutShellItemId
+    setActiveDragState({
+      context: 'shell',
+      label: shellItemLabels[itemId] ?? 'UI Section',
+    })
+  }, [])
+
+  const handleShellDragEnd = useCallback((event: DragEndEvent) => {
+    setActiveDragState(null)
+    const nextShellLayout = reorderSortableLayout({
+      activeId: event.active.id,
+      layout: shellLayout,
+      overId: event.over?.id ?? null,
+      parseZoneKey: parseShellZoneKey,
+      zoneOrder: layoutShellZoneOrder,
+    })
+
+    if (!nextShellLayout) {
+      return
+    }
+
+    setUiLayout((currentLayout) => setShellLayout(currentLayout, nextShellLayout))
+  }, [shellLayout])
+
+  const handleControlDragStart = useCallback((event: DragStartEvent) => {
+    const itemId = String(event.active.id) as LayoutPanelItemId
+    setActiveDragState({
+      context: 'control',
+      label: panelItemLabels[itemId] ?? 'Panel',
+    })
+  }, [])
+
+  const handleWorkspaceDragStart = useCallback((event: DragStartEvent) => {
+    const itemId = String(event.active.id) as LayoutPanelItemId
+    setActiveDragState({
+      context: 'workspace',
+      label: panelItemLabels[itemId] ?? 'Panel',
+    })
+  }, [])
+
+  const handleControlDragEnd = useCallback((event: DragEndEvent) => {
+    setActiveDragState(null)
+    const nextControlLayout = reorderSortableLayout({
+      activeId: event.active.id,
+      layout: modePanelLayout.control,
+      overId: event.over?.id ?? null,
+      parseZoneKey: parseControlZoneKey,
+      zoneOrder: layoutControlZoneOrder,
+    })
+
+    if (!nextControlLayout) {
+      return
+    }
+
+    setUiLayout((currentLayout) =>
+      setModePanelLayout(currentLayout, state.activeMode, {
+        ...getEffectiveModePanelLayout(currentLayout, state.activeMode),
+        control: nextControlLayout,
+      }),
+    )
+  }, [modePanelLayout.control, state.activeMode])
+
+  const handleWorkspaceDragEnd = useCallback((event: DragEndEvent) => {
+    setActiveDragState(null)
+    const nextWorkspaceLayout = reorderSortableLayout({
+      activeId: event.active.id,
+      layout: modePanelLayout.workspace,
+      overId: event.over?.id ?? null,
+      parseZoneKey: parseWorkspaceZoneKey,
+      zoneOrder: layoutWorkspaceZoneOrder,
+    })
+
+    if (!nextWorkspaceLayout) {
+      return
+    }
+
+    setUiLayout((currentLayout) =>
+      setModePanelLayout(currentLayout, state.activeMode, {
+        ...getEffectiveModePanelLayout(currentLayout, state.activeMode),
+        workspace: nextWorkspaceLayout,
+      }),
+    )
+  }, [modePanelLayout.workspace, state.activeMode])
+
+  const handleModeTabsDragStart = useCallback((event: DragStartEvent) => {
+    const modeId = String(event.active.id) as ForgeMode
+    setActiveDragState({
+      context: 'tabs',
+      label: modeDefinitions[modeId]?.label ?? 'Mode Tab',
+    })
+  }, [])
+
+  const handleModeTabsDragEnd = useCallback((event: DragEndEvent) => {
+    setActiveDragState(null)
+    const nextModeTabs = reorderSortableList({
+      activeId: event.active.id,
+      items: orderedModeTabs,
+      overId: event.over?.id ?? null,
+    })
+
+    if (!nextModeTabs) {
+      return
+    }
+
+    setUiLayout((currentLayout) => setModeTabOrder(currentLayout, nextModeTabs))
+  }, [orderedModeTabs])
+
+  const handleDragCancel = useCallback(() => {
+    setActiveDragState(null)
+  }, [])
+
+  const handleResetCurrentModeLayout = useCallback(() => {
+    setUiLayout((currentLayout) => resetModePanelLayout(currentLayout, state.activeMode))
+    setNotice(`Reset the ${activeMode.label} layout back to the default arrangement.`)
+  }, [activeMode.label, state.activeMode])
+
+  const handleResetAllLayouts = useCallback(() => {
+    setUiLayout(resetAllUiLayouts())
+    setNotice('Reset all saved UI layouts, including the shell and mode tab order.')
+  }, [])
+
   const flushPendingPersist = useCallback(() => {
     if (persistTimeoutRef.current !== null) {
       window.clearTimeout(persistTimeoutRef.current)
@@ -983,6 +1407,7 @@ function App() {
 
     pendingPersistStateRef.current = buildStoredStateSnapshot(
       state,
+      uiLayout,
       recentPrompts,
       lastSavedAt,
       lastResultMode,
@@ -1039,6 +1464,7 @@ function App() {
     state.vfxForge.looping,
     state.vfxForge.prompt,
     state.vfxForge.textureOutputs,
+    uiLayout,
     lastResultMode,
   ])
 
@@ -2253,11 +2679,1221 @@ function App() {
     )
   }
 
-  const controlPanelLayoutClassName = useWideControlGrid
-    ? 'mt-6 grid gap-5 2xl:grid-cols-2 2xl:items-start'
-    : 'mt-6 space-y-5'
-  const controlPanelFullSpanClassName = useWideControlGrid ? '2xl:col-span-2' : ''
+  const controlZoneClassName = useWideControlGrid ? 'space-y-5' : 'space-y-4'
+  const promptPanelDescription =
+    isTextureExpansionMode
+      ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
+      : isTextureGenerateMode && state.textureLab.seamlessMode
+        ? 'Describe the material. Seamless Mode converts this into a tile-safe semantic tiling prompt at the selected texture size.'
+        : isTextureGenerateMode
+          ? 'Describe the material texture to generate at the selected texture size.'
+          : 'Describe the asset or scene you want generated'
 
+  const controlPanelItems: Partial<
+    Record<LayoutPanelItemId, LayoutItemDescriptor<LayoutPanelItemId>>
+  > = {}
+
+  if (!isUvLabMode) {
+    controlPanelItems['model-selector'] = {
+      content: (
+        <ModelSelector
+          activeModel={activeModel}
+          availableModels={modeAvailableModels}
+          onSelect={handleModelSelect}
+        />
+      ),
+      id: 'model-selector',
+      label: panelItemLabels['model-selector'],
+      testId: 'layout-item-model-selector',
+    }
+  }
+
+  if (!(isActionAnimatorMode || isPortraitStudioMode || isUvLabMode || isVariantForgeMode || isVfxForgeMode)) {
+    controlPanelItems['style-input'] = {
+      content: (
+        <StyleInputPanel
+          value={activeStyleInput}
+          onChange={handleStyleInputChange}
+        />
+      ),
+      id: 'style-input',
+      label: panelItemLabels['style-input'],
+      testId: 'layout-item-style-input',
+    }
+  }
+
+  if (isCharacterSheetMode) {
+    controlPanelItems['character-sheet-panel'] = {
+      content: (
+        <CharacterSheetPanel
+          generationMode={state.characterSheet.generationMode}
+          manifestPrompt={state.characterSheet.manifestPrompt}
+          parentId={state.characterSheet.parentId}
+          recentPrompts={recentPrompts}
+          referencePrompt={state.characterSheet.referencePrompt}
+          references={state.characterSheet.references}
+          consistencyEnabled={state.characterSheet.consistencyEnabled}
+          onConsistencyChange={(enabled) =>
+            dispatch({
+              type: 'set-character-sheet-consistency',
+              enabled,
+            })
+          }
+          onGenerationModeChange={(mode) =>
+            dispatch({ type: 'set-character-sheet-mode', mode })
+          }
+          onManifestChange={(prompt) =>
+            dispatch({ type: 'set-character-sheet-manifest', prompt })
+          }
+          onReferenceChange={(slot, asset) =>
+            dispatch({
+              type: 'set-character-sheet-reference',
+              slot,
+              asset,
+            })
+          }
+          onReferencePromptChange={(prompt) =>
+            dispatch({
+              type: 'set-character-sheet-reference-prompt',
+              prompt,
+            })
+          }
+        />
+      ),
+      id: 'character-sheet-panel',
+      label: panelItemLabels['character-sheet-panel'],
+      testId: 'layout-item-character-sheet-panel',
+    }
+  } else if (isActionAnimatorMode) {
+    controlPanelItems['action-animator-panel'] = {
+      content: (
+        <ActionAnimatorPanel
+          actionType={state.actionAnimator.actionType}
+          asset={state.actionAnimator.characterImage}
+          canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
+          customActionPrompt={state.actionAnimator.customActionPrompt}
+          frameCount={state.actionAnimator.frameCount}
+          fps={state.actionAnimator.fps}
+          normalizedSize={state.actionAnimator.normalizedSize}
+          pipeline={state.actionAnimator.pipeline}
+          spriteSheetDataUrl={
+            lastResultMode === 'action-animator' ? results[0]?.dataUrl ?? null : null
+          }
+          onActionTypeChange={(actionType) =>
+            dispatch({ type: 'set-action-animator-action', actionType })
+          }
+          onCustomActionPromptChange={(prompt) =>
+            dispatch({
+              type: 'set-action-animator-custom-prompt',
+              prompt,
+            })
+          }
+          onFileSelect={(asset) =>
+            dispatch({ type: 'set-action-animator-image', asset })
+          }
+          onFrameCountChange={(frameCount) =>
+            dispatch({ type: 'set-action-animator-frame-count', frameCount })
+          }
+          onFpsChange={(fps) =>
+            dispatch({ type: 'set-action-animator-fps', fps })
+          }
+          onNormalizedSizeChange={(size) =>
+            dispatch({ type: 'set-action-animator-normalized-size', size })
+          }
+          onPipelineChange={(pipeline) =>
+            dispatch({ type: 'set-action-animator-pipeline', pipeline })
+          }
+          onUseLatestCharacterSheet={() =>
+            void hydrateLatestCharacterSheetInto({
+              type: 'set-action-animator-image',
+            })
+          }
+        />
+      ),
+      id: 'action-animator-panel',
+      label: panelItemLabels['action-animator-panel'],
+      testId: 'layout-item-action-animator-panel',
+    }
+  } else if (isVariantForgeMode) {
+    controlPanelItems['variant-forge-panel'] = {
+      content: (
+        <VariantForgePanel
+          key={state.variantForge.variantFamily}
+          asset={state.variantForge.baseAsset}
+          customDirection={getVariantForgeFamilyCustomDirection(
+            state.variantForge.variantFamily,
+            state.variantForge.familyCustomDirections,
+          )}
+          family={state.variantForge.variantFamily}
+          ideaSuggestions={activeVariantForgeIdeaSuggestions}
+          ideaSource={activeVariantForgeIdeaState.source}
+          intensity={state.variantForge.intensity}
+          isRefreshingIdeas={activeVariantForgeIdeaState.loading}
+          optionStates={state.variantForge.optionStates}
+          preservePalette={state.variantForge.preservePalette}
+          preserveSilhouette={state.variantForge.preserveSilhouette}
+          preset={state.variantForge.variantPreset}
+          onApplyIdeaSuggestion={(idea) =>
+            dispatch({
+              type: 'set-variant-forge-custom-direction',
+              customDirection: appendVariantForgeIdeaToDirection(
+                getVariantForgeFamilyCustomDirection(
+                  state.variantForge.variantFamily,
+                  state.variantForge.familyCustomDirections,
+                ),
+                idea,
+              ),
+            })
+          }
+          onFileSelect={(asset) =>
+            dispatch({ type: 'set-variant-forge-asset', asset })
+          }
+          onCustomDirectionChange={(customDirection) =>
+            dispatch({
+              type: 'set-variant-forge-custom-direction',
+              customDirection,
+            })
+          }
+          onFamilyChange={(family) =>
+            dispatch({ type: 'set-variant-forge-family', family })
+          }
+          onIntensityChange={(intensity) =>
+            dispatch({ type: 'set-variant-forge-intensity', intensity })
+          }
+          onPreservePaletteChange={(enabled) =>
+            dispatch({
+              type: 'set-variant-forge-preserve-palette',
+              enabled,
+            })
+          }
+          onPreserveSilhouetteChange={(enabled) =>
+            dispatch({
+              type: 'set-variant-forge-preserve-silhouette',
+              enabled,
+            })
+          }
+          onPresetChange={(preset) =>
+            dispatch({ type: 'set-variant-forge-preset', preset })
+          }
+          onPresetCustomSettingChange={(preset, customSetting) =>
+            dispatch({
+              type: 'set-variant-forge-preset-custom-setting',
+              customSetting,
+              preset,
+            })
+          }
+          onPresetToggle={(preset) =>
+            dispatch({ type: 'toggle-variant-forge-preset', preset })
+          }
+          onRefreshIdeas={() => void refreshVariantForgeIdeas()}
+        />
+      ),
+      id: 'variant-forge-panel',
+      label: panelItemLabels['variant-forge-panel'],
+      testId: 'layout-item-variant-forge-panel',
+    }
+  } else if (isPortraitStudioMode) {
+    controlPanelItems['portrait-studio-panel'] = {
+      content: (
+        <PortraitStudioPanel
+          asset={state.portraitStudio.heroImage}
+          canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
+          onFileSelect={(asset) =>
+            dispatch({ type: 'set-portrait-studio-image', asset })
+          }
+          onUseLatestCharacterSheet={() =>
+            void hydrateLatestCharacterSheetInto({
+              type: 'set-portrait-studio-image',
+            })
+          }
+        />
+      ),
+      id: 'portrait-studio-panel',
+      label: panelItemLabels['portrait-studio-panel'],
+      testId: 'layout-item-portrait-studio-panel',
+    }
+    controlPanelItems['portrait-direction'] = {
+      content: (
+        <PromptPanel
+          activeMode={state.activeMode}
+          description="Optional. Describe the portrait pack you want while keeping the uploaded identity locked."
+          placeholder="Ex: scarred veteran ranger, leather mantle, stern heroic mood, semi-real painted game portrait."
+          prompt={state.portraitStudio.prompt}
+          recentPrompts={recentPrompts}
+          title="Portrait Direction"
+          onChange={(prompt) =>
+            dispatch({ type: 'set-portrait-studio-prompt', prompt })
+          }
+        />
+      ),
+      id: 'portrait-direction',
+      label: panelItemLabels['portrait-direction'],
+      testId: 'layout-item-portrait-direction',
+    }
+  } else if (isUvLabMode) {
+    controlPanelItems['uv-lab-panel'] = {
+      content: (
+        <UvLabPanel
+          asset={state.uvLab.mesh}
+          atlasSize={state.uvLab.atlasSize}
+          errorMessage={uvUploadError}
+          latestJob={uvJob}
+          paddingPx={state.uvLab.paddingPx}
+          onAtlasSizeChange={(size) =>
+            dispatch({ type: 'set-uv-lab-atlas-size', size })
+          }
+          onFileSelect={(asset) => {
+            dispatch({ type: 'set-uv-lab-mesh', asset })
+            setUvJob(null)
+            setUvUploadError(null)
+          }}
+          onInvalidSelection={(message) => {
+            setUvUploadError(message)
+            setError({
+              message,
+              title: 'Mesh Upload Rejected',
+            })
+          }}
+          onPaddingChange={(paddingPx) =>
+            dispatch({ type: 'set-uv-lab-padding-px', paddingPx })
+          }
+          uvEngineStatus={uvEngineStatus}
+        />
+      ),
+      id: 'uv-lab-panel',
+      label: panelItemLabels['uv-lab-panel'],
+      testId: 'layout-item-uv-lab-panel',
+    }
+  } else if (isVfxForgeMode) {
+    controlPanelItems['vfx-forge-panel'] = {
+      content: (
+        <VfxForgePanel
+          canBuildRecipe={canBuildVfxRecipe}
+          canDownloadBundle={canDownloadVfxBundle}
+          effectLabel={state.vfxForge.effectLabel}
+          exportTarget={state.vfxForge.exportTarget}
+          frameCount={state.vfxForge.frameCount}
+          generatedTextureCount={selectedVfxTextureResults.length}
+          intensity={state.vfxForge.intensity}
+          isBuildingRecipe={isBuildingVfxRecipe}
+          isDownloadingBundle={isDownloadingVfxBundle}
+          looping={state.vfxForge.looping}
+          onBuildRecipe={() => void handleBuildVfxRecipe()}
+          onDownloadBundle={() => void handleDownloadVfxBundle()}
+          onEffectLabelChange={(effectLabel) =>
+            dispatch({ type: 'set-vfx-effect-label', effectLabel })
+          }
+          onExportTargetChange={(exportTarget) =>
+            dispatch({ type: 'set-vfx-export-target', exportTarget })
+          }
+          onFrameCountChange={(frameCount) =>
+            dispatch({ type: 'set-vfx-frame-count', frameCount })
+          }
+          onIntensityChange={(intensity) =>
+            dispatch({ type: 'set-vfx-intensity', intensity })
+          }
+          onLoopingChange={(enabled) =>
+            dispatch({ type: 'set-vfx-looping', enabled })
+          }
+          onPromptChange={(prompt) =>
+            dispatch({ type: 'set-vfx-prompt', prompt })
+          }
+          onTextureOutputChange={(kind, enabled) =>
+            dispatch({ type: 'set-vfx-texture-output', enabled, kind })
+          }
+          prompt={state.vfxForge.prompt}
+          recipeManifest={vfxRecipeManifest}
+          textureOutputs={state.vfxForge.textureOutputs}
+        />
+      ),
+      id: 'vfx-forge-panel',
+      label: panelItemLabels['vfx-forge-panel'],
+      testId: 'layout-item-vfx-forge-panel',
+    }
+  } else {
+    if (isTextureLabMode) {
+      controlPanelItems['texture-workflow'] = {
+        content: (
+          <TextureLabWorkflowPanel
+            expansionTargetSize={state.textureLab.expansionTargetSize}
+            onSeamlessModeChange={(enabled) =>
+              dispatch({
+                type: 'set-texture-lab-seamless-mode',
+                enabled,
+              })
+            }
+            onTargetSizeChange={(size) =>
+              dispatch({ type: 'set-texture-expansion-target-size', size })
+            }
+            onWorkflowChange={(workflow) =>
+              dispatch({ type: 'set-texture-lab-workflow', workflow })
+            }
+            seamlessMode={state.textureLab.seamlessMode}
+            workflow={state.textureLab.workflow}
+          />
+        ),
+        id: 'texture-workflow',
+        label: panelItemLabels['texture-workflow'],
+        testId: 'layout-item-texture-workflow',
+      }
+    }
+
+    controlPanelItems['prompt-panel'] = {
+      content: (
+        <PromptPanel
+          activeMode={state.activeMode}
+          description={promptPanelDescription}
+          placeholder={
+            isTextureExpansionMode
+              ? 'Ex: weathered brick with subtle mortar variation and dry, neutral lighting.'
+              : undefined
+          }
+          prompt={state.prompt}
+          recentPrompts={recentPrompts}
+          title={isTextureExpansionMode ? 'Expansion Notes' : 'Forge Prompt'}
+          onChange={(prompt) => dispatch({ type: 'set-prompt', prompt })}
+        />
+      ),
+      id: 'prompt-panel',
+      label: panelItemLabels['prompt-panel'],
+      testId: 'layout-item-prompt-panel',
+    }
+
+    if (isTextureExpansionMode) {
+      controlPanelItems['texture-expansion'] = {
+        content: (
+          <TextureExpansionPanel
+            asset={state.textureLab.expansionSource}
+            targetSize={state.textureLab.expansionTargetSize}
+            onFileSelect={(asset) =>
+              dispatch({ type: 'set-texture-expansion-source', asset })
+            }
+          />
+        ),
+        id: 'texture-expansion',
+        label: panelItemLabels['texture-expansion'],
+        testId: 'layout-item-texture-expansion',
+      }
+    } else {
+      controlPanelItems['style-reference'] = {
+        content: (
+          <ImageUploadField
+            label="Style Reference"
+            helper="Controls line weight, finish, palette, and rendering language."
+            asset={state.references.style}
+            icon={Palette}
+            onFileSelect={(asset) =>
+              dispatch({ type: 'set-reference', slot: 'style', asset })
+            }
+          />
+        ),
+        id: 'style-reference',
+        label: panelItemLabels['style-reference'],
+        testId: 'layout-item-style-reference',
+      }
+      controlPanelItems['subject-reference'] = {
+        content: (
+          <ImageUploadField
+            label="Subject / Content Reference"
+            helper="Anchors silhouette, item identity, and the specific form to generate."
+            asset={state.references.subject}
+            icon={Box}
+            onFileSelect={(asset) =>
+              dispatch({ type: 'set-reference', slot: 'subject', asset })
+            }
+          />
+        ),
+        id: 'subject-reference',
+        label: panelItemLabels['subject-reference'],
+        testId: 'layout-item-subject-reference',
+      }
+      controlPanelItems['batch-panel'] = {
+        content: (
+          <BatchPanel
+            generationCount={state.generationCount}
+            onSelect={(count) =>
+              dispatch({ type: 'set-generation-count', count })
+            }
+          />
+        ),
+        id: 'batch-panel',
+        label: panelItemLabels['batch-panel'],
+        testId: 'layout-item-batch-panel',
+      }
+    }
+  }
+
+  controlPanelItems['forge-action'] = {
+    content: (
+      <button
+        type="button"
+        onClick={() => void handleForge()}
+        disabled={
+          !isReadyForApi ||
+          isForging ||
+          !selectedModelSupported
+        }
+        className="inline-flex w-full items-center justify-between rounded-[24px] border border-sky-300/20 bg-[linear-gradient(135deg,rgba(56,189,248,0.2),rgba(10,14,20,0.92))] px-5 py-4 text-left shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)] transition duration-200 hover:border-sky-200/30 hover:shadow-[0_0_0_1px_rgba(125,211,252,0.12),0_28px_80px_rgba(14,165,233,0.24)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-sky-300/20 disabled:hover:shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)]"
+      >
+        <span className="flex items-center gap-3">
+          <span className="rounded-full border border-sky-200/20 bg-sky-300/12 p-2 text-sky-100">
+            {isForging ? (
+              <LoaderCircle className="size-4 animate-spin" strokeWidth={1.9} />
+            ) : (
+              <Sparkles className="size-4" strokeWidth={1.9} />
+            )}
+          </span>
+          <span>
+            <span className="block text-sm font-medium tracking-[0.18em] text-sky-50">
+              {primaryActionLabel}
+            </span>
+            <span className="block text-xs text-sky-100/70">
+              {primaryActionDescription}
+            </span>
+          </span>
+        </span>
+        <ChevronRight className="size-5 text-sky-100/80" strokeWidth={1.9} />
+      </button>
+    ),
+    id: 'forge-action',
+    label: panelItemLabels['forge-action'],
+    testId: 'layout-item-forge-action',
+  }
+
+  const workspacePanelItems: Partial<
+    Record<LayoutPanelItemId, LayoutItemDescriptor<LayoutPanelItemId>>
+  > = {
+    'top-panel': {
+      content: (
+        <TopPanel
+          activeMode={activeMode}
+          prompt={activePromptValue.trim() || promptPreview}
+          readinessLabel={readinessLabel}
+        />
+      ),
+      id: 'top-panel',
+      label: panelItemLabels['top-panel'],
+      testId: 'layout-item-top-panel',
+    },
+  }
+
+  if (isUvLabMode) {
+    workspacePanelItems['uv-brief'] = {
+      content: (
+        <UvLabBrief
+          activeModelName={activeModelName}
+          asset={state.uvLab.mesh}
+          atlasSize={state.uvLab.atlasSize}
+          job={uvJob}
+          lastSavedAt={lastSavedAt}
+          paddingPx={state.uvLab.paddingPx}
+          uvEngineStatus={uvEngineStatus}
+        />
+      ),
+      id: 'uv-brief',
+      label: panelItemLabels['uv-brief'],
+      testId: 'layout-item-uv-brief',
+    }
+    workspacePanelItems['uv-workspace'] = {
+      content: (
+        <Suspense
+          fallback={
+            <div className="rounded-[30px] border border-white/10 bg-black/20 px-5 py-12 text-center text-sm text-zinc-300">
+              Loading UV workspace...
+            </div>
+          }
+        >
+          <UvLabWorkspace
+            activeModelName={activeModelName}
+            job={uvJob}
+            sourceAsset={state.uvLab.mesh}
+          />
+        </Suspense>
+      ),
+      id: 'uv-workspace',
+      label: panelItemLabels['uv-workspace'],
+      testId: 'layout-item-uv-workspace',
+    }
+  } else {
+    workspacePanelItems['forge-brief'] = {
+      content: (
+        <ForgeBrief
+          activeMode={activeMode}
+          activeModelName={activeModelName}
+          detailItems={briefItems}
+          generationCount={activeGenerationCount}
+          isForging={isForging}
+          isReadyForApi={isReadyForApi}
+          isShowingResults={isShowingResults}
+          lastSavedAt={lastSavedAt}
+          onRefreshHealth={() => void refreshHealth()}
+          prompt={activePromptValue.trim()}
+          referenceCount={referenceCount}
+          resultsCount={visibleResultsCount}
+          serviceHealth={serviceHealth}
+          consistencyMessage={
+            isCharacterSheetMode && state.characterSheet.consistencyEnabled
+              ? state.characterSheet.parentId
+                ? `Consistency reference staged locally: ${state.characterSheet.parentId}.`
+                : 'Consistency is enabled. The next successful sheet will stage a reusable reference locally.'
+              : null
+          }
+        />
+      ),
+      id: 'forge-brief',
+      label: panelItemLabels['forge-brief'],
+      testId: 'layout-item-forge-brief',
+    }
+    workspacePanelItems['result-grid'] = {
+      content: (
+        <div
+          className={
+            isSingleResultMode
+              ? 'grid gap-4'
+              : 'grid gap-4 md:grid-cols-2 2xl:grid-cols-4'
+          }
+        >
+          {hasForgeSlots
+            ? forgeSlots.map((slot, index) => {
+                if (slot.result) {
+                  const result = slot.result
+                  const vfxTextureKind =
+                    isVfxForgeMode
+                      ? (Object.entries(vfxTextureResults).find(
+                          ([, entry]) => entry?.id === result.id,
+                        )?.[0] as VfxTextureKind | undefined)
+                      : undefined
+
+                  return (
+                    <GeneratedResultCard
+                      key={result.id}
+                      canRepairSeams={
+                        isTextureLabMode &&
+                        lastTextureLabRun?.seamlessMode === true &&
+                        lastTextureLabRun.workflow === 'generate'
+                      }
+                      extraActionLabel={
+                        isPortraitStudioMode
+                          ? 'Download Faces'
+                          : isVfxForgeMode && vfxTextureKind === 'flipbook'
+                            ? 'Download Frames'
+                            : isTextureLabMode
+                              ? 'Generate Maps'
+                              : undefined
+                      }
+                      index={index}
+                      isExpanded={
+                        isTextureLabMode &&
+                        materialPacksByResultId[result.id]?.isVisible === true
+                      }
+                      isExtraActionPending={
+                        isTextureLabMode &&
+                        materialPacksByResultId[result.id]?.status === 'loading'
+                      }
+                      isRepairing={repairingResultId === result.id}
+                      mode={activeMode}
+                      result={result}
+                      onCopy={handleCopy}
+                      onDownload={handleDownload}
+                      onExtraAction={
+                        isPortraitStudioMode
+                          ? handleDownloadPortraitFaces
+                          : isVfxForgeMode && vfxTextureKind === 'flipbook'
+                            ? handleDownloadVfxFrames
+                            : isTextureLabMode
+                              ? handleGenerateMaterialMaps
+                              : undefined
+                      }
+                      onRepairSeams={handleRepairSeams}
+                    >
+                      {isTextureLabMode && materialPacksByResultId[result.id]?.isVisible ? (
+                        <TextureMaterialPack
+                          error={materialPacksByResultId[result.id]?.error ?? null}
+                          isDirty={Boolean(materialPacksByResultId[result.id]?.dirty)}
+                          isLoading={materialPacksByResultId[result.id]?.status === 'loading'}
+                          maps={materialPacksByResultId[result.id]?.maps ?? {}}
+                          onDownloadAll={() => handleDownloadAllTextureMaterialMaps(result)}
+                          onDownloadMap={(mapKey) =>
+                            handleDownloadTextureMaterialMap(result, mapKey)
+                          }
+                          onRegenerate={() => void handleGenerateMaterialMaps(result)}
+                          onStrengthChange={(key, value) =>
+                            handleTextureMaterialStrengthChange(result.id, key, value)
+                          }
+                          sourceResult={result}
+                          strengths={
+                            materialPacksByResultId[result.id]?.strengths ??
+                            state.textureLab.materialMapDefaults
+                          }
+                        />
+                      ) : null}
+                    </GeneratedResultCard>
+                  )
+                }
+
+                return (
+                  <PlaceholderCard
+                    key={`slot-${index}`}
+                    detail={slot.detail ?? 'Waiting for this slot to start.'}
+                    index={index}
+                    mode={activeMode}
+                    progressTone={getForgeSlotProgressTone(slot.status)}
+                    state={
+                      slot.status === 'failed' || slot.status === 'queued'
+                        ? 'idle'
+                        : 'loading'
+                    }
+                    statusLabel={getForgeSlotStatusLabel(slot.status)}
+                    title={
+                      slot.status === 'failed'
+                        ? `${activeMode.label} slot needs attention`
+                        : `${activeMode.label} slot in progress`
+                    }
+                  />
+                )
+              })
+            : isShowingResults
+              ? results.map((result, index) => {
+                  const vfxTextureKind =
+                    isVfxForgeMode
+                      ? (Object.entries(vfxTextureResults).find(
+                          ([, entry]) => entry?.id === result.id,
+                        )?.[0] as VfxTextureKind | undefined)
+                      : undefined
+
+                  return (
+                    <GeneratedResultCard
+                      key={result.id}
+                      canRepairSeams={
+                        isTextureLabMode &&
+                        lastTextureLabRun?.seamlessMode === true &&
+                        lastTextureLabRun.workflow === 'generate'
+                      }
+                      extraActionLabel={
+                        isPortraitStudioMode
+                          ? 'Download Faces'
+                          : isVfxForgeMode && vfxTextureKind === 'flipbook'
+                            ? 'Download Frames'
+                            : isTextureLabMode
+                              ? 'Generate Maps'
+                              : undefined
+                      }
+                      index={index}
+                      isExpanded={
+                        isTextureLabMode &&
+                        materialPacksByResultId[result.id]?.isVisible === true
+                      }
+                      isExtraActionPending={
+                        isTextureLabMode &&
+                        materialPacksByResultId[result.id]?.status === 'loading'
+                      }
+                      isRepairing={repairingResultId === result.id}
+                      mode={activeMode}
+                      result={result}
+                      onCopy={handleCopy}
+                      onDownload={handleDownload}
+                      onExtraAction={
+                        isPortraitStudioMode
+                          ? handleDownloadPortraitFaces
+                          : isVfxForgeMode && vfxTextureKind === 'flipbook'
+                            ? handleDownloadVfxFrames
+                            : isTextureLabMode
+                              ? handleGenerateMaterialMaps
+                              : undefined
+                      }
+                      onRepairSeams={handleRepairSeams}
+                    >
+                      {isTextureLabMode && materialPacksByResultId[result.id]?.isVisible ? (
+                        <TextureMaterialPack
+                          error={materialPacksByResultId[result.id]?.error ?? null}
+                          isDirty={Boolean(materialPacksByResultId[result.id]?.dirty)}
+                          isLoading={materialPacksByResultId[result.id]?.status === 'loading'}
+                          maps={materialPacksByResultId[result.id]?.maps ?? {}}
+                          onDownloadAll={() => handleDownloadAllTextureMaterialMaps(result)}
+                          onDownloadMap={(mapKey) =>
+                            handleDownloadTextureMaterialMap(result, mapKey)
+                          }
+                          onRegenerate={() => void handleGenerateMaterialMaps(result)}
+                          onStrengthChange={(key, value) =>
+                            handleTextureMaterialStrengthChange(result.id, key, value)
+                          }
+                          sourceResult={result}
+                          strengths={
+                            materialPacksByResultId[result.id]?.strengths ??
+                            state.textureLab.materialMapDefaults
+                          }
+                        />
+                      ) : null}
+                    </GeneratedResultCard>
+                  )
+                })
+              : reservedOutputs.map((index) => (
+                  <PlaceholderCard
+                    key={index}
+                    index={index}
+                    mode={activeMode}
+                    state={isForging ? 'loading' : 'idle'}
+                  />
+                ))}
+        </div>
+      ),
+      id: 'result-grid',
+      label: panelItemLabels['result-grid'],
+      testId: 'layout-item-result-grid',
+    }
+  }
+
+  const visibleControlZoneItems = Object.fromEntries(
+    layoutControlZoneOrder.map((zoneId) => [
+      zoneId,
+      modePanelLayout.control[zoneId].filter((itemId) => Boolean(controlPanelItems[itemId])),
+    ]),
+  ) as Record<LayoutControlZoneId, LayoutPanelItemId[]>
+
+  const visibleWorkspaceZoneItems = Object.fromEntries(
+    layoutWorkspaceZoneOrder.map((zoneId) => [
+      zoneId,
+      modePanelLayout.workspace[zoneId].filter((itemId) => Boolean(workspacePanelItems[itemId])),
+    ]),
+  ) as Record<LayoutWorkspaceZoneId, LayoutPanelItemId[]>
+
+  const shellItems: Record<LayoutShellItemId, LayoutItemDescriptor<LayoutShellItemId>> = {
+    'header-summary': {
+      content: (
+        <div className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.028),rgba(255,255,255,0.012))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-5">
+          <HeaderSummary
+            activeMode={activeMode}
+            currentSessionCount={currentSessionCount}
+            generationCount={activeGenerationCount}
+            highlightedTelemetryRowId={highlightedTelemetryRowId}
+            inputLabel={headerInputLabel}
+            promptLoaded={isReadyForApi}
+            sessionMax={sessionMax}
+          />
+        </div>
+      ),
+      id: 'header-summary',
+      label: shellItemLabels['header-summary'],
+      testId: 'shell-item-header-summary',
+    },
+    'mode-tabs': {
+      content: (
+        <div className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.028),rgba(255,255,255,0.012))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="font-mono text-[11px] uppercase tracking-[0.34em] text-zinc-500">
+                Mode Tabs
+              </p>
+              <p className="mt-2 text-sm text-zinc-400">
+                Reorder your workflows globally and drag this strip anywhere in the shell.
+              </p>
+            </div>
+            <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[10px] uppercase tracking-[0.28em] text-zinc-300">
+              Global Order
+            </div>
+          </div>
+
+          <DndContext
+            collisionDetection={closestCenter}
+            sensors={tabSensors}
+            onDragCancel={handleDragCancel}
+            onDragEnd={handleModeTabsDragEnd}
+            onDragStart={handleModeTabsDragStart}
+          >
+            <nav className="mt-4 overflow-x-auto pb-1">
+              <SortableContext
+                items={orderedModeTabs}
+                strategy={horizontalListSortingStrategy}
+              >
+                <div className="flex min-w-max gap-3">
+                  {orderedModeTabs.map((modeKey) => {
+                    const mode = modeDefinitions[modeKey]
+                    const TabIcon = mode.icon
+                    const isActive = state.activeMode === modeKey
+
+                    return (
+                      <SortableModeTab
+                        key={modeKey}
+                        id={modeKey}
+                        label={mode.label}
+                        testId={`mode-tab-${modeKey}`}
+                      >
+                        <button
+                          type="button"
+                          data-testid={`mode-tab-button-${modeKey}`}
+                          onClick={() =>
+                            startTransition(() => {
+                              dispatch({ type: 'set-mode', mode: modeKey })
+                            })
+                          }
+                          className={`inline-flex min-w-[11rem] shrink-0 items-center gap-3 rounded-full border px-4 py-3 pr-12 text-left transition duration-200 xl:min-w-[11.75rem] ${
+                            isActive
+                              ? 'border-sky-300/35 bg-sky-400/12 text-white shadow-[0_10px_30px_rgba(56,189,248,0.14)]'
+                              : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:border-white/20 hover:bg-white/[0.055] hover:text-zinc-200'
+                          }`}
+                        >
+                          <span
+                            className={`rounded-full border p-2 ${
+                              isActive
+                                ? 'border-sky-300/30 bg-sky-300/12 text-sky-200'
+                                : 'border-white/10 bg-black/20 text-zinc-400'
+                            }`}
+                          >
+                            <TabIcon className="size-4" strokeWidth={1.8} />
+                          </span>
+                          <span>
+                            <span className="block text-sm font-medium">{mode.label}</span>
+                            <span className="block font-mono text-[10px] uppercase tracking-[0.28em] opacity-70">
+                              {mode.eyebrow}
+                            </span>
+                          </span>
+                        </button>
+                      </SortableModeTab>
+                    )
+                  })}
+                </div>
+              </SortableContext>
+            </nav>
+            <LayoutDragOverlay
+              label={activeDragState?.context === 'tabs' ? activeDragState.label : null}
+            />
+          </DndContext>
+        </div>
+      ),
+      id: 'mode-tabs',
+      label: shellItemLabels['mode-tabs'],
+      testId: 'shell-item-mode-tabs',
+    },
+    'control-panel': {
+      content: (
+        <aside className="rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="rounded-[18px] border border-white/10 bg-black/20 p-3 text-zinc-200">
+                <SlidersHorizontal className="size-5" strokeWidth={1.7} />
+              </div>
+              <div>
+                <p className="font-mono text-[11px] uppercase tracking-[0.34em] text-zinc-500">
+                  Control Panel
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-white">
+                  {controlPanelTitle}
+                </h2>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 lg:justify-end">
+              <button
+                type="button"
+                onClick={handleResetCurrentModeLayout}
+                disabled={!canResetCurrentModeLayout}
+                className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-2 text-xs uppercase tracking-[0.24em] text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Reset This Tab Layout
+              </button>
+              <button
+                type="button"
+                onClick={handleResetAllLayouts}
+                disabled={!canResetAllLayouts}
+                className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-2 text-xs uppercase tracking-[0.24em] text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Reset All Layouts
+              </button>
+            </div>
+          </div>
+
+          {!isUvLabMode && !selectedModelSupported ? (
+            <div className="mt-6 rounded-[20px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+              {MODEL_LABELS[activeModel]} is not supported in {activeMode.label}.
+              Choose one of the available models to continue.
+            </div>
+          ) : null}
+
+          <DndContext
+            collisionDetection={closestCenter}
+            sensors={panelSensors}
+            onDragCancel={handleDragCancel}
+            onDragEnd={handleControlDragEnd}
+            onDragStart={handleControlDragStart}
+          >
+            <div className="mt-6 space-y-4">
+              {layoutControlZoneOrder.map((zoneId) => (
+                <SortableDropZone
+                  key={zoneId}
+                  id={getControlZoneKey(zoneId)}
+                  items={visibleControlZoneItems[zoneId]}
+                  testId={`control-zone-${zoneId}`}
+                  className={controlZoneClassName}
+                  emptyLabel={
+                    zoneId === 'primary'
+                      ? 'Drop a control card here'
+                      : 'Drop an auxiliary control here'
+                  }
+                >
+                  <SortableContext
+                    items={visibleControlZoneItems[zoneId]}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    <div className={controlZoneClassName}>
+                      {visibleControlZoneItems[zoneId].map((itemId) => {
+                        const item = controlPanelItems[itemId]
+
+                        if (!item) {
+                          return null
+                        }
+
+                        return (
+                          <SortableFrame
+                            key={itemId}
+                            id={itemId}
+                            dataTestId={item.testId}
+                            handleLabel={`Move ${item.label}`}
+                            handleTestId={`panel-handle-${itemId}`}
+                          >
+                            {item.content}
+                          </SortableFrame>
+                        )
+                      })}
+                    </div>
+                  </SortableContext>
+                </SortableDropZone>
+              ))}
+            </div>
+            <LayoutDragOverlay
+              label={activeDragState?.context === 'control' ? activeDragState.label : null}
+            />
+          </DndContext>
+        </aside>
+      ),
+      id: 'control-panel',
+      label: shellItemLabels['control-panel'],
+      testId: 'shell-item-control-panel',
+    },
+    'workspace-panel': {
+      content: (
+        <section className="flex min-w-0 flex-col gap-4 rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-6">
+          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="font-mono text-[11px] uppercase tracking-[0.34em] text-zinc-500">
+                {isUvLabMode ? 'UV Workspace' : 'Result Grid'}
+              </p>
+              <h2 className="mt-1 text-xl font-semibold text-white">
+                {resultGridTitle}
+              </h2>
+            </div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-sm text-zinc-300">
+              <ImagePlus className="size-4" strokeWidth={1.8} />
+              {isUvLabMode
+                ? activeModelName
+                  ? `${activeModelName} worker pipeline`
+                  : 'Ready for local unwrap execution'
+                : activeModelName
+                  ? `${activeModelName} response stream`
+                  : 'Ready for Gemini execution'}
+            </div>
+          </div>
+
+          {error ? (
+            <ErrorPanel
+              error={error}
+              onUseMock={
+                !isUvLabMode && error.code === 'quota_exceeded'
+                  ? handleMockForge
+                  : undefined
+              }
+              onRetry={isReadyForApi && !isForging ? () => void handleForge() : undefined}
+              showDocsLink={!isUvLabMode}
+            />
+          ) : null}
+
+          {notice ? (
+            <div className="rounded-[22px] border border-emerald-300/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+              {notice}
+            </div>
+          ) : null}
+
+          <DndContext
+            collisionDetection={closestCenter}
+            sensors={panelSensors}
+            onDragCancel={handleDragCancel}
+            onDragEnd={handleWorkspaceDragEnd}
+            onDragStart={handleWorkspaceDragStart}
+          >
+            <div className="space-y-4">
+              {layoutWorkspaceZoneOrder.map((zoneId) => (
+                <SortableDropZone
+                  key={zoneId}
+                  id={getWorkspaceZoneKey(zoneId)}
+                  items={visibleWorkspaceZoneItems[zoneId]}
+                  testId={`workspace-zone-${zoneId}`}
+                  className="space-y-4"
+                  emptyLabel={
+                    zoneId === 'main'
+                      ? 'Drop a workspace panel here'
+                      : 'Drop a supporting panel here'
+                  }
+                >
+                  <SortableContext
+                    items={visibleWorkspaceZoneItems[zoneId]}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    <div className="space-y-4">
+                      {visibleWorkspaceZoneItems[zoneId].map((itemId) => {
+                        const item = workspacePanelItems[itemId]
+
+                        if (!item) {
+                          return null
+                        }
+
+                        return (
+                          <SortableFrame
+                            key={itemId}
+                            id={itemId}
+                            dataTestId={item.testId}
+                            handleLabel={`Move ${item.label}`}
+                            handleTestId={`panel-handle-${itemId}`}
+                          >
+                            {item.content}
+                          </SortableFrame>
+                        )
+                      })}
+                    </div>
+                  </SortableContext>
+                </SortableDropZone>
+              ))}
+            </div>
+            <LayoutDragOverlay
+              label={activeDragState?.context === 'workspace' ? activeDragState.label : null}
+            />
+          </DndContext>
+        </section>
+      ),
+      id: 'workspace-panel',
+      label: shellItemLabels['workspace-panel'],
+      testId: 'shell-item-workspace-panel',
+    },
+  }
+
+  return (
+    <div className="min-h-screen bg-[var(--surface-0)] text-zinc-100">
+      <div className="pointer-events-none fixed inset-0 overflow-hidden">
+        <div className="absolute left-[-10%] top-[-12%] size-[36rem] rounded-full bg-sky-500/8 blur-[140px]" />
+        <div className="absolute bottom-[-18%] right-[-8%] size-[34rem] rounded-full bg-cyan-400/6 blur-[160px]" />
+      </div>
+
+      <main className="relative mx-auto flex min-h-screen max-w-[2160px] flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
+        <div className="flex flex-1 flex-col overflow-hidden rounded-[34px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.015))] shadow-[0_40px_140px_rgba(0,0,0,0.55)] backdrop-blur-xl">
+          <DndContext
+            collisionDetection={closestCenter}
+            sensors={shellSensors}
+            onDragCancel={handleDragCancel}
+            onDragEnd={handleShellDragEnd}
+            onDragStart={handleShellDragStart}
+          >
+            <div className="flex flex-1 flex-col">
+              <div className="border-b border-white/10 px-5 py-5 sm:px-6 lg:px-8">
+                <SortableDropZone
+                  id={getShellZoneKey('header')}
+                  items={shellLayout.header}
+                  className="space-y-4"
+                  emptyLabel="Drop a shell section into the header"
+                  testId="shell-zone-header"
+                >
+                  <SortableContext items={shellLayout.header} strategy={verticalListSortingStrategy}>
+                    <div className="space-y-4">
+                      {shellLayout.header.map((itemId) => {
+                        const item = shellItems[itemId]
+
+                        return (
+                          <SortableFrame
+                            key={itemId}
+                            id={itemId}
+                            dataTestId={item.testId}
+                            handleLabel={`Move ${item.label}`}
+                            handleTestId={`shell-handle-${itemId}`}
+                          >
+                            {item.content}
+                          </SortableFrame>
+                        )
+                      })}
+                    </div>
+                  </SortableContext>
+                </SortableDropZone>
+              </div>
+
+              <div className="grid flex-1 items-start gap-5 p-4 xl:grid-cols-[minmax(540px,0.88fr)_minmax(0,1.22fr)] 2xl:grid-cols-[minmax(620px,0.92fr)_minmax(0,1.28fr)] lg:p-6">
+                {(['left', 'right'] as LayoutShellZoneId[]).map((zoneId) => (
+                  <SortableDropZone
+                    key={zoneId}
+                    id={getShellZoneKey(zoneId)}
+                    items={shellLayout[zoneId]}
+                    className="flex min-w-0 flex-col gap-5"
+                    emptyLabel={`Drop a shell section into the ${zoneId} column`}
+                    testId={`shell-zone-${zoneId}`}
+                  >
+                    <SortableContext items={shellLayout[zoneId]} strategy={verticalListSortingStrategy}>
+                      <div className="flex min-w-0 flex-col gap-5">
+                        {shellLayout[zoneId].map((itemId) => {
+                          const item = shellItems[itemId]
+
+                          return (
+                            <SortableFrame
+                              key={itemId}
+                              id={itemId}
+                              dataTestId={item.testId}
+                              handleLabel={`Move ${item.label}`}
+                              handleTestId={`shell-handle-${itemId}`}
+                            >
+                              {item.content}
+                            </SortableFrame>
+                          )
+                        })}
+                      </div>
+                    </SortableContext>
+                  </SortableDropZone>
+                ))}
+              </div>
+
+              <div className="border-t border-white/10 px-5 py-5 sm:px-6 lg:px-8">
+                <SortableDropZone
+                  id={getShellZoneKey('footer')}
+                  items={shellLayout.footer}
+                  className="space-y-4"
+                  emptyLabel="Drop a shell section into the footer"
+                  testId="shell-zone-footer"
+                >
+                  <SortableContext items={shellLayout.footer} strategy={verticalListSortingStrategy}>
+                    <div className="space-y-4">
+                      {shellLayout.footer.map((itemId) => {
+                        const item = shellItems[itemId]
+
+                        return (
+                          <SortableFrame
+                            key={itemId}
+                            id={itemId}
+                            dataTestId={item.testId}
+                            handleLabel={`Move ${item.label}`}
+                            handleTestId={`shell-handle-${itemId}`}
+                          >
+                            {item.content}
+                          </SortableFrame>
+                        )
+                      })}
+                    </div>
+                  </SortableContext>
+                </SortableDropZone>
+              </div>
+            </div>
+            <LayoutDragOverlay
+              label={activeDragState?.context === 'shell' ? activeDragState.label : null}
+            />
+          </DndContext>
+        </div>
+      </main>
+    </div>
+  )
+
+  /*
   return (
     <div className="min-h-screen bg-[var(--surface-0)] text-zinc-100">
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
@@ -3043,6 +4679,147 @@ function App() {
         </div>
       </main>
     </div>
+  )
+  */
+}
+
+type SortableDropZoneProps = {
+  children: ReactNode
+  className?: string
+  emptyLabel?: string
+  id: string
+  items: string[]
+  testId?: string
+}
+
+function SortableDropZone({
+  children,
+  className,
+  emptyLabel = 'Drop a panel here',
+  id,
+  items,
+  testId,
+}: SortableDropZoneProps) {
+  const { isOver, setNodeRef } = useDroppable({
+    id,
+  })
+
+  return (
+    <div
+      ref={setNodeRef}
+      data-testid={testId}
+      className={`rounded-[24px] border border-dashed px-2 py-2 transition ${
+        isOver
+          ? 'border-sky-300/45 bg-sky-400/8'
+          : 'border-white/8 bg-transparent'
+      } ${className ?? ''}`}
+    >
+      {children}
+      {!items.length ? (
+        <div className="rounded-[18px] border border-white/8 bg-black/10 px-4 py-6 text-center text-xs uppercase tracking-[0.28em] text-zinc-500">
+          {emptyLabel}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+type SortableFrameProps = {
+  children: ReactNode
+  dataTestId?: string
+  handleLabel: string
+  handleTestId?: string
+  id: string
+}
+
+function SortableFrame({
+  children,
+  dataTestId,
+  handleLabel,
+  handleTestId,
+  id,
+}: SortableFrameProps) {
+  const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
+    id,
+  })
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      data-testid={dataTestId}
+      className={`group relative ${isDragging ? 'z-20 opacity-70' : ''}`}
+    >
+      <button
+        type="button"
+        aria-label={handleLabel}
+        data-testid={handleTestId}
+        className="absolute right-3 top-3 z-20 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-300 opacity-0 shadow-[0_12px_30px_rgba(0,0,0,0.35)] transition hover:border-white/20 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/45 group-hover:opacity-100 group-focus-within:opacity-100"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="size-4" strokeWidth={1.8} />
+      </button>
+      {children}
+    </div>
+  )
+}
+
+type SortableModeTabProps = {
+  children: ReactNode
+  id: ForgeMode
+  label: string
+  testId?: string
+}
+
+function SortableModeTab({ children, id, label, testId }: SortableModeTabProps) {
+  const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
+    id,
+  })
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      data-testid={testId}
+      className={`group relative shrink-0 ${isDragging ? 'z-20 opacity-70' : ''}`}
+    >
+      <div className="absolute right-2 top-1/2 z-20 -translate-y-1/2">
+        <button
+          type="button"
+          aria-label={`Move ${label} tab`}
+          data-testid={`mode-tab-handle-${id}`}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-300 opacity-0 transition hover:border-white/20 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/45 group-hover:opacity-100 group-focus-within:opacity-100"
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical className="size-4" strokeWidth={1.8} />
+        </button>
+      </div>
+      {children}
+    </div>
+  )
+}
+
+function LayoutDragOverlay({ label }: { label: string | null }) {
+  if (!label) {
+    return null
+  }
+
+  return (
+    <DragOverlay>
+      <div className="rounded-[20px] border border-sky-300/35 bg-[linear-gradient(180deg,rgba(9,14,20,0.94),rgba(6,9,13,0.98))] px-4 py-3 text-sm font-medium text-sky-50 shadow-[0_24px_60px_rgba(2,8,23,0.55)]">
+        {label}
+      </div>
+    </DragOverlay>
   )
 }
 

@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { getDefaultUiLayout } from './lib/uiLayout'
 
 const { downloadBlobMock, downloadDataUrlMock, normalizeSquareTextureDataUrlMock } = vi.hoisted(() => ({
   downloadBlobMock: vi.fn(),
@@ -27,6 +28,25 @@ function buildJsonResponse(payload: unknown, ok = true) {
     ok,
     json: async () => payload,
   } as Response
+}
+
+function getOrderedTestIds(
+  container: ParentNode,
+  prefix: string,
+  excludePrefix?: string,
+) {
+  return Array.from(container.querySelectorAll(`[data-testid^="${prefix}"]`))
+    .map((node) => node.getAttribute('data-testid'))
+    .filter(
+      (value): value is string =>
+        value !== null && (!excludePrefix || !value.startsWith(excludePrefix)),
+    )
+}
+
+function readPersistedAppState() {
+  const rawState = window.localStorage.getItem('kizer-forge-state')
+
+  return rawState ? (JSON.parse(rawState) as Record<string, unknown>) : null
 }
 
 describe('App variant forge ideas', () => {
@@ -85,7 +105,7 @@ describe('App variant forge ideas', () => {
   it('auto-refreshes variant forge ideas and shows rarity cards only for the rarity family', async () => {
     render(<App />)
 
-    fireEvent.click(screen.getByRole('button', { name: /variant forge/i }))
+    fireEvent.click(screen.getByTestId('mode-tab-button-variant-forge'))
 
     await waitFor(() => {
       expect(
@@ -236,7 +256,7 @@ describe('App Texture Lab material packs', () => {
   it('shows Generate Maps for Texture Lab results and supports initial bake and download flows', async () => {
     render(<App />)
 
-    fireEvent.click(screen.getByRole('button', { name: /Texture Lab/i }))
+    fireEvent.click(screen.getByTestId('mode-tab-button-texture-lab'))
     fireEvent.change(
       screen.getByPlaceholderText(/Ornate steel longsword/i),
       { target: { value: 'weathered stone floor' } },
@@ -334,7 +354,7 @@ describe('App Texture Lab material packs', () => {
 
     render(<App />)
 
-    fireEvent.click(screen.getByRole('button', { name: /Texture Lab/i }))
+    fireEvent.click(screen.getByTestId('mode-tab-button-texture-lab'))
     fireEvent.change(
       screen.getByPlaceholderText(/Ornate steel longsword/i),
       { target: { value: 'weathered stone floor' } },
@@ -501,7 +521,7 @@ describe('App VFX Forge flow', () => {
   it('supports the generate textures, build recipe, and download bundle flow', async () => {
     render(<App />)
 
-    fireEvent.click(screen.getByRole('button', { name: /vfx forge/i }))
+    fireEvent.click(screen.getByTestId('mode-tab-button-vfx-forge'))
     fireEvent.click(screen.getByRole('button', { name: /VFX Graph/i }))
     fireEvent.click(screen.getByRole('button', { name: /GENERATE TEXTURES/i }))
 
@@ -528,5 +548,264 @@ describe('App VFX Forge flow', () => {
       expect(fetchMock.mock.calls.filter(([url]) => url === '/api/vfx-export')).toHaveLength(1)
     })
     expect(downloadBlobMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('App persistent drag-and-drop layout', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+
+      if (url === '/api/health') {
+        return buildJsonResponse({ ok: true })
+      }
+
+      if (url === '/api/usage/telemetry') {
+        return buildJsonResponse({
+          generatedAt: new Date('2026-03-19T12:00:00.000Z').toISOString(),
+          rows: [],
+          source: 'local',
+          timeZone: 'America/Los_Angeles',
+        })
+      }
+
+      if (url === '/api/variant-forge-ideas') {
+        return buildJsonResponse({
+          ideas: ['idea-a', 'idea-b', 'idea-c', 'idea-d'],
+          source: 'ai',
+        })
+      }
+
+      return buildJsonResponse({})
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+    window.localStorage.clear()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    fetchMock.mockReset()
+    window.localStorage.clear()
+  })
+
+  it('restores persisted mode tab order across rerenders', async () => {
+    const view = render(<App />)
+
+    await waitFor(() => {
+      expect(readPersistedAppState()).not.toBeNull()
+    })
+
+    const storedState = readPersistedAppState() as {
+      settings: {
+        uiLayout: ReturnType<typeof getDefaultUiLayout>
+      }
+    }
+    const nextLayout = {
+      ...storedState.settings.uiLayout,
+      global: {
+        ...storedState.settings.uiLayout.global,
+        modeTabs: [
+          'armory',
+          'action-animator',
+          'variant-forge',
+          'portrait-studio',
+          'texture-lab',
+          'vfx-forge',
+          'uv-lab',
+          'visualizer',
+          'character-sheet',
+        ],
+      },
+    }
+
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        ...storedState,
+        settings: {
+          ...storedState.settings,
+          uiLayout: nextLayout,
+        },
+      }),
+    )
+
+    view.unmount()
+    render(<App />)
+
+    const tabsContainer = (await screen.findByTestId('shell-item-mode-tabs')).querySelector('nav')
+
+    expect(tabsContainer).not.toBeNull()
+    if (!tabsContainer) {
+      throw new Error('Expected the mode tabs container after rerender.')
+    }
+
+    await waitFor(() => {
+      const orderedTabs = getOrderedTestIds(tabsContainer, 'mode-tab-', 'mode-tab-handle-')
+      expect(orderedTabs.indexOf('mode-tab-vfx-forge')).toBeLessThan(
+        orderedTabs.indexOf('mode-tab-uv-lab'),
+      )
+    })
+  })
+
+  it('keeps vfx panel layout overrides scoped to that tab and persists them', async () => {
+    const view = render(<App />)
+
+    await waitFor(() => {
+      expect(readPersistedAppState()).not.toBeNull()
+    })
+
+    const storedState = readPersistedAppState() as {
+      settings: {
+        uiLayout: ReturnType<typeof getDefaultUiLayout>
+      }
+    }
+    const nextLayout = {
+      ...storedState.settings.uiLayout,
+      byMode: {
+        ...storedState.settings.uiLayout.byMode,
+        'vfx-forge': {
+          control: {
+            primary: ['vfx-forge-panel', 'model-selector'],
+            secondary: ['forge-action'],
+          },
+          workspace: {
+            bottom: [],
+            main: ['forge-brief', 'result-grid'],
+            top: ['top-panel'],
+          },
+        },
+      },
+    }
+
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        ...storedState,
+        settings: {
+          ...storedState.settings,
+          uiLayout: nextLayout,
+        },
+      }),
+    )
+
+    view.unmount()
+    render(<App />)
+
+    fireEvent.click(screen.getByTestId('mode-tab-button-vfx-forge'))
+
+    await waitFor(() => {
+      expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-').slice(0, 2)).toEqual([
+        'layout-item-vfx-forge-panel',
+        'layout-item-model-selector',
+      ])
+    })
+
+    fireEvent.click(screen.getByTestId('mode-tab-button-texture-lab'))
+
+    expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-')[0]).toBe(
+      'layout-item-model-selector',
+    )
+  })
+
+  it('resets per-tab and global layouts independently', async () => {
+    const view = render(<App />)
+
+    await waitFor(() => {
+      expect(readPersistedAppState()).not.toBeNull()
+    })
+
+    const storedState = readPersistedAppState() as {
+      settings: {
+        uiLayout: ReturnType<typeof getDefaultUiLayout>
+      }
+    }
+    const nextLayout = {
+      ...storedState.settings.uiLayout,
+      byMode: {
+        ...storedState.settings.uiLayout.byMode,
+        'vfx-forge': {
+          control: {
+            primary: ['vfx-forge-panel', 'model-selector'],
+            secondary: ['forge-action'],
+          },
+          workspace: {
+            bottom: [],
+            main: ['forge-brief', 'result-grid'],
+            top: ['top-panel'],
+          },
+        },
+      },
+      global: {
+        ...storedState.settings.uiLayout.global,
+        modeTabs: [
+          'armory',
+          'action-animator',
+          'variant-forge',
+          'portrait-studio',
+          'texture-lab',
+          'vfx-forge',
+          'uv-lab',
+          'visualizer',
+          'character-sheet',
+        ],
+      },
+    }
+
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        ...storedState,
+        settings: {
+          ...storedState.settings,
+          uiLayout: nextLayout,
+        },
+      }),
+    )
+
+    view.unmount()
+    render(<App />)
+
+    fireEvent.click(screen.getByTestId('mode-tab-button-vfx-forge'))
+
+    await waitFor(() => {
+      expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-').slice(0, 2)).toEqual([
+        'layout-item-vfx-forge-panel',
+        'layout-item-model-selector',
+      ])
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /reset this tab layout/i }))
+
+    await waitFor(() => {
+      expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-').slice(0, 2)).toEqual([
+        'layout-item-model-selector',
+        'layout-item-vfx-forge-panel',
+      ])
+    })
+
+    const tabsContainer = screen.getByTestId('shell-item-mode-tabs').querySelector('nav')
+
+    expect(tabsContainer).not.toBeNull()
+    if (!tabsContainer) {
+      throw new Error('Expected the mode tabs container to render.')
+    }
+
+    let orderedTabs = getOrderedTestIds(tabsContainer, 'mode-tab-', 'mode-tab-handle-')
+    expect(orderedTabs.indexOf('mode-tab-vfx-forge')).toBeLessThan(
+      orderedTabs.indexOf('mode-tab-uv-lab'),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /reset all layouts/i }))
+
+    await waitFor(() => {
+      orderedTabs = getOrderedTestIds(tabsContainer, 'mode-tab-', 'mode-tab-handle-')
+      expect(orderedTabs.indexOf('mode-tab-uv-lab')).toBeLessThan(
+        orderedTabs.indexOf('mode-tab-vfx-forge'),
+      )
+    })
   })
 })

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { buildRecentPrompts, loadStoredState, persistStoredState } from './persistence'
 import type { VfxTextureKind } from './forge'
+import { getDefaultUiLayout } from './uiLayout'
 
 const baseStoredSettings = {
   actionAnimator: {
@@ -35,6 +36,7 @@ const baseStoredSettings = {
     seamlessMode: false,
     workflow: 'generate' as const,
   },
+  uiLayout: getDefaultUiLayout(),
   uvLab: {
     atlasSize: 2048 as const,
     paddingPx: 8,
@@ -112,6 +114,138 @@ describe('persistStoredState', () => {
       savedAt: '2026-03-10T00:00:00.000Z',
       serverModel: 'gemini-3-flash',
       serverPrompt: 'hero sword',
+    })
+  })
+
+  it('stores and restores persisted ui layouts', () => {
+    const uiLayout = {
+      ...getDefaultUiLayout(),
+      byMode: {
+        'vfx-forge': {
+          control: {
+            primary: ['vfx-forge-panel', 'model-selector'],
+            secondary: ['forge-action'],
+          },
+          workspace: {
+            bottom: [],
+            main: ['result-grid', 'forge-brief'],
+            top: ['top-panel'],
+          },
+        },
+      },
+      global: {
+        modeTabs: ['vfx-forge', 'armory', ...getDefaultUiLayout().global.modeTabs.filter((mode) => mode !== 'vfx-forge' && mode !== 'armory')],
+        shell: {
+          footer: [],
+          header: ['mode-tabs', 'header-summary'],
+          left: ['workspace-panel'],
+          right: ['control-panel'],
+        },
+      },
+    } as typeof baseStoredSettings.uiLayout
+
+    persistStoredState({
+      recentPrompts: ['hero sword'],
+      settings: {
+        ...baseStoredSettings,
+        activeMode: 'vfx-forge',
+        uiLayout,
+      },
+      session: null,
+    })
+
+    expect(loadStoredState()?.settings.uiLayout).toEqual(uiLayout)
+  })
+
+  it('hydrates a default ui layout when older saved settings do not include one', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          ...baseStoredSettings,
+          activeMode: 'armory',
+          uiLayout: undefined,
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.uiLayout).toEqual(getDefaultUiLayout())
+  })
+
+  it('sanitizes persisted ui layouts by dropping unknown ids and appending defaults', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          ...baseStoredSettings,
+          activeMode: 'vfx-forge',
+          uiLayout: {
+            byMode: {
+              'vfx-forge': {
+                control: {
+                  primary: ['vfx-forge-panel', 'missing-card', 'vfx-forge-panel'],
+                  secondary: [],
+                },
+                workspace: {
+                  bottom: [],
+                  main: ['result-grid', 'missing-workspace'],
+                  top: [],
+                },
+              },
+            },
+            global: {
+              modeTabs: ['vfx-forge', 'missing-mode', 'armory'],
+              shell: {
+                footer: ['missing-shell'],
+                header: ['mode-tabs', 'header-summary', 'mode-tabs'],
+                left: ['workspace-panel'],
+                right: [],
+              },
+            },
+            version: 99,
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.uiLayout).toEqual({
+      byMode: {
+        'vfx-forge': {
+          control: {
+            primary: ['vfx-forge-panel', 'model-selector'],
+            secondary: ['forge-action'],
+          },
+          workspace: {
+            bottom: [],
+            main: ['result-grid', 'forge-brief'],
+            top: ['top-panel'],
+          },
+        },
+      },
+      global: {
+        modeTabs: [
+          'vfx-forge',
+          'armory',
+          'action-animator',
+          'variant-forge',
+          'portrait-studio',
+          'texture-lab',
+          'uv-lab',
+          'visualizer',
+          'character-sheet',
+        ],
+        shell: {
+          footer: [],
+          header: ['mode-tabs', 'header-summary'],
+          left: ['workspace-panel', 'control-panel'],
+          right: [],
+        },
+      },
+      version: 1,
     })
   })
 
