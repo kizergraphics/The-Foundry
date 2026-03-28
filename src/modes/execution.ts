@@ -362,7 +362,7 @@ export async function buildTextureExpansionRequest({
   }
 }
 
-export function buildVfxForgeRequest({
+export async function buildVfxForgeRequest({
   modelId,
   textureKind,
   state,
@@ -370,19 +370,33 @@ export function buildVfxForgeRequest({
 }: {
   modelId: string
   textureKind: VfxTextureKind
-  state: ForgeState['vfxForge']
+  state: ForgeState
   styleText: string
 }) {
+  const styleReference = state.references.style
+  const references = styleReference
+    ? [
+        {
+          data: await fileToBase64(styleReference.file),
+          mimeType: styleReference.mimeType,
+          name: styleReference.name,
+          slot: 'style' as const,
+        },
+      ]
+    : undefined
+
   return {
-    effectLabel: state.effectLabel.trim(),
-    exportTarget: state.exportTarget !== 'none' ? state.exportTarget : undefined,
+    effectLabel: state.vfxForge.effectLabel.trim(),
+    exportTarget:
+      state.vfxForge.exportTarget !== 'none' ? state.vfxForge.exportTarget : undefined,
     generationCount: 1,
-    frameCount: state.frameCount,
-    intensity: state.intensity,
-    looping: state.looping,
+    frameCount: state.vfxForge.frameCount,
+    intensity: state.vfxForge.intensity,
+    looping: state.vfxForge.looping,
     mode: 'vfx-forge',
     modelId,
-    prompt: state.prompt.trim(),
+    prompt: state.vfxForge.prompt.trim(),
+    references,
     styleText,
     textureKind,
   }

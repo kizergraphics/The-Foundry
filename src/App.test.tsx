@@ -30,6 +30,35 @@ function buildJsonResponse(payload: unknown, ok = true) {
   } as Response
 }
 
+function buildReferenceFile(name = 'style-ref.png') {
+  return new File(['style-reference-bytes'], name, {
+    type: 'image/png',
+  })
+}
+
+function installImageUploadMocks() {
+  vi.stubGlobal('Image', class {
+    onerror: null | (() => void) = null
+    onload: null | (() => void) = null
+
+    set src(_value: string) {
+      setTimeout(() => {
+        this.onload?.()
+      }, 0)
+    }
+  })
+
+  class MockUrl extends URL {
+    static createObjectURL = vi.fn(() => 'blob:style-reference')
+    static revokeObjectURL = vi.fn()
+  }
+
+  vi.stubGlobal(
+    'URL',
+    MockUrl,
+  )
+}
+
 function getOrderedTestIds(
   container: ParentNode,
   prefix: string,
@@ -529,6 +558,12 @@ describe('App VFX Forge flow', () => {
       expect(fetchMock.mock.calls.filter(([url]) => url === '/api/forge')).toHaveLength(1)
     })
 
+    const forgeRequest = JSON.parse(
+      String(fetchMock.mock.calls.find(([url]) => url === '/api/forge')?.[1]?.body ?? '{}'),
+    )
+
+    expect(forgeRequest.references).toBeUndefined()
+
     fireEvent.click(screen.getByRole('button', { name: /Build Recipe/i }))
 
     await waitFor(() => {
@@ -548,6 +583,57 @@ describe('App VFX Forge flow', () => {
       expect(fetchMock.mock.calls.filter(([url]) => url === '/api/vfx-export')).toHaveLength(1)
     })
     expect(downloadBlobMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('includes an optional style reference in VFX forge requests', async () => {
+    installImageUploadMocks()
+
+    render(<App />)
+
+    fireEvent.click(screen.getByTestId('mode-tab-button-vfx-forge'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('layout-item-style-reference')).toBeInTheDocument()
+    })
+
+    const styleReferenceInput = screen
+      .getByTestId('layout-item-style-reference')
+      .querySelector('input[type="file"]')
+
+    expect(styleReferenceInput).not.toBeNull()
+    if (!styleReferenceInput) {
+      throw new Error('Expected the VFX style reference upload input to render.')
+    }
+
+    fireEvent.change(styleReferenceInput, {
+      target: {
+        files: [buildReferenceFile()],
+      },
+    })
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByTestId('layout-item-style-reference')).getByText('style-ref.png'),
+      ).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /GENERATE TEXTURES/i }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/forge')).toHaveLength(1)
+    })
+
+    const forgeRequest = JSON.parse(
+      String(fetchMock.mock.calls.find(([url]) => url === '/api/forge')?.[1]?.body ?? '{}'),
+    )
+
+    expect(forgeRequest.references).toEqual([
+      expect.objectContaining({
+        mimeType: 'image/png',
+        name: 'style-ref.png',
+        slot: 'style',
+      }),
+    ])
   })
 })
 
@@ -698,9 +784,10 @@ describe('App persistent drag-and-drop layout', () => {
     fireEvent.click(screen.getByTestId('mode-tab-button-vfx-forge'))
 
     await waitFor(() => {
-      expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-').slice(0, 2)).toEqual([
+      expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-').slice(0, 3)).toEqual([
         'layout-item-vfx-forge-panel',
         'layout-item-model-selector',
+        'layout-item-style-reference',
       ])
     })
 
@@ -772,18 +859,20 @@ describe('App persistent drag-and-drop layout', () => {
     fireEvent.click(screen.getByTestId('mode-tab-button-vfx-forge'))
 
     await waitFor(() => {
-      expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-').slice(0, 2)).toEqual([
+      expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-').slice(0, 3)).toEqual([
         'layout-item-vfx-forge-panel',
         'layout-item-model-selector',
+        'layout-item-style-reference',
       ])
     })
 
     fireEvent.click(screen.getByRole('button', { name: /reset this tab layout/i }))
 
     await waitFor(() => {
-      expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-').slice(0, 2)).toEqual([
+      expect(getOrderedTestIds(screen.getByTestId('control-zone-primary'), 'layout-item-').slice(0, 3)).toEqual([
         'layout-item-model-selector',
         'layout-item-vfx-forge-panel',
+        'layout-item-style-reference',
       ])
     })
 

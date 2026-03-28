@@ -412,6 +412,50 @@ describe('API hardening', () => {
     )
   })
 
+  it('includes style-reference guidance in VFX forge generation requests when a style image is attached', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateContent.mockReset()
+    const generatedBase64 = await createPngBase64(1, 1, [80, 120, 255])
+    __mock.generateContent.mockResolvedValue(buildImageGeneration(generatedBase64))
+
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/forge')
+      .send({
+        mode: 'vfx-forge',
+        references: [
+          {
+            data: generatedBase64,
+            mimeType: 'image/png',
+            slot: 'style',
+          },
+        ],
+        textureKind: 'flipbook',
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body.prompt).toContain('A style reference image is attached;')
+    expect(__mock.generateContent).toHaveBeenCalledTimes(1)
+    expect(__mock.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contents: [
+          expect.objectContaining({
+            text: expect.stringContaining('A style reference image is attached;'),
+          }),
+          {
+            inlineData: {
+              data: generatedBase64,
+              mimeType: 'image/png',
+            },
+          },
+        ],
+      }),
+    )
+  })
+
   it('rate limits repeated action animator requests', async () => {
     const app = await loadApp({
       ACTION_ANIMATOR_RATE_LIMIT_PER_MINUTE: '1',

@@ -54,6 +54,7 @@ describe('validateForgeRequest', () => {
           {
             data: validPngBase64,
             mimeType: 'image/png',
+            slot: 'subject',
           },
         ],
         variantFamily: 'elemental',
@@ -76,6 +77,12 @@ describe('validateForgeRequest', () => {
         {
           customSetting: 'Push extra rime along the blade spine.',
           preset: 'frozen',
+        },
+      ],
+      references: [
+        {
+          mimeType: 'image/png',
+          slot: 'subject',
         },
       ],
       variantPreset: 'frozen',
@@ -173,12 +180,25 @@ describe('validateVariantForgeIdeaRequest', () => {
         effectLabel: 'Fireball',
         exportTarget: 'particle-system',
         mode: 'vfx-forge',
+        references: [
+          {
+            data: validPngBase64,
+            mimeType: 'image/png',
+            slot: 'style',
+          },
+        ],
         textureKind: 'flipbook',
         textureOutputs: ['flipbook', 'noise'],
       }),
     ).toMatchObject({
       effectLabel: 'Fireball',
       exportTarget: 'particle-system',
+      references: [
+        {
+          mimeType: 'image/png',
+          slot: 'style',
+        },
+      ],
       textureKind: 'flipbook',
       textureOutputs: ['flipbook', 'noise'],
       unityPipeline: 'urp',

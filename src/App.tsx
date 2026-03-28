@@ -2022,9 +2022,9 @@ function App() {
         const generatedTextures = await Promise.all(
           state.vfxForge.textureOutputs.map(async (textureKind) => {
             const { ok, payload } = await postForgeRequest(
-              buildVfxForgeRequest({
+              await buildVfxForgeRequest({
                 modelId: activeModel,
-                state: state.vfxForge,
+                state,
                 styleText: activeStyleInput.trim(),
                 textureKind,
               }),
@@ -3009,6 +3009,22 @@ function App() {
       id: 'vfx-forge-panel',
       label: panelItemLabels['vfx-forge-panel'],
       testId: 'layout-item-vfx-forge-panel',
+    }
+    controlPanelItems['style-reference'] = {
+      content: (
+        <ImageUploadField
+          label="Style Reference"
+          helper="Optional. Guides palette energy, finish, and rendering language for the generated VFX textures."
+          asset={state.references.style}
+          icon={Palette}
+          onFileSelect={(asset) =>
+            dispatch({ type: 'set-reference', slot: 'style', asset })
+          }
+        />
+      ),
+      id: 'style-reference',
+      label: panelItemLabels['style-reference'],
+      testId: 'layout-item-style-reference',
     }
   } else {
     if (isTextureLabMode) {
@@ -4218,46 +4234,57 @@ function App() {
                     />
                   </div>
                 ) : isVfxForgeMode ? (
-                  <div className={controlPanelFullSpanClassName}>
-                    <VfxForgePanel
-                      canBuildRecipe={canBuildVfxRecipe}
-                      canDownloadBundle={canDownloadVfxBundle}
-                      effectLabel={state.vfxForge.effectLabel}
-                      exportTarget={state.vfxForge.exportTarget}
-                      frameCount={state.vfxForge.frameCount}
-                      generatedTextureCount={selectedVfxTextureResults.length}
-                      intensity={state.vfxForge.intensity}
-                      isBuildingRecipe={isBuildingVfxRecipe}
-                      isDownloadingBundle={isDownloadingVfxBundle}
-                      looping={state.vfxForge.looping}
-                      onBuildRecipe={() => void handleBuildVfxRecipe()}
-                      onDownloadBundle={() => void handleDownloadVfxBundle()}
-                      onEffectLabelChange={(effectLabel) =>
-                        dispatch({ type: 'set-vfx-effect-label', effectLabel })
+                  <>
+                    <div className={controlPanelFullSpanClassName}>
+                      <VfxForgePanel
+                        canBuildRecipe={canBuildVfxRecipe}
+                        canDownloadBundle={canDownloadVfxBundle}
+                        effectLabel={state.vfxForge.effectLabel}
+                        exportTarget={state.vfxForge.exportTarget}
+                        frameCount={state.vfxForge.frameCount}
+                        generatedTextureCount={selectedVfxTextureResults.length}
+                        intensity={state.vfxForge.intensity}
+                        isBuildingRecipe={isBuildingVfxRecipe}
+                        isDownloadingBundle={isDownloadingVfxBundle}
+                        looping={state.vfxForge.looping}
+                        onBuildRecipe={() => void handleBuildVfxRecipe()}
+                        onDownloadBundle={() => void handleDownloadVfxBundle()}
+                        onEffectLabelChange={(effectLabel) =>
+                          dispatch({ type: 'set-vfx-effect-label', effectLabel })
+                        }
+                        onExportTargetChange={(exportTarget) =>
+                          dispatch({ type: 'set-vfx-export-target', exportTarget })
+                        }
+                        onFrameCountChange={(frameCount) =>
+                          dispatch({ type: 'set-vfx-frame-count', frameCount })
+                        }
+                        onIntensityChange={(intensity) =>
+                          dispatch({ type: 'set-vfx-intensity', intensity })
+                        }
+                        onLoopingChange={(enabled) =>
+                          dispatch({ type: 'set-vfx-looping', enabled })
+                        }
+                        onPromptChange={(prompt) =>
+                          dispatch({ type: 'set-vfx-prompt', prompt })
+                        }
+                        onTextureOutputChange={(kind, enabled) =>
+                          dispatch({ type: 'set-vfx-texture-output', enabled, kind })
+                        }
+                        prompt={state.vfxForge.prompt}
+                        recipeManifest={vfxRecipeManifest}
+                        textureOutputs={state.vfxForge.textureOutputs}
+                      />
+                    </div>
+                    <ImageUploadField
+                      label="Style Reference"
+                      helper="Optional. Guides palette energy, finish, and rendering language for the generated VFX textures."
+                      asset={state.references.style}
+                      icon={Palette}
+                      onFileSelect={(asset) =>
+                        dispatch({ type: 'set-reference', slot: 'style', asset })
                       }
-                      onExportTargetChange={(exportTarget) =>
-                        dispatch({ type: 'set-vfx-export-target', exportTarget })
-                      }
-                      onFrameCountChange={(frameCount) =>
-                        dispatch({ type: 'set-vfx-frame-count', frameCount })
-                      }
-                      onIntensityChange={(intensity) =>
-                        dispatch({ type: 'set-vfx-intensity', intensity })
-                      }
-                      onLoopingChange={(enabled) =>
-                        dispatch({ type: 'set-vfx-looping', enabled })
-                      }
-                      onPromptChange={(prompt) =>
-                        dispatch({ type: 'set-vfx-prompt', prompt })
-                      }
-                      onTextureOutputChange={(kind, enabled) =>
-                        dispatch({ type: 'set-vfx-texture-output', enabled, kind })
-                      }
-                      prompt={state.vfxForge.prompt}
-                      recipeManifest={vfxRecipeManifest}
-                      textureOutputs={state.vfxForge.textureOutputs}
                     />
-                  </div>
+                  </>
                 ) : (
                   <>
                     {isTextureLabMode ? (

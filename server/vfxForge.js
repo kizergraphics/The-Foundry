@@ -205,6 +205,7 @@ export function buildVfxForgePrompt({
   effectLabel,
   exportTarget,
   frameCount,
+  hasStyleReference,
   intensity,
   looping,
   prompt,
@@ -220,6 +221,9 @@ export function buildVfxForgePrompt({
     exportTarget && exportTarget !== 'none'
       ? `Planned export target: ${getVfxExportTargetLabel(exportTarget)}.`
       : null
+  const styleReferenceLine = hasStyleReference
+    ? 'A style reference image is attached; match its rendering language, finish treatment, and palette energy.'
+    : null
 
   if (textureKind === 'dissolve-mask') {
     return [
@@ -229,6 +233,7 @@ export function buildVfxForgePrompt({
       looping ? 'Design the mask to support looping playback.' : 'Design the mask for a one-shot reveal and decay.',
       `Intensity target: ${normalizedIntensity} out of 100.`,
       exportTargetLine,
+      styleReferenceLine,
       normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
       normalizedStyleText ? `Style guidance: ${normalizedStyleText}.` : null,
     ]
@@ -247,6 +252,7 @@ export function buildVfxForgePrompt({
         : 'Show a clear one-shot arc from birth through peak energy into dissipation.',
       `Intensity target: ${normalizedIntensity} out of 100.`,
       exportTargetLine,
+      styleReferenceLine,
       normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
       normalizedStyleText ? `Style guidance: ${normalizedStyleText}.` : null,
     ]
@@ -262,6 +268,7 @@ export function buildVfxForgePrompt({
       looping ? 'Make the texture read cleanly in a looping scroll.' : 'Allow the motion language to feel directional and event-driven.',
       `Intensity target: ${normalizedIntensity} out of 100.`,
       exportTargetLine,
+      styleReferenceLine,
       normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
       normalizedStyleText ? `Style guidance: ${normalizedStyleText}.` : null,
     ]
@@ -276,6 +283,7 @@ export function buildVfxForgePrompt({
     looping ? 'Make the noise tile cleanly on both axes.' : 'The noise can prioritize dramatic breakup over perfect tiling.',
     `Intensity target: ${normalizedIntensity} out of 100.`,
     exportTargetLine,
+    styleReferenceLine,
     normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
     normalizedStyleText ? `Style guidance: ${normalizedStyleText}.` : null,
   ]

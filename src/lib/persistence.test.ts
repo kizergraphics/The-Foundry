@@ -123,7 +123,7 @@ describe('persistStoredState', () => {
       byMode: {
         'vfx-forge': {
           control: {
-            primary: ['vfx-forge-panel', 'model-selector'],
+            primary: ['vfx-forge-panel', 'model-selector', 'style-reference'],
             secondary: ['forge-action'],
           },
           workspace: {
@@ -216,7 +216,7 @@ describe('persistStoredState', () => {
       byMode: {
         'vfx-forge': {
           control: {
-            primary: ['vfx-forge-panel', 'model-selector'],
+            primary: ['vfx-forge-panel', 'model-selector', 'style-reference'],
             secondary: ['forge-action'],
           },
           workspace: {

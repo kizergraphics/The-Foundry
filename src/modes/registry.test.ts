@@ -61,6 +61,15 @@ describe('mode registry helpers', () => {
       state: {
         ...initialState,
         activeMode: 'vfx-forge',
+        references: {
+          ...initialState.references,
+          style: {
+            file: new File(['style-reference'], 'vfx-style.png', { type: 'image/png' }),
+            mimeType: 'image/png',
+            name: 'vfx-style.png',
+            sizeLabel: '1 KB',
+          },
+        },
         vfxForge: {
           ...initialState.vfxForge,
           effectLabel: '',
@@ -74,10 +83,15 @@ describe('mode registry helpers', () => {
     expect(presentation.headerInputLabel).toBe('Config')
     expect(presentation.primaryActionLabel).toBe('GENERATE TEXTURES')
     expect(presentation.readinessLabel).toBe('Texture plan ready')
+    expect(presentation.referenceCount).toBe(1)
     expect(presentation.resultGridTitle).toBe('VFX Forge texture ingredient outputs')
     expect(presentation.briefItems[0]).toMatchObject({
       label: 'Effect',
       value: 'Custom Effect',
+    })
+    expect(presentation.briefItems[1]).toMatchObject({
+      label: 'Style Ref',
+      value: 'vfx-style.png',
     })
   })
 })

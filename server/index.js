@@ -468,6 +468,9 @@ app.post(
               effectLabel,
               exportTarget,
               frameCount,
+              hasStyleReference: validReferences.some(
+                (reference) => reference.slot === 'style',
+              ),
               intensity,
               looping,
               prompt: normalizedPrompt,

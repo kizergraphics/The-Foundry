@@ -34,6 +34,7 @@ const allowedCharacterReferenceRoles = new Set([
   'Clothing_Reference',
   'Style_Reference',
 ])
+const allowedStandardReferenceSlots = new Set(['style', 'subject'])
 const allowedCharacterReferenceSlots = new Set(['face', 'outfit', 'art-style'])
 const allowedResponseModalities = new Set(['IMAGE', 'TEXT'])
 
@@ -251,7 +252,10 @@ function validateInlineImage(image, fieldName, maxBytes = maxBase64ImageBytes) {
   }
 }
 
-function validateReferenceList(references, { maxCount, roleRequired = false, slotField = false } = {}) {
+function validateReferenceList(
+  references,
+  { maxCount, roleRequired = false, slotField = false, slotAllowedValues } = {},
+) {
   if (references === undefined) {
     return []
   }
@@ -291,7 +295,7 @@ function validateReferenceList(references, { maxCount, roleRequired = false, slo
       normalizedReference.slot = readOptionalEnum(
         reference.slot,
         `references[${index}].slot`,
-        allowedCharacterReferenceSlots,
+        slotAllowedValues ?? allowedStandardReferenceSlots,
       )
 
       if (!normalizedReference.slot) {
@@ -463,6 +467,7 @@ export function validateForgeRequest(body) {
     rarity: readOptionalTrimmedString(body?.rarity, 'rarity', 40),
     references: validateReferenceList(body?.references, {
       maxCount: 2,
+      slotField: true,
     }),
     seamRepair: body?.seamRepair
       ? {
@@ -649,6 +654,7 @@ export function validateCharacterSheetRequest(body) {
       maxCount: 3,
       roleRequired: true,
       slotField: true,
+      slotAllowedValues: allowedCharacterReferenceSlots,
     }),
     responseModalities:
       responseModalities.length > 0 ? responseModalities : ['IMAGE', 'TEXT'],

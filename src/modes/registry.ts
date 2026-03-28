@@ -399,7 +399,7 @@ function getReferenceCount(state: ForgeState, flags: ModeFlags) {
   }
 
   if (flags.isVfxForgeMode) {
-    return 0
+    return Number(Boolean(state.references.style))
   }
 
   return standardReferenceCount
@@ -615,6 +615,10 @@ function getBriefItems(state: ForgeState, flags: ModeFlags): ForgeBriefItem[] {
       {
         label: 'Effect',
         value: resolveVfxEffectLabel(state.vfxForge.effectLabel),
+      },
+      {
+        label: 'Style Ref',
+        value: state.references.style?.name ?? 'Not attached',
       },
       {
         label: 'Export',

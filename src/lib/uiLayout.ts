@@ -169,7 +169,7 @@ const defaultModePanelLayouts: Record<ForgeMode, ModePanelLayout> = {
   },
   'vfx-forge': {
     control: {
-      primary: ['model-selector', 'vfx-forge-panel'],
+      primary: ['model-selector', 'vfx-forge-panel', 'style-reference'],
       secondary: ['forge-action'],
     },
     workspace: {
