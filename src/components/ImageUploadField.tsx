@@ -1,6 +1,6 @@
 import { useId, useState } from 'react'
 import type { ChangeEvent } from 'react'
-import { CheckCircle2 } from 'lucide-react'
+import { CheckCircle2, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 import type { ReferenceAsset } from '../lib/forge'
@@ -31,6 +31,11 @@ export function ImageUploadField({
   const [localError, setLocalError] = useState<string | null>(null)
   const resolvedError = error ?? localError
 
+  function handleRemove() {
+    setLocalError(null)
+    onFileSelect(null)
+  }
+
   async function handleChange(event: ChangeEvent<HTMLInputElement>) {
     const nextFile = event.target.files?.[0]
 
@@ -56,9 +61,21 @@ export function ImageUploadField({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.32em] text-zinc-500">
+      <div className="flex items-center justify-between gap-3 text-[11px] uppercase tracking-[0.32em] text-zinc-500">
         <span>{label}</span>
-        <span>{asset ? 'Attached' : isRequired ? 'Required' : 'Optional'}</span>
+        <div className="flex items-center gap-2">
+          {asset ? (
+            <button
+              type="button"
+              onClick={handleRemove}
+              className="inline-flex items-center gap-1 rounded-full border border-rose-300/20 bg-rose-400/10 px-2.5 py-1 text-[10px] tracking-[0.24em] text-rose-100 transition hover:border-rose-200/35 hover:bg-rose-400/15"
+            >
+              <X className="size-3" strokeWidth={1.8} />
+              Remove
+            </button>
+          ) : null}
+          <span>{asset ? 'Attached' : isRequired ? 'Required' : 'Optional'}</span>
+        </div>
       </div>
       <label
         htmlFor={inputId}

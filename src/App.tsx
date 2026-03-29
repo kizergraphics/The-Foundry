@@ -6904,15 +6904,24 @@ function VfxForgePanel({
         </div>
 
         <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-            Frames
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Frames
+            </label>
+            <span
+              data-testid="vfx-frame-count-value"
+              className={`text-xs ${hasFlipbookOutput ? 'text-zinc-300' : 'text-zinc-500'}`}
+            >
+              {frameCount}
+            </span>
+          </div>
           <input
             type="range"
             min={4}
             max={30}
             step={1}
             value={frameCount}
+            aria-label="VFX frame count"
             disabled={!hasFlipbookOutput}
             onChange={(event) => onFrameCountChange(Number(event.target.value))}
             className="mt-3 w-full cursor-pointer accent-sky-400 disabled:cursor-not-allowed disabled:opacity-50"

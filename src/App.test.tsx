@@ -635,6 +635,72 @@ describe('App VFX Forge flow', () => {
       }),
     ])
   })
+
+  it('lets you remove an attached VFX style reference before generation', async () => {
+    installImageUploadMocks()
+
+    render(<App />)
+
+    fireEvent.click(screen.getByTestId('mode-tab-button-vfx-forge'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('layout-item-style-reference')).toBeInTheDocument()
+    })
+
+    const styleReferenceCard = screen.getByTestId('layout-item-style-reference')
+    const styleReferenceInput = styleReferenceCard.querySelector('input[type="file"]')
+
+    expect(styleReferenceInput).not.toBeNull()
+    if (!styleReferenceInput) {
+      throw new Error('Expected the VFX style reference upload input to render.')
+    }
+
+    fireEvent.change(styleReferenceInput, {
+      target: {
+        files: [buildReferenceFile()],
+      },
+    })
+
+    await waitFor(() => {
+      expect(within(styleReferenceCard).getByText('style-ref.png')).toBeInTheDocument()
+    })
+
+    fireEvent.click(within(styleReferenceCard).getByRole('button', { name: /Remove/i }))
+
+    await waitFor(() => {
+      expect(within(styleReferenceCard).queryByText('style-ref.png')).not.toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /GENERATE TEXTURES/i }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/forge')).toHaveLength(1)
+    })
+
+    const forgeRequest = JSON.parse(
+      String(fetchMock.mock.calls.find(([url]) => url === '/api/forge')?.[1]?.body ?? '{}'),
+    )
+
+    expect(forgeRequest.references).toBeUndefined()
+  })
+
+  it('shows a live VFX frame counter beside the slider', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByTestId('mode-tab-button-vfx-forge'))
+
+    const frameSlider = await screen.findByLabelText('VFX frame count')
+
+    expect(screen.getByTestId('vfx-frame-count-value')).toHaveTextContent('8')
+
+    fireEvent.change(frameSlider, {
+      target: {
+        value: '12',
+      },
+    })
+
+    expect(screen.getByTestId('vfx-frame-count-value')).toHaveTextContent('12')
+  })
 })
 
 describe('App persistent drag-and-drop layout', () => {
