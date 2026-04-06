@@ -56,12 +56,24 @@ import { forgeApiModes } from '../shared/modeCatalog.js'
 import { resolveVfxEffectLabel } from '../shared/vfxForgeCatalog.js'
 import { variantForgeIdeaSuggestionCount } from '../shared/variantForgeIdeas.js'
 
-dotenv.config()
-
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const rootDir = path.resolve(__dirname, '..')
 const distDir = path.join(rootDir, 'dist')
+const envSearchPaths = [
+  path.join(rootDir, '.env'),
+  typeof process.resourcesPath === 'string'
+    ? path.join(process.resourcesPath, '.env')
+    : null,
+  path.join(path.dirname(process.execPath), '.env'),
+].filter(Boolean)
+
+for (const envPath of envSearchPaths) {
+  dotenv.config({
+    path: envPath,
+    override: false,
+  })
+}
 
 const port = Number(process.env.PORT ?? 3001)
 const apiKey =
@@ -1877,7 +1889,10 @@ export function startServer() {
   })
 }
 
-if (process.env.NODE_ENV !== 'test') {
+if (
+  process.env.NODE_ENV !== 'test' &&
+  process.env.FOUNDRY_ELECTRON_MAIN !== 'true'
+) {
   startServer()
 }
 
