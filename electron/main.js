@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { app, BrowserWindow, dialog, shell } from 'electron'
+import { cleanupStaleServices } from '../shared/serviceCleanup.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -57,6 +58,7 @@ app.on('before-quit', async (event) => {
 
 app.whenReady().then(async () => {
   try {
+    await cleanupAppServices()
     await ensureLocalServer()
     createMainWindow()
 
@@ -73,6 +75,25 @@ app.whenReady().then(async () => {
     app.quit()
   }
 })
+
+async function cleanupAppServices() {
+  const cleanupResult = await cleanupStaleServices({
+    appRoot,
+    currentPid: process.pid,
+    defaultPort,
+    execPath: process.execPath,
+    productName: 'The Foundry',
+    resourcesPath: process.resourcesPath,
+  })
+
+  if (cleanupResult.terminatedServices.length > 0) {
+    console.log(
+      `[The Foundry] Stopped ${cleanupResult.terminatedServices.length} stale local service${
+        cleanupResult.terminatedServices.length === 1 ? '' : 's'
+      } before launch.`,
+    )
+  }
+}
 
 async function ensureLocalServer() {
   localPort = await findAvailablePort(defaultPort)
