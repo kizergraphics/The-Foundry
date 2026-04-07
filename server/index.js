@@ -1,13 +1,9 @@
-import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import dotenv from 'dotenv'
 import express from 'express'
 import { GoogleGenAI } from '@google/genai/node'
-import ffmpegPath from 'ffmpeg-static'
 import {
   createConcurrencyLimiter,
   createCorsMiddleware,
@@ -17,8 +13,6 @@ import {
 } from './requestGuards.js'
 import {
   toValidationResponse,
-  validateActionAnimatorRequest,
-  validateActionAnimatorStripRequest,
   validateCharacterSheetRequest,
   validateForgeRequest,
   validateMaterialMapsRequest,
@@ -60,13 +54,47 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const rootDir = path.resolve(__dirname, '..')
 const distDir = path.join(rootDir, 'dist')
-const envSearchPaths = [
-  path.join(rootDir, '.env'),
-  typeof process.resourcesPath === 'string'
-    ? path.join(process.resourcesPath, '.env')
-    : null,
-  path.join(path.dirname(process.execPath), '.env'),
-].filter(Boolean)
+
+export function buildEnvSearchPaths(options = {}) {
+  const cwd =
+    typeof options.cwd === 'string' && options.cwd.trim()
+      ? options.cwd
+      : process.cwd()
+  const execPath =
+    typeof options.execPath === 'string' && options.execPath.trim()
+      ? options.execPath
+      : process.execPath
+  const resourcesPath =
+    typeof options.resourcesPath === 'string' && options.resourcesPath.trim()
+      ? options.resourcesPath
+      : process.resourcesPath
+  const effectiveRootDir =
+    typeof options.rootDir === 'string' && options.rootDir.trim()
+      ? options.rootDir
+      : rootDir
+  const execDir = execPath ? path.dirname(execPath) : null
+  const candidateDirectories = [
+    effectiveRootDir,
+    cwd,
+    resourcesPath,
+    execDir,
+    execDir ? path.dirname(execDir) : null,
+    execDir ? path.dirname(path.dirname(execDir)) : null,
+  ].filter((value, index, values) =>
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    values.indexOf(value) === index,
+  )
+
+  return candidateDirectories.map((directory) => path.join(directory, '.env'))
+}
+
+const envSearchPaths = buildEnvSearchPaths({
+  cwd: process.cwd(),
+  execPath: process.execPath,
+  resourcesPath: process.resourcesPath,
+  rootDir,
+})
 
 for (const envPath of envSearchPaths) {
   dotenv.config({
@@ -85,7 +113,6 @@ const internalApiToken = process.env.INTERNAL_API_TOKEN
 const enablePromptOrchestration = process.env.ENABLE_PROMPT_ORCHESTRATION === 'true'
 const forgeJsonLimit = process.env.FORGE_JSON_LIMIT ?? '12mb'
 const characterSheetJsonLimit = process.env.CHARACTER_SHEET_JSON_LIMIT ?? '14mb'
-const actionAnimatorJsonLimit = process.env.ACTION_ANIMATOR_JSON_LIMIT ?? '8mb'
 const modelRegistry = {
   'gemini-2.5-flash-image':
     process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
@@ -93,20 +120,14 @@ const modelRegistry = {
     process.env.GEMINI_FLASH_MODEL ?? 'gemini-3.1-flash-image-preview',
   'gemini-3-pro':
     process.env.GEMINI_PRO_MODEL ?? 'gemini-3-pro-image-preview',
-  'veo-3.1-fast':
-    process.env.GEMINI_VEO_MODEL ?? 'veo-3.1-fast-generate-preview',
 }
 const routeModelDefaults = {
-  '/api/action-animator': 'veo-3.1-fast',
-  '/api/action-animator-strip': 'gemini-3-pro',
   '/api/character-sheet': 'gemini-3-pro',
   '/api/forge': 'gemini-3-flash',
   '/api/material-maps': 'gemini-3-pro',
   '/api/variant-forge-ideas': 'gemini-3-flash',
 }
 const routeModelAllowlist = {
-  '/api/action-animator': ['veo-3.1-fast'],
-  '/api/action-animator-strip': ['gemini-3-pro', 'gemini-2.5-flash-image'],
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
   '/api/material-maps': ['gemini-3-pro', 'gemini-2.5-flash-image', 'gemini-3-flash'],
@@ -149,15 +170,6 @@ const forgeBatchInterRequestDelayMs = 250
 const forgeBatchRetryDelayMs = 1200
 const maxPromptOrchestrationWordCount = 24
 const maxPromptEnhancerWordCount = 9
-const actionAnimatorPollingIntervalMs = 10000
-const actionAnimatorTimeoutMs = 5 * 60 * 1000
-const minActionAnimatorDurationSeconds = 4
-const maxActionAnimatorDurationSeconds = 8
-const actionAnimatorDurationSeconds = clampActionAnimatorDurationSeconds(
-  Number(process.env.GEMINI_VEO_DURATION_SECONDS ?? minActionAnimatorDurationSeconds),
-)
-const actionAnimatorBackgroundColor = '0x00FF00'
-const defaultActionAnimatorFrameSizePx = 512
 const coreSystemRules = [
   'Always render assets on a neutral gray #808080 background.',
   'Never include text, logos, or watermarks in the image.',
@@ -168,7 +180,6 @@ const uvLabModelId = 'browser-uv-engine'
 const app = express()
 const parseForgeBody = express.json({ limit: forgeJsonLimit })
 const parseCharacterSheetBody = express.json({ limit: characterSheetJsonLimit })
-const parseActionAnimatorBody = express.json({ limit: actionAnimatorJsonLimit })
 const usageAuth = createTokenAuthMiddleware({
   allowLoopback: true,
   envToken: internalApiToken,
@@ -190,10 +201,6 @@ const characterSheetRateLimit = createRateLimiter({
   keyPrefix: 'character-sheet',
   maxRequests: Number(process.env.CHARACTER_SHEET_RATE_LIMIT_PER_MINUTE ?? 8),
 })
-const actionAnimatorRateLimit = createRateLimiter({
-  keyPrefix: 'action-animator',
-  maxRequests: Number(process.env.ACTION_ANIMATOR_RATE_LIMIT_PER_MINUTE ?? 6),
-})
 const forgeConcurrencyLimit = createConcurrencyLimiter({
   limit: Number(process.env.FORGE_MAX_IN_FLIGHT ?? 3),
   routeLabel: 'Forge',
@@ -201,10 +208,6 @@ const forgeConcurrencyLimit = createConcurrencyLimiter({
 const characterSheetConcurrencyLimit = createConcurrencyLimiter({
   limit: Number(process.env.CHARACTER_SHEET_MAX_IN_FLIGHT ?? 2),
   routeLabel: 'Character Sheet',
-})
-const actionAnimatorConcurrencyLimit = createConcurrencyLimiter({
-  limit: Number(process.env.ACTION_ANIMATOR_MAX_IN_FLIGHT ?? 1),
-  routeLabel: 'Action Animator',
 })
 
 app.use(createSecurityHeadersMiddleware())
@@ -1619,219 +1622,6 @@ function resolveLatestTelemetryTimestamp(...timestamps) {
   return validTimestamps.sort((left, right) => Date.parse(right) - Date.parse(left))[0]
 }
 
-app.post(
-  '/api/action-animator',
-  optionalGenerationAuth,
-  actionAnimatorRateLimit,
-  actionAnimatorConcurrencyLimit,
-  parseActionAnimatorBody,
-  async (request, response) => {
-  if (!apiKey) {
-    response.status(500).json({
-      error:
-        'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
-    })
-    return
-  }
-
-  let validatedRequest
-
-  try {
-    validatedRequest = validateActionAnimatorRequest(request.body ?? {})
-  } catch (error) {
-    response.status(400).json(toValidationResponse(error))
-    return
-  }
-
-  const { actionType, fps, frameCount, frameSize, image, modelId, prompt } = validatedRequest
-  const normalizedFps = clampActionAnimatorFps(fps)
-  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
-
-  if (
-    typeof image?.mimeType !== 'string' ||
-    typeof image?.data !== 'string' ||
-    !image.data.length
-  ) {
-    response.status(400).json({
-      error: 'Action Animator requires a source character image.',
-    })
-    return
-  }
-
-  const modelSelection = resolveModelForRoute('/api/action-animator', modelId)
-
-  if (!modelSelection.ok) {
-    response.status(400).json({
-      error: {
-        code: 'model_unsupported',
-        details: modelSelection.details,
-        message: modelSelection.message,
-        title: 'Model Not Supported For This Tab',
-      },
-    })
-    return
-  }
-
-  const ai = new GoogleGenAI({ apiKey })
-
-  try {
-    const animatorResult = await generateAnimatorSpriteSheet({
-      actionType,
-      ai,
-      fps: normalizedFps,
-      frameCount: normalizedFrameCount,
-      frameSize,
-      image,
-      modelSelection,
-      prompt,
-    })
-
-    await recordUsageEvent({
-      model: modelSelection.modelId,
-      route: '/api/action-animator',
-      telemetryModel: resolveTelemetryModelId(
-        modelSelection.modelId,
-        '/api/action-animator',
-      ),
-    }).catch((logError) => {
-      console.warn('Telemetry logging failed for /api/action-animator:', logError)
-    })
-
-    response.json({
-      images: [
-        {
-          data: animatorResult.spriteSheetBase64,
-          id: 'action-animator-sprite-sheet',
-          mimeType: 'image/png',
-          text: animatorResult.note,
-        },
-      ],
-      model: modelSelection.modelId,
-      prompt: animatorResult.prompt,
-      providerModel: modelSelection.providerModel,
-    })
-  } catch (error) {
-    const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
-
-    response.status(normalizedError.status).json(normalizedError.body)
-  }
-  },
-)
-
-app.post(
-  '/api/action-animator-strip',
-  optionalGenerationAuth,
-  actionAnimatorRateLimit,
-  actionAnimatorConcurrencyLimit,
-  parseActionAnimatorBody,
-  async (request, response) => {
-    if (!apiKey) {
-      response.status(500).json({
-        error:
-          'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
-      })
-      return
-    }
-
-    let validatedRequest
-
-    try {
-      validatedRequest = validateActionAnimatorStripRequest(request.body ?? {})
-    } catch (error) {
-      response.status(400).json(toValidationResponse(error))
-      return
-    }
-
-    const {
-      actionType,
-      anchorImage,
-      canvasImage,
-      chunkIndex,
-      fps,
-      frameCount,
-      modelId,
-      prompt,
-    } = validatedRequest
-    const modelSelection = resolveModelForRoute('/api/action-animator-strip', modelId)
-
-    if (!modelSelection.ok) {
-      response.status(400).json({
-        error: {
-          code: 'model_unsupported',
-          details: modelSelection.details,
-          message: modelSelection.message,
-          title: 'Model Not Supported For This Tab',
-        },
-      })
-      return
-    }
-
-    const ai = new GoogleGenAI({ apiKey })
-
-    try {
-      const animatorResult = await generateAnimatorStripChunk({
-        actionType,
-        ai,
-        anchorImage,
-        canvasImage,
-        chunkIndex,
-        fps,
-        frameCount,
-        modelSelection,
-        prompt,
-      })
-
-      if (!animatorResult.image) {
-        response
-          .status(422)
-          .json(
-            buildNoImageResponseError(
-              '/api/action-animator-strip',
-              modelSelection,
-              animatorResult.text,
-            ),
-          )
-        return
-      }
-
-      await recordUsageEvent({
-        model: modelSelection.modelId,
-        route: '/api/action-animator-strip',
-        telemetryModel: resolveTelemetryModelId(
-          modelSelection.modelId,
-          '/api/action-animator-strip',
-        ),
-        tokenCount: animatorResult.tokenCount,
-      }).catch((logError) => {
-        console.warn(
-          'Telemetry logging failed for /api/action-animator-strip:',
-          logError,
-        )
-      })
-
-      response.json({
-        images: [
-          {
-            data: animatorResult.image.data,
-            id: animatorResult.image.id,
-            mimeType: animatorResult.image.mimeType,
-            text:
-              animatorResult.image.text ??
-              'Generated a four-slot sprite-strip chunk from the provided anchor frame.',
-          },
-        ],
-        model: modelSelection.modelId,
-        prompt: animatorResult.prompt,
-        providerModel: modelSelection.providerModel,
-      })
-    } catch (error) {
-      const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
-
-      response.status(normalizedError.status).json(normalizedError.body)
-    }
-  },
-)
-
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(distDir))
 
@@ -3230,58 +3020,6 @@ function buildQuotaDetails(payload, retryAfterSeconds) {
   return details
 }
 
-async function generateAnimatorSpriteSheet({
-  actionType,
-  ai,
-  fps,
-  frameCount,
-  frameSize,
-  image,
-  modelSelection,
-  prompt,
-}) {
-  const normalizedFrameSize = normalizeActionAnimatorFrameSize(frameSize)
-  const normalizedPrompt = buildAnimatorPrompt({
-    actionType,
-    fps,
-    frameCount,
-    prompt,
-  })
-  const sourceImage = {
-    imageBytes: image.data,
-    mimeType: image.mimeType,
-  }
-  const operation = await ai.models.generateVideos({
-    model: modelSelection.providerModel,
-    source: {
-      image: sourceImage,
-      prompt: normalizedPrompt,
-    },
-    config: {
-      durationSeconds: actionAnimatorDurationSeconds,
-      numberOfVideos: 1,
-      personGeneration: 'allow_adult',
-    },
-  })
-
-  const settledOperation = await waitForVideoOperation(ai, operation)
-  const video = settledOperation.response?.generatedVideos?.[0]?.video
-  const videoBuffer = await readGeneratedVideo(ai, video)
-  const spriteSheetBase64 = await createSpriteSheetFromVideo({
-    frameSize: normalizedFrameSize,
-    frameCount,
-    videoBuffer,
-  })
-
-  return {
-    note:
-      `Generated ${frameCount} frame sprite sheet from Veo 3.1 Fast with a target playback rate of ${fps} fps at ${normalizedFrameSize} x ${normalizedFrameSize} per frame. ` +
-      'Frames are sampled directly from the generated clip with feet, lighting, centering, and background constraints injected server-side.',
-    prompt: normalizedPrompt,
-    spriteSheetBase64,
-  }
-}
-
 async function generateMaterialMapImageWithFallback({
   ai,
   mapKind,
@@ -3394,350 +3132,6 @@ async function generateMaterialMapImageWithFallback({
       lastError?.modelSelection ??
       resolveModelForRoute('/api/material-maps', preferredModelId),
     ok: false,
-  }
-}
-
-async function generateAnimatorStripChunk({
-  actionType,
-  ai,
-  anchorImage,
-  canvasImage,
-  chunkIndex,
-  fps,
-  frameCount,
-  modelSelection,
-  prompt,
-}) {
-  const normalizedPrompt = buildAnimatorStripPrompt({
-    actionType,
-    chunkIndex,
-    fps,
-    frameCount,
-    prompt,
-  })
-  const generation = await ai.models.generateContent({
-    model: modelSelection.providerModel,
-    contents: [
-      { text: normalizedPrompt },
-      {
-        inlineData: {
-          mimeType: canvasImage.mimeType,
-          data: canvasImage.data,
-        },
-      },
-      {
-        inlineData: {
-          mimeType: anchorImage.mimeType,
-          data: anchorImage.data,
-        },
-      },
-    ],
-    config: {
-      candidateCount: 1,
-      responseModalities: ['IMAGE', 'TEXT'],
-      systemInstruction: [
-        'You are editing a production sprite-strip reference canvas.',
-        'Treat the transparent slot layout in the canvas image as authoritative.',
-        'Keep the leftmost slot unchanged as the anchor pose for the chunk.',
-        'Return only the edited image with transparency preserved and no text.',
-      ].join(' '),
-    },
-  })
-  const images = extractImages(generation).slice(0, 1)
-
-  return {
-    image: images[0] ?? null,
-    prompt: normalizedPrompt,
-    text: generation.text,
-    tokenCount: extractTotalTokenCount(generation),
-  }
-}
-
-function buildAnimatorPrompt({ actionType, fps, frameCount, prompt }) {
-  const normalizedAction =
-    typeof actionType === 'string' && actionType.trim().length > 0
-      ? actionType.trim().toLowerCase()
-      : 'idle'
-  const normalizedFps = clampActionAnimatorFps(fps)
-  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
-  const baseWalkPrompt =
-    'A 2D game sprite walk cycle of the character in the image, side-profile view, 8 frames of fluid motion, isolated on a solid #00FF00 green screen background.'
-
-  const basePrompt =
-    normalizedAction === 'walk' && normalizedFrameCount === 8
-      ? baseWalkPrompt
-      : typeof prompt === 'string' && prompt.trim().length > 0
-        ? prompt.trim()
-        : [
-            `A 2D game sprite ${normalizedAction} cycle of the character in the image, side-profile view,`,
-            `${normalizedFrameCount} frames of fluid motion,`,
-            'isolated on a solid #00FF00 green screen background.',
-          ].join(' ')
-
-  return [
-    basePrompt,
-    `Target playback rate: ${normalizedFps} fps.`,
-    describeAnimatorMotion(normalizedAction),
-    'Stage one complete action cycle across the clip instead of holding on a single pose.',
-    'Make each adjacent frame visibly different with readable silhouette changes.',
-    'Keep the feet on the same horizontal plane with no vertical drifting.',
-    'Keep the lighting constant across all frames.',
-    'Keep the character centered within each frame to prevent jitter.',
-    'Keep the camera locked and the character occupying most of the frame height with consistent scale.',
-    'Preserve the exact character design from the reference image with no new accessories, materials, texture detail, props, or costume changes.',
-    'Do not alter the face, proportions, silhouette, colors, clothing shapes, or surface details from the reference image.',
-    'Animate the existing character only. Do not redesign or embellish the subject.',
-    'The background must remain perfectly identical in every frame.',
-    'Do not introduce white backdrops, dark green flicker, gradients, shadows, floor planes, or background changes.',
-    'Use a solid green background (#00FF00) for easy post-processing removal.',
-  ].join(' ')
-}
-
-function buildAnimatorStripPrompt({ actionType, chunkIndex, fps, frameCount, prompt }) {
-  const normalizedAction =
-    typeof actionType === 'string' && actionType.trim().length > 0
-      ? actionType.trim().toLowerCase()
-      : 'idle'
-  const normalizedFps = clampActionAnimatorFps(fps)
-  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
-  const basePrompt =
-    typeof prompt === 'string' && prompt.trim().length > 0
-      ? prompt.trim()
-      : `Create a 2D game sprite ${normalizedAction} strip from the provided seed frame.`
-
-  return [
-    basePrompt,
-    `Chunk index: ${chunkIndex + 1}.`,
-    `Layout: exactly ${normalizedFrameCount} equal square frame slots in one tight horizontal row that uses the full canvas height with no extra top or bottom margin.`,
-    `Target playback rate: ${normalizedFps} fps.`,
-    'Keep the leftmost slot unchanged as the chunk starting frame.',
-    'Continue the motion naturally across the remaining slots.',
-    describeAnimatorMotion(normalizedAction),
-    'Push clear readable pose changes from slot to slot instead of near-static micro-movement.',
-    'Keep the character large inside each slot, with only a small safety margin for motion.',
-    'Preserve the exact face, silhouette, palette, proportions, clothing shapes, and side-profile orientation from the anchor image.',
-    'Do not waste canvas space with poster-style empty margins or centered card layouts.',
-    'Do not add props, scenery, floor, shadows outside the sprite, glow, labels, poster layout, or UI.',
-    'Return a crisp pixel-art sprite strip candidate, not a concept illustration.',
-  ].join(' ')
-}
-
-async function waitForVideoOperation(ai, operation) {
-  const startedAt = Date.now()
-  let currentOperation = operation
-
-  while (!currentOperation.done) {
-    if (Date.now() - startedAt > actionAnimatorTimeoutMs) {
-      throw new Error('Veo video generation timed out before the operation completed.')
-    }
-
-    await sleep(actionAnimatorPollingIntervalMs)
-    currentOperation = await ai.operations.getVideosOperation({
-      operation: currentOperation,
-    })
-  }
-
-  if (currentOperation.error) {
-    throw new Error(JSON.stringify(currentOperation.error))
-  }
-
-  return currentOperation
-}
-
-async function readGeneratedVideo(ai, video) {
-  if (video?.videoBytes) {
-    return Buffer.from(video.videoBytes, 'base64')
-  }
-
-  if (typeof video?.uri === 'string' && video.uri.length > 0) {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-veo-download-'))
-    const downloadPath = path.join(tempDir, 'generated-video.mp4')
-
-    try {
-      await ai.files.download({
-        file: video,
-        downloadPath,
-      })
-
-      return await fs.readFile(downloadPath)
-    } catch (downloadError) {
-      const videoResponse = await fetch(video.uri, {
-        headers: apiKey
-          ? {
-              'x-goog-api-key': apiKey,
-            }
-          : undefined,
-      })
-
-      if (!videoResponse.ok) {
-        throw new Error(
-          `Generated video could not be downloaded from the returned URI. ` +
-            `SDK download failed first: ${
-              downloadError instanceof Error ? downloadError.message : 'unknown error'
-            }`,
-        )
-      }
-
-      return Buffer.from(await videoResponse.arrayBuffer())
-    } finally {
-      await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
-    }
-  }
-
-  throw new Error('Veo returned no downloadable video bytes for the animation request.')
-}
-
-async function createSpriteSheetFromVideo({ frameCount, frameSize, videoBuffer }) {
-  if (!ffmpegPath) {
-    throw new Error('ffmpeg-static is unavailable, so sprite sheet extraction cannot run.')
-  }
-
-  const safeFrameCount = clampAnimatorFrameCount(frameCount)
-  const safeFrameSize = normalizeActionAnimatorFrameSize(frameSize)
-  const extractedVideoFrameCount = Math.max(1, safeFrameCount)
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-action-animator-'))
-  const videoPath = path.join(tempDir, 'source.mp4')
-  const framePattern = path.join(tempDir, 'frame-%02d.png')
-  const spriteSheetPath = path.join(tempDir, 'sprite-sheet.png')
-
-  try {
-    await fs.writeFile(videoPath, videoBuffer)
-    await runFfmpeg([
-      '-y',
-      '-i',
-      videoPath,
-      '-filter_complex',
-      buildAnimatorMatteFilter({
-        frameSizePx: safeFrameSize,
-        sampleFps: extractedVideoFrameCount / actionAnimatorDurationSeconds,
-      }),
-      '-map',
-      '[out]',
-      '-frames:v',
-      String(extractedVideoFrameCount),
-      '-start_number',
-      '1',
-      framePattern,
-    ])
-
-    const frameInputs = Array.from({ length: safeFrameCount }, (_, index) => [
-      '-i',
-      path.join(tempDir, `frame-${String(index + 1).padStart(2, '0')}.png`),
-    ]).flat()
-
-    await runFfmpeg([
-      '-y',
-      ...frameInputs,
-      '-filter_complex',
-      `${Array.from({ length: safeFrameCount }, (_, index) => `[${index}:v]`).join('')}hstack=inputs=${safeFrameCount},format=rgba`,
-      '-frames:v',
-      '1',
-      spriteSheetPath,
-    ])
-
-    const spriteSheetBuffer = await fs.readFile(spriteSheetPath)
-    return spriteSheetBuffer.toString('base64')
-  } finally {
-    await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
-  }
-}
-
-export function buildAnimatorMatteFilter(options = {}) {
-  const frameSizePx = normalizeActionAnimatorFrameSize(options.frameSizePx)
-  const filterSteps = []
-
-  if (typeof options.sampleFps === 'number' && Number.isFinite(options.sampleFps)) {
-    filterSteps.push(`fps=${Math.max(0.5, options.sampleFps)}`)
-  }
-
-  filterSteps.push(
-    `scale=${frameSizePx}:${frameSizePx}:force_original_aspect_ratio=decrease:flags=lanczos`,
-    `pad=${frameSizePx}:${frameSizePx}:(ow-iw)/2:(oh-ih)/2:color=${actionAnimatorBackgroundColor}`,
-    `chromakey=${actionAnimatorBackgroundColor}:0.22:0.06`,
-    'colorkey=0xFFFFFF:0.18:0.05',
-    'format=rgba',
-  )
-
-  return `[0:v]${filterSteps.join(',')}[out]`
-}
-
-export function normalizeActionAnimatorFrameSize(value) {
-  return Number(value) === 1080 ? 1080 : defaultActionAnimatorFrameSizePx
-}
-
-function runFfmpeg(args) {
-  return new Promise((resolve, reject) => {
-    const process = spawn(ffmpegPath, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stderr = ''
-
-    process.stderr.on('data', (chunk) => {
-      stderr += chunk.toString()
-    })
-
-    process.on('error', (error) => {
-      reject(error)
-    })
-
-    process.on('close', (code) => {
-      if (code === 0) {
-        resolve()
-        return
-      }
-
-      reject(new Error(stderr || `ffmpeg exited with code ${code}.`))
-    })
-  })
-}
-
-function clampAnimatorFrameCount(frameCount) {
-  const numericValue = Number(frameCount)
-
-  if (!Number.isFinite(numericValue)) {
-    return 8
-  }
-
-  return Math.max(4, Math.min(30, Math.round(numericValue)))
-}
-
-function clampActionAnimatorFps(fps) {
-  const numericValue = Number(fps)
-
-  if (!Number.isFinite(numericValue)) {
-    return 8
-  }
-
-  return Math.max(1, Math.min(30, Math.round(numericValue)))
-}
-
-function clampActionAnimatorDurationSeconds(durationSeconds) {
-  const numericValue = Number(durationSeconds)
-
-  if (!Number.isFinite(numericValue)) {
-    return minActionAnimatorDurationSeconds
-  }
-
-  return Math.max(
-    minActionAnimatorDurationSeconds,
-    Math.min(maxActionAnimatorDurationSeconds, Math.round(numericValue)),
-  )
-}
-
-function describeAnimatorMotion(actionType) {
-  switch (actionType) {
-    case 'attack':
-      return 'Stage one complete attack cycle with anticipation, a decisive strike, follow-through, and recovery so adjacent frames show obvious motion.'
-    case 'jump':
-      return 'Stage one complete jump with crouch, launch, airborne apex, and landing, making each phase visually distinct.'
-    case 'run':
-      return 'Emphasize aggressive forward lean, arm swing, leg extension, and airborne stride changes for a readable run cycle.'
-    case 'walk':
-      return 'Emphasize alternating contact, passing, and recoil poses so the walk cycle has clear readable spacing.'
-    case 'idle':
-      return 'Keep the idle subtle but still readable, with weight shift, cloth drag, and arm movement that changes the silhouette.'
-    default:
-      return 'Show one complete readable action arc with strong silhouette changes and no duplicate adjacent poses.'
   }
 }
 

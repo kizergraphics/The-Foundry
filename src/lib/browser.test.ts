@@ -4,6 +4,7 @@ import {
   createDataUrl,
   dataUrlToBlob,
   fileToBase64,
+  inferSpriteSheetGridLayout,
   parseBase64DataUrl,
 } from './browser'
 
@@ -28,6 +29,36 @@ describe('browser encoding helpers', () => {
     expect(parseBase64DataUrl(createDataUrl('Zm9yZ2U=', 'text/plain'))).toEqual({
       base64: 'Zm9yZ2U=',
       mimeType: 'text/plain',
+    })
+  })
+
+  it('prefers a single-row strip when the sprite sheet is wide enough for the expected frame count', () => {
+    expect(
+      inferSpriteSheetGridLayout({
+        detectedColumnCount: 10,
+        detectedRowCount: 1,
+        expectedCount: 10,
+        height: 400,
+        width: 4000,
+      }),
+    ).toEqual({
+      columns: 10,
+      rows: 1,
+    })
+  })
+
+  it('falls back to a multi-row grid when a one-row strip would produce implausibly thin frames', () => {
+    expect(
+      inferSpriteSheetGridLayout({
+        detectedColumnCount: 6,
+        detectedRowCount: 2,
+        expectedCount: 10,
+        height: 768,
+        width: 1408,
+      }),
+    ).toEqual({
+      columns: 6,
+      rows: 2,
     })
   })
 })

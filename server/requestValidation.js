@@ -197,22 +197,6 @@ function readVariantForgeOptions(value, variantFamily) {
   })
 }
 
-function readActionAnimatorFrameSize(value, fieldName) {
-  const frameSize = readInteger(value, fieldName, {
-    fallback: 512,
-    max: 1080,
-    min: 512,
-  })
-
-  if (frameSize !== 512 && frameSize !== 1080) {
-    throw buildValidationError(`${fieldName} contains an unsupported value.`, [
-      'Allowed values: 512, 1080',
-    ])
-  }
-
-  return frameSize
-}
-
 function estimateBase64Bytes(value) {
   const normalized = String(value).replace(/\s+/g, '')
   const padding = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0
@@ -664,51 +648,6 @@ export function validateCharacterSheetRequest(body) {
       'systemInstruction',
       maxSystemInstructionLength,
     ),
-  }
-}
-
-export function validateActionAnimatorRequest(body) {
-  return {
-    actionType: readOptionalTrimmedString(body?.actionType, 'actionType', 40) || 'idle',
-    fps: readInteger(body?.fps, 'fps', {
-      fallback: 8,
-      max: 30,
-      min: 1,
-    }),
-    frameCount: readInteger(body?.frameCount, 'frameCount', {
-      fallback: 8,
-      max: 30,
-      min: 4,
-    }),
-    frameSize: readActionAnimatorFrameSize(body?.frameSize, 'frameSize'),
-    image: validateInlineImage(body?.image, 'image'),
-    modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
-    prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
-  }
-}
-
-export function validateActionAnimatorStripRequest(body) {
-  return {
-    actionType: readOptionalTrimmedString(body?.actionType, 'actionType', 40) || 'idle',
-    anchorImage: validateInlineImage(body?.anchorImage, 'anchorImage'),
-    canvasImage: validateInlineImage(body?.canvasImage, 'canvasImage', maxTextureExpansionBytes),
-    chunkIndex: readInteger(body?.chunkIndex, 'chunkIndex', {
-      fallback: 0,
-      max: 32,
-      min: 0,
-    }),
-    frameCount: readInteger(body?.frameCount, 'frameCount', {
-      fallback: 4,
-      max: 4,
-      min: 4,
-    }),
-    fps: readInteger(body?.fps, 'fps', {
-      fallback: 8,
-      max: 30,
-      min: 1,
-    }),
-    modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
-    prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
   }
 }
 

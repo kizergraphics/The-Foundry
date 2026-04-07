@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildAnimatorMatteFilter,
+  buildEnvSearchPaths,
   buildVariantForgeIdeaPrompt,
   buildVariantForgePrompt,
   normalizeActionAnimatorFrameSize,
@@ -57,6 +58,26 @@ describe('action animator server sizing helpers', () => {
 
     expect(instruction).toContain('without applying any named preset cues')
     expect(instruction).not.toContain('Use damage family cues and worn preset cues')
+  })
+
+  it('searches parent desktop build folders for the project .env file', () => {
+    expect(
+      buildEnvSearchPaths({
+        cwd: 'C:\\Users\\ant77\\Desktop\\The Foundry',
+        execPath: 'C:\\Users\\ant77\\Desktop\\The Foundry\\release\\The Foundry.exe',
+        resourcesPath: 'C:\\Users\\ant77\\Desktop\\The Foundry\\release\\resources',
+        rootDir: 'C:\\Users\\ant77\\Desktop\\The Foundry\\server\\..',
+      }),
+    ).toContain('C:\\Users\\ant77\\Desktop\\The Foundry\\.env')
+
+    expect(
+      buildEnvSearchPaths({
+        cwd: 'C:\\Users\\ant77\\Desktop\\The Foundry',
+        execPath: 'C:\\Users\\ant77\\Desktop\\The Foundry\\release\\win-unpacked\\The Foundry.exe',
+        resourcesPath: 'C:\\Users\\ant77\\Desktop\\The Foundry\\release\\win-unpacked\\resources',
+        rootDir: 'C:\\Users\\ant77\\Desktop\\The Foundry\\server\\..',
+      }),
+    ).toContain('C:\\Users\\ant77\\Desktop\\The Foundry\\.env')
   })
 })
 

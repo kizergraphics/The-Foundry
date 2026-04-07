@@ -9,7 +9,7 @@ describe('forgeReducer', () => {
       activeMode: 'texture-lab' as const,
       actionAnimator: {
         ...initialState.actionAnimator,
-        frameCount: 12,
+        customActionPrompt: 'Keep the staging notes.',
       },
       prompt: 'weathered obsidian floor tile',
       textureLab: {

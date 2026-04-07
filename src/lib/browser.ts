@@ -78,6 +78,8 @@ type NormalizeAnimatorFramesResult = {
   spriteSheetDataUrl: string
 }
 
+const actionAnimatorBackgroundColor = '#00FF00'
+
 export async function buildTextureExpansionInput(
   file: Blob,
   options: TextureExpansionInputOptions = {},
@@ -260,6 +262,8 @@ export async function buildAnimatorStripCanvasInput(
   const drawY = Math.round((slotSize - drawHeight) / 2)
 
   context.clearRect(0, 0, canvasWidth, canvasHeight)
+  context.fillStyle = actionAnimatorBackgroundColor
+  context.fillRect(0, 0, canvasWidth, canvasHeight)
   context.imageSmoothingEnabled = false
   context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
 
@@ -298,13 +302,14 @@ export async function sliceSpriteSheetFrames(
   }
 
   const safeFrameCount = Math.max(1, Math.round(frameCount))
-  const frameWidth = Math.max(1, Math.floor(image.naturalWidth / safeFrameCount))
+  const frameWidth = image.naturalWidth / safeFrameCount
+  const outputWidth = Math.max(1, Math.round(frameWidth))
   const frameHeight = image.naturalHeight
-  canvas.width = frameWidth
+  canvas.width = outputWidth
   canvas.height = frameHeight
 
   return Promise.all(Array.from({ length: safeFrameCount }, async (_, index) => {
-    context.clearRect(0, 0, frameWidth, frameHeight)
+    context.clearRect(0, 0, outputWidth, frameHeight)
     context.drawImage(
       image,
       index * frameWidth,
@@ -313,7 +318,7 @@ export async function sliceSpriteSheetFrames(
       frameHeight,
       0,
       0,
-      frameWidth,
+      outputWidth,
       frameHeight,
     )
 
@@ -328,10 +333,11 @@ export async function sliceAnimatorStripSlots(
   const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
   const image = await loadImage(blob)
   const safeSlotCount = Math.max(1, Math.round(slotCount))
-  const slotWidth = Math.max(1, Math.floor(image.naturalWidth / safeSlotCount))
+  const slotWidth = image.naturalWidth / safeSlotCount
+  const outputWidth = Math.max(1, Math.round(slotWidth))
   const slotHeight = image.naturalHeight
   const outputCanvas = document.createElement('canvas')
-  outputCanvas.width = slotWidth
+  outputCanvas.width = outputWidth
   outputCanvas.height = slotHeight
   const outputContext = outputCanvas.getContext('2d')
 
@@ -340,7 +346,7 @@ export async function sliceAnimatorStripSlots(
   }
 
   return Promise.all(Array.from({ length: safeSlotCount }, async (_, index) => {
-    outputContext.clearRect(0, 0, slotWidth, slotHeight)
+    outputContext.clearRect(0, 0, outputWidth, slotHeight)
     outputContext.drawImage(
       image,
       index * slotWidth,
@@ -349,7 +355,7 @@ export async function sliceAnimatorStripSlots(
       slotHeight,
       0,
       0,
-      slotWidth,
+      outputWidth,
       slotHeight,
     )
 
@@ -410,7 +416,7 @@ export async function normalizeAnimatorSpriteFrames(
     ...(await Promise.all(
       frameImages.slice(1).map(async (frame) => {
         if (!frame.bounds) {
-          return createTransparentFrameDataUrl(targetSize)
+          return createAnimatorBackgroundFrameDataUrl(targetSize)
         }
 
         return renderNormalizedAnimatorFrame(frame.image, frame.bounds, {
@@ -436,9 +442,112 @@ type SpriteSheetBounds = {
   top: number
 }
 
+type ActiveRange = {
+  end: number
+  start: number
+}
+
+type InferredSpriteSheetGrid = {
+  columns: number
+  rows: number
+}
+
 type SliceSpriteSheetByContentOptions = {
   expectedCount?: number
   padding?: number
+}
+
+export function inferSpriteSheetGridLayout(options: {
+  detectedColumnCount?: number
+  detectedRowCount?: number
+  expectedCount: number
+  height: number
+  width: number
+}): InferredSpriteSheetGrid {
+  const expectedCount = Math.max(1, Math.round(options.expectedCount))
+  const width = Math.max(1, Math.round(options.width))
+  const height = Math.max(1, Math.round(options.height))
+  const detectedRowCount =
+    options.detectedRowCount && options.detectedRowCount > 0
+      ? Math.round(options.detectedRowCount)
+      : null
+  const detectedColumnCount =
+    options.detectedColumnCount && options.detectedColumnCount > 0
+      ? Math.round(options.detectedColumnCount)
+      : null
+  const candidates = new Map<string, InferredSpriteSheetGrid>()
+
+  const addCandidate = (columns: number, rows: number) => {
+    const safeColumns = Math.max(1, Math.round(columns))
+    const safeRows = Math.max(1, Math.round(rows))
+
+    if (safeColumns * safeRows < expectedCount) {
+      return
+    }
+
+    candidates.set(`${safeColumns}x${safeRows}`, {
+      columns: safeColumns,
+      rows: safeRows,
+    })
+  }
+
+  addCandidate(expectedCount, 1)
+
+  for (let columns = 1; columns <= expectedCount; columns += 1) {
+    addCandidate(columns, Math.ceil(expectedCount / columns))
+  }
+
+  if (detectedRowCount && detectedColumnCount) {
+    addCandidate(detectedColumnCount, detectedRowCount)
+  }
+
+  const scoreCandidate = (candidate: InferredSpriteSheetGrid) => {
+    const capacity = candidate.columns * candidate.rows
+    const cellAspectRatio = (width / candidate.columns) / (height / candidate.rows)
+    const aspectPenalty = Math.abs(Math.log(cellAspectRatio)) * 60
+    const emptySlotPenalty = (capacity - expectedCount) * 6
+    const rowPenalty = detectedRowCount ? Math.abs(candidate.rows - detectedRowCount) * 14 : 0
+    const columnPenalty = detectedColumnCount
+      ? Math.abs(candidate.columns - detectedColumnCount) * 10
+      : 0
+    const narrowStripPenalty =
+      candidate.rows === 1 && cellAspectRatio < 0.4
+        ? (0.4 - cellAspectRatio) * 80
+        : 0
+    const stripBonus =
+      candidate.rows === 1 &&
+      candidate.columns === expectedCount &&
+      width / height >= expectedCount * 0.6
+        ? 28
+        : 0
+    const detectedGridBonus =
+      detectedRowCount === candidate.rows && detectedColumnCount === candidate.columns
+        ? 24
+        : 0
+
+    return (
+      aspectPenalty +
+      emptySlotPenalty +
+      rowPenalty +
+      columnPenalty +
+      narrowStripPenalty -
+      stripBonus -
+      detectedGridBonus
+    )
+  }
+
+  return [...candidates.values()].sort((left, right) => {
+    const scoreDifference = scoreCandidate(left) - scoreCandidate(right)
+
+    if (scoreDifference !== 0) {
+      return scoreDifference
+    }
+
+    return left.columns * left.rows - right.columns * right.rows
+  })[0] ?? {
+    columns: expectedCount,
+    rows: 1,
+  }
 }
 
 export async function sliceSpriteSheetFramesByContent(
@@ -474,10 +583,10 @@ export async function sliceSpriteSheetFramesByContent(
     },
   )
 
-  const detectedBounds = rowRanges.flatMap((rowRange) => {
+  const columnRangesByRow = rowRanges.map((rowRange) => {
     const rowHeight = rowRange.end - rowRange.start + 1
     const columnThreshold = Math.max(3, Math.round(rowHeight * 0.015))
-    const columnRanges = collectActiveRanges(
+    return collectActiveRanges(
       Array.from({ length: width }, (_, x) =>
         countActivePixelsInColumn(data, width, height, x, rowRange.start, rowRange.end),
       ),
@@ -487,6 +596,10 @@ export async function sliceSpriteSheetFramesByContent(
         threshold: columnThreshold,
       },
     )
+  })
+
+  const detectedBounds = rowRanges.flatMap((rowRange, rowIndex) => {
+    const columnRanges = columnRangesByRow[rowIndex] ?? []
 
     return columnRanges
       .map((columnRange) =>
@@ -503,6 +616,37 @@ export async function sliceSpriteSheetFramesByContent(
       .filter((bounds): bounds is SpriteSheetBounds => bounds !== null)
   })
 
+  if (options.expectedCount) {
+    if (detectedBounds.length === options.expectedCount) {
+      return cropSpriteSheetBoundsToDataUrls(image, detectedBounds, {
+        height,
+        padding: options.padding,
+        width,
+      })
+    }
+
+    const inferredGrid = inferSpriteSheetGridLayout({
+      detectedColumnCount: Math.max(
+        1,
+        ...columnRangesByRow.map((columnRanges) => columnRanges.length),
+      ),
+      detectedRowCount: rowRanges.length,
+      expectedCount: options.expectedCount,
+      height,
+      width,
+    })
+
+    if (inferredGrid.rows > 1 || inferredGrid.columns !== options.expectedCount) {
+      return sliceImageGrid(source, {
+        columns: inferredGrid.columns,
+        count: options.expectedCount,
+        rows: inferredGrid.rows,
+      })
+    }
+
+    return sliceSpriteSheetFrames(source, options.expectedCount)
+  }
+
   if (detectedBounds.length === 0) {
     if (options.expectedCount) {
       return sliceSpriteSheetFrames(source, options.expectedCount)
@@ -511,39 +655,11 @@ export async function sliceSpriteSheetFramesByContent(
     throw new Error('No VFX frames were detected in the returned sprite sheet.')
   }
 
-  const padding = Math.max(0, Math.round(options.padding ?? 8))
-  const outputCanvas = document.createElement('canvas')
-  const outputContext = outputCanvas.getContext('2d')
-
-  if (!outputContext) {
-    throw new Error('Canvas rendering is not available in this browser.')
-  }
-
-  return Promise.all(detectedBounds.map(async (bounds) => {
-    const left = Math.max(0, bounds.left - padding)
-    const top = Math.max(0, bounds.top - padding)
-    const right = Math.min(width - 1, bounds.right + padding)
-    const bottom = Math.min(height - 1, bounds.bottom + padding)
-    const outputWidth = Math.max(1, right - left + 1)
-    const outputHeight = Math.max(1, bottom - top + 1)
-
-    outputCanvas.width = outputWidth
-    outputCanvas.height = outputHeight
-    outputContext.clearRect(0, 0, outputWidth, outputHeight)
-    outputContext.drawImage(
-      image,
-      left,
-      top,
-      outputWidth,
-      outputHeight,
-      0,
-      0,
-      outputWidth,
-      outputHeight,
-    )
-
-    return blobToDataUrl(await canvasToBlob(outputCanvas, 'image/png'))
-  }))
+  return cropSpriteSheetBoundsToDataUrls(image, detectedBounds, {
+    height,
+    padding: options.padding,
+    width,
+  })
 }
 
 type SliceImageGridOptions = {
@@ -690,6 +806,8 @@ async function renderNormalizedAnimatorFrame(
   const drawY = options.targetSize - options.padding - drawHeight
 
   context.clearRect(0, 0, options.targetSize, options.targetSize)
+  context.fillStyle = actionAnimatorBackgroundColor
+  context.fillRect(0, 0, options.targetSize, options.targetSize)
   context.imageSmoothingEnabled = false
   context.drawImage(
     image,
@@ -706,10 +824,18 @@ async function renderNormalizedAnimatorFrame(
   return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
 }
 
-async function createTransparentFrameDataUrl(targetSize: number): Promise<string> {
+async function createAnimatorBackgroundFrameDataUrl(targetSize: number): Promise<string> {
   const canvas = document.createElement('canvas')
   canvas.width = targetSize
   canvas.height = targetSize
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  context.fillStyle = actionAnimatorBackgroundColor
+  context.fillRect(0, 0, targetSize, targetSize)
   return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
 }
 
@@ -735,6 +861,50 @@ async function composeHorizontalSpriteSheet(
   })
 
   return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
+}
+
+async function cropSpriteSheetBoundsToDataUrls(
+  image: HTMLImageElement,
+  boundsList: SpriteSheetBounds[],
+  options: {
+    height: number
+    padding?: number
+    width: number
+  },
+): Promise<string[]> {
+  const padding = Math.max(0, Math.round(options.padding ?? 8))
+  const outputCanvas = document.createElement('canvas')
+  const outputContext = outputCanvas.getContext('2d')
+
+  if (!outputContext) {
+    throw new Error('Canvas rendering is not available in this browser.')
+  }
+
+  return Promise.all(boundsList.map(async (bounds) => {
+    const left = Math.max(0, bounds.left - padding)
+    const top = Math.max(0, bounds.top - padding)
+    const right = Math.min(options.width - 1, bounds.right + padding)
+    const bottom = Math.min(options.height - 1, bounds.bottom + padding)
+    const outputWidth = Math.max(1, right - left + 1)
+    const outputHeight = Math.max(1, bottom - top + 1)
+
+    outputCanvas.width = outputWidth
+    outputCanvas.height = outputHeight
+    outputContext.clearRect(0, 0, outputWidth, outputHeight)
+    outputContext.drawImage(
+      image,
+      left,
+      top,
+      outputWidth,
+      outputHeight,
+      0,
+      0,
+      outputWidth,
+      outputHeight,
+    )
+
+    return blobToDataUrl(await canvasToBlob(outputCanvas, 'image/png'))
+  }))
 }
 
 function countActivePixelsInRow(
@@ -782,8 +952,8 @@ function collectActiveRanges(
     minimumSpan: number
     threshold: number
   },
-) {
-  const ranges: Array<{ end: number; start: number }> = []
+): ActiveRange[] {
+  const ranges: ActiveRange[] = []
   let rangeStart = -1
   let lastActiveIndex = -1
 
@@ -881,9 +1051,18 @@ function isActiveSpritePixel(data: Uint8ClampedArray, offset: number) {
   const red = data[offset]
   const green = data[offset + 1]
   const blue = data[offset + 2]
+
+  if (isLikelyActionAnimatorBackground(red, green, blue)) {
+    return false
+  }
+
   const maxChannel = Math.max(red, green, blue)
 
   return maxChannel >= 24 || red + green + blue >= 54
+}
+
+function isLikelyActionAnimatorBackground(red: number, green: number, blue: number) {
+  return green >= 170 && red <= 90 && blue <= 90 && green - Math.max(red, blue) >= 70
 }
 
 function canvasToBlob(canvas: HTMLCanvasElement, mimeType: string): Promise<Blob> {

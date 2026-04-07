@@ -60,7 +60,6 @@ import { GeneratedResultCard, PlaceholderCard } from './components/ResultCards'
 import { TextureMaterialPack } from './components/TextureMaterialPack'
 import {
   actionAnimatorActionOptions,
-  generateActionAnimator,
 } from './lib/actionAnimator'
 import {
   generateCharacterSheet,
@@ -76,7 +75,6 @@ import {
   normalizeSquareTextureDataUrl,
   sliceSpriteSheetFramesByContent,
   slicePortraitStudioFaces,
-  sliceSpriteSheetFrames,
 } from './lib/browser'
 import { buildMockResults } from './lib/mockForge'
 import {
@@ -105,7 +103,6 @@ import {
 } from './lib/uiLayout'
 import {
   forgeReducer,
-  getActionAnimatorNormalizedSizeOptions,
   getVariantForgeEnabledPresets,
   getVariantForgeFamilyCustomDirection,
   getVariantForgeOptionState,
@@ -116,8 +113,6 @@ import {
 } from './lib/forge'
 import type {
   ActionAnimatorActionType,
-  ActionAnimatorNormalizedSize,
-  ActionAnimatorPipeline,
   CharacterSheetGenerationMode,
   CharacterSheetReferenceSlot,
   ForgeErrorInfo,
@@ -743,10 +738,6 @@ function buildStoredStateSnapshot(
       actionAnimator: {
         actionType: state.actionAnimator.actionType,
         customActionPrompt: state.actionAnimator.customActionPrompt,
-        frameCount: state.actionAnimator.frameCount,
-        fps: state.actionAnimator.fps,
-        normalizedSize: state.actionAnimator.normalizedSize,
-        pipeline: state.actionAnimator.pipeline,
       },
       characterSheet: {
         consistencyEnabled: state.characterSheet.consistencyEnabled,
@@ -843,7 +834,7 @@ function App() {
   const [uiLayout, setUiLayout] = useState<UiLayoutState>(() => getDefaultUiLayout())
   const [activeDragState, setActiveDragState] = useState<ActiveDragState>(null)
   const [activeModel, setActiveModel] = useState<ModelId>(
-    getModeDefaultModel(initialState.activeMode, initialState.actionAnimator.pipeline),
+    getModeDefaultModel(initialState.activeMode),
   )
   const [variantForgeIdeaSelections, setVariantForgeIdeaSelections] = useState<
     Partial<Record<VariantForgeFamily, VariantForgeIdeaState>>
@@ -924,10 +915,7 @@ function App() {
       }))
     }
   })
-  const modeAvailableModels = getAvailableModelsForMode(
-    state.activeMode,
-    state.actionAnimator.pipeline,
-  )
+  const modeAvailableModels = getAvailableModelsForMode(state.activeMode)
   const selectedModelSupported =
     state.activeMode === 'uv-lab' || modeAvailableModels.includes(activeModel)
   const modePresentation = getModePresentation({
@@ -1125,10 +1113,7 @@ function App() {
   }, [refreshHealth])
 
   useEffect(() => {
-    const modeDefault = getModeDefaultModel(
-      state.activeMode,
-      state.actionAnimator.pipeline,
-    )
+    const modeDefault = getModeDefaultModel(state.activeMode)
     const modeOverride = modelOverridesByMode[state.activeMode]
     const nextModel =
       modeOverride && modeAvailableModels.includes(modeOverride)
@@ -1139,7 +1124,6 @@ function App() {
   }, [
     modeAvailableModels,
     modelOverridesByMode,
-    state.actionAnimator.pipeline,
     state.activeMode,
   ])
 
@@ -1432,10 +1416,6 @@ function App() {
     state.activeMode,
     state.actionAnimator.actionType,
     state.actionAnimator.customActionPrompt,
-    state.actionAnimator.frameCount,
-    state.actionAnimator.fps,
-    state.actionAnimator.normalizedSize,
-    state.actionAnimator.pipeline,
     state.characterSheet.consistencyEnabled,
     state.characterSheet.generationMode,
     state.characterSheet.manifestPrompt,
@@ -1858,23 +1838,10 @@ function App() {
       }
 
       if (isActionAnimatorMode) {
-        const payload = await generateActionAnimator({
-          modelId: activeModel,
-          state: state.actionAnimator,
-        })
-
-        finalizeForgeRun(
-          payload.results,
-          payload.model,
-          payload.prompt ?? promptPreview,
-          state.actionAnimator.pipeline === 'sprite-strip'
-            ? 'Action Animator returned a normalized sprite strip from the seed frame.'
-            : 'Action Animator returned a sprite-sheet-ready motion strip.',
-          {
-            runContext: null,
-            telemetryModel: payload.model,
-            trackTelemetry: true,
-          },
+        setStatus('idle')
+        setError(null)
+        setNotice(
+          'Action Animator is currently a bare rewrite scaffold. Generation is disabled until the new system is built.',
         )
         return
       }
@@ -2772,13 +2739,6 @@ function App() {
           asset={state.actionAnimator.characterImage}
           canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
           customActionPrompt={state.actionAnimator.customActionPrompt}
-          frameCount={state.actionAnimator.frameCount}
-          fps={state.actionAnimator.fps}
-          normalizedSize={state.actionAnimator.normalizedSize}
-          pipeline={state.actionAnimator.pipeline}
-          spriteSheetDataUrl={
-            lastResultMode === 'action-animator' ? results[0]?.dataUrl ?? null : null
-          }
           onActionTypeChange={(actionType) =>
             dispatch({ type: 'set-action-animator-action', actionType })
           }
@@ -2790,18 +2750,6 @@ function App() {
           }
           onFileSelect={(asset) =>
             dispatch({ type: 'set-action-animator-image', asset })
-          }
-          onFrameCountChange={(frameCount) =>
-            dispatch({ type: 'set-action-animator-frame-count', frameCount })
-          }
-          onFpsChange={(fps) =>
-            dispatch({ type: 'set-action-animator-fps', fps })
-          }
-          onNormalizedSizeChange={(size) =>
-            dispatch({ type: 'set-action-animator-normalized-size', size })
-          }
-          onPipelineChange={(pipeline) =>
-            dispatch({ type: 'set-action-animator-pipeline', pipeline })
           }
           onUseLatestCharacterSheet={() =>
             void hydrateLatestCharacterSheetInto({
@@ -4067,13 +4015,6 @@ function App() {
                       asset={state.actionAnimator.characterImage}
                       canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
                       customActionPrompt={state.actionAnimator.customActionPrompt}
-                      frameCount={state.actionAnimator.frameCount}
-                      fps={state.actionAnimator.fps}
-                      normalizedSize={state.actionAnimator.normalizedSize}
-                      pipeline={state.actionAnimator.pipeline}
-                      spriteSheetDataUrl={
-                        lastResultMode === 'action-animator' ? results[0]?.dataUrl ?? null : null
-                      }
                       onActionTypeChange={(actionType) =>
                         dispatch({ type: 'set-action-animator-action', actionType })
                       }
@@ -4085,18 +4026,6 @@ function App() {
                       }
                       onFileSelect={(asset) =>
                         dispatch({ type: 'set-action-animator-image', asset })
-                      }
-                      onFrameCountChange={(frameCount) =>
-                        dispatch({ type: 'set-action-animator-frame-count', frameCount })
-                      }
-                      onFpsChange={(fps) =>
-                        dispatch({ type: 'set-action-animator-fps', fps })
-                      }
-                      onNormalizedSizeChange={(size) =>
-                        dispatch({ type: 'set-action-animator-normalized-size', size })
-                      }
-                      onPipelineChange={(pipeline) =>
-                        dispatch({ type: 'set-action-animator-pipeline', pipeline })
                       }
                       onUseLatestCharacterSheet={() =>
                         void hydrateLatestCharacterSheetInto({
@@ -5907,19 +5836,10 @@ type ActionAnimatorPanelProps = {
   asset: ReferenceAsset | null
   canUseLatestCharacterSheet: boolean
   customActionPrompt: string
-  frameCount: number
-  fps: number
-  normalizedSize: ActionAnimatorNormalizedSize
-  pipeline: ActionAnimatorPipeline
   onActionTypeChange: (actionType: ActionAnimatorActionType) => void
   onCustomActionPromptChange: (prompt: string) => void
   onFileSelect: (asset: ReferenceAsset | null) => void
-  onFrameCountChange: (frameCount: number) => void
-  onFpsChange: (fps: number) => void
-  onNormalizedSizeChange: (size: ActionAnimatorNormalizedSize) => void
-  onPipelineChange: (pipeline: ActionAnimatorPipeline) => void
   onUseLatestCharacterSheet: () => void
-  spriteSheetDataUrl: string | null
 }
 
 function ActionAnimatorPanel({
@@ -5927,160 +5847,30 @@ function ActionAnimatorPanel({
   asset,
   canUseLatestCharacterSheet,
   customActionPrompt,
-  frameCount,
-  fps,
-  normalizedSize,
-  pipeline,
   onActionTypeChange,
   onCustomActionPromptChange,
   onFileSelect,
-  onFrameCountChange,
-  onFpsChange,
-  onNormalizedSizeChange,
-  onPipelineChange,
   onUseLatestCharacterSheet,
-  spriteSheetDataUrl,
 }: ActionAnimatorPanelProps) {
-  const [frames, setFrames] = useState<string[]>([])
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [previewIndex, setPreviewIndex] = useState(0)
-  const animationSlug = actionType === 'custom' ? 'custom' : actionType
-  const normalizedSizeOptions = getActionAnimatorNormalizedSizeOptions(pipeline)
-
-  useEffect(() => {
-    let cancelled = false
-
-    if (!spriteSheetDataUrl) {
-      return () => {
-        cancelled = true
-      }
-    }
-
-    void sliceSpriteSheetFrames(spriteSheetDataUrl, frameCount)
-      .then((nextFrames) => {
-        if (!cancelled) {
-          setFrames(nextFrames)
-          setPreviewIndex(0)
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setFrames([])
-        }
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [frameCount, spriteSheetDataUrl])
-
-  useEffect(() => {
-    const activeFrames = spriteSheetDataUrl ? frames : []
-
-    if (!isPlaying || activeFrames.length <= 1) {
-      return undefined
-    }
-
-    const intervalId = window.setInterval(() => {
-      setPreviewIndex((previousIndex) => (previousIndex + 1) % activeFrames.length)
-    }, Math.max(33, Math.round(1000 / Math.max(1, fps))))
-
-    return () => {
-      window.clearInterval(intervalId)
-    }
-  }, [fps, frames, isPlaying, spriteSheetDataUrl])
-
-  const activeFrames = spriteSheetDataUrl ? frames : []
-  const frameSlots = activeFrames.length
-    ? activeFrames.map((frame) => ({ dataUrl: frame, ready: true }))
-    : Array.from({ length: frameCount }, () => ({ dataUrl: null, ready: false }))
-  const currentFrame = activeFrames[previewIndex] ?? null
-
-  function handleFrameDownload(frameDataUrl: string, frameIndex: number) {
-    downloadDataUrl(
-      frameDataUrl,
-      `kizer-forge-action-animator-${animationSlug}-frame-${String(frameIndex + 1).padStart(2, '0')}.png`,
-    )
-  }
-
-  function handleDownloadAllFrames() {
-    activeFrames.forEach((frameDataUrl, frameIndex) => {
-      window.setTimeout(() => {
-        handleFrameDownload(frameDataUrl, frameIndex)
-      }, frameIndex * 120)
-    })
-  }
-
   return (
     <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
             Action Animator
           </p>
           <p className="mt-2 text-sm font-medium text-white">
-            {pipeline === 'sprite-strip'
-              ? 'Turn one approved seed frame into normalized game-ready sprite frames.'
-              : 'Turn a locked character image into a Veo-driven motion strip.'}
+            Bare scaffold only. We are keeping just the source image, action intent, and notes for the rewrite.
           </p>
         </div>
-        <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-xs text-zinc-400">
-          {frameCount} frames / {fps} fps / {normalizedSize}px
-        </div>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-            Pipeline
-          </label>
-          <select
-            value={pipeline}
-            onChange={(event) => onPipelineChange(event.target.value as ActionAnimatorPipeline)}
-            className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition focus:border-sky-300/35"
-          >
-            <option value="sprite-strip">Sprite Strip</option>
-            <option value="veo-video">Veo Video</option>
-          </select>
-          <p className="mt-3 text-xs leading-6 text-zinc-500">
-            {pipeline === 'sprite-strip'
-              ? 'Best for pixel-art consistency. Generates four-slot strip chunks and normalizes them locally.'
-              : 'Best for looser motion. Uses Veo video generation and extracts frames into a sheet.'}
-          </p>
-        </div>
-
-        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-            {pipeline === 'sprite-strip' ? 'Normalized Export Size' : 'Movie Frame Size'}
-          </label>
-          <select
-            value={normalizedSize}
-            onChange={(event) =>
-              onNormalizedSizeChange(Number(event.target.value) as ActionAnimatorNormalizedSize)
-            }
-            className="mt-3 w-full rounded-[16px] border border-white/10 bg-black/20 px-3 py-3 text-sm text-zinc-100 outline-none transition focus:border-sky-300/35"
-          >
-            {normalizedSizeOptions.map((size) => (
-              <option key={size} value={size}>
-                {size} x {size}
-              </option>
-            ))}
-          </select>
-          <p className="mt-3 text-xs leading-6 text-zinc-500">
-            {pipeline === 'sprite-strip'
-              ? 'Sprite Strip normalizes the final export locally. Use 512 for larger square game frames.'
-              : 'Veo extracts true square movie frames at either 512 x 512 or 1080 x 1080 before building the sheet.'}
-          </p>
+        <div className="rounded-full border border-amber-300/20 bg-amber-500/10 px-3 py-1 font-mono text-xs text-amber-100">
+          Rewrite scaffold
         </div>
       </div>
 
       <ImageUploadField
-        label={pipeline === 'sprite-strip' ? 'Seed Frame' : 'Character Image'}
-        helper={
-          pipeline === 'sprite-strip'
-            ? 'Upload one approved in-game frame. It becomes frame 01 and anchors the full strip.'
-            : 'Upload a character render or sheet. This image is sent to Veo as the animation source.'
-        }
+        label="Character Image"
+        helper="Upload a character render, concept, or sheet to anchor the future rewrite."
         asset={asset}
         icon={ImagePlus}
         isRequired
@@ -6093,9 +5883,7 @@ function ActionAnimatorPanel({
         onClick={onUseLatestCharacterSheet}
         className="w-full rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3 text-left text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {pipeline === 'sprite-strip'
-          ? 'Use Latest Character Sheet Result As Seed'
-          : 'Use Latest Character Sheet Result'}
+        Use Latest Character Sheet Result
       </button>
 
       <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
@@ -6121,146 +5909,27 @@ function ActionAnimatorPanel({
           onChange={(event) => onCustomActionPromptChange(event.target.value)}
           placeholder={
             actionType === 'custom'
-              ? 'Describe the exact motion cycle to animate.'
-              : 'Optional guidance. Ex: heavier footfalls, stronger anticipation, aggressive lean, slower recovery.'
+              ? 'Describe the exact motion you want the rewrite to support.'
+              : 'Optional rewrite notes. Ex: heavier footfalls, stronger anticipation, aggressive lean.'
           }
           rows={4}
           className="mt-4 w-full resize-none rounded-[18px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
         />
         <p className="mt-3 text-xs leading-6 text-zinc-500">
           {actionType === 'custom'
-            ? 'Required for Custom. Describe the motion cycle you want generated.'
-            : 'Optional. Add notes to guide this preset action without replacing it.'}
+            ? 'Required for Custom. Capture the motion idea we should design around.'
+            : 'Optional. Capture rewrite notes without locking us into final controls yet.'}
         </p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-          <div className="flex items-center justify-between">
-            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-              Frame Count
-            </p>
-            <span className="text-xs text-zinc-400">{frameCount}</span>
-          </div>
-          <input
-            type="range"
-            min={4}
-            max={30}
-            step={1}
-            value={frameCount}
-            onChange={(event) => onFrameCountChange(Number(event.target.value))}
-            className="mt-4 w-full cursor-pointer accent-sky-400"
-          />
-        </div>
-
-        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-          <div className="flex items-center justify-between">
-            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-              Playback FPS
-            </p>
-            <span className="text-xs text-zinc-400">{fps}</span>
-          </div>
-          <input
-            type="range"
-            min={1}
-            max={30}
-            step={1}
-            value={fps}
-            onChange={(event) => onFpsChange(Number(event.target.value))}
-            className="mt-4 w-full cursor-pointer accent-sky-400"
-          />
-          <p className="mt-3 text-xs leading-6 text-zinc-500">
-            Controls the target animation timing and live preview speed.
-          </p>
-        </div>
-      </div>
-
-      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="max-w-xl">
-            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-              Frame Strip
-            </p>
-          <p className="mt-2 text-sm text-zinc-400">
-              {pipeline === 'sprite-strip'
-                ? 'The final strip is normalized locally after chunk generation. Use the tile download icons for game-ready single PNG frames.'
-                : 'The returned spritesheet is sliced locally into preview frames. Use the tile download icons for full-size single PNG frames.'}
-          </p>
-        </div>
-          <div className="flex flex-wrap gap-2 lg:max-w-[20rem] lg:justify-end">
-            <button
-              type="button"
-              disabled={!frames.length}
-              onClick={() => setIsPlaying((currentValue) => !currentValue)}
-              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-white/10 bg-black/20 px-4 py-2 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-black/30 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Play className="size-4" strokeWidth={1.7} />
-              {isPlaying ? 'Pause Preview' : 'Play Animation'}
-            </button>
-            <button
-              type="button"
-              disabled={!frames.length}
-              onClick={handleDownloadAllFrames}
-              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-white/10 bg-black/20 px-4 py-2 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-black/30 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Download className="size-4" strokeWidth={1.7} />
-              Download All Frames
-            </button>
-          </div>
-        </div>
-
-        <div className="mt-4 overflow-x-auto pb-2">
-          <div className="flex min-w-max gap-3">
-            {frameSlots.map((frame, index) => (
-              <div
-                key={`${index}-${frame.dataUrl ?? 'empty'}`}
-                className="relative flex size-20 shrink-0 items-center justify-center overflow-hidden rounded-[18px] border border-white/10 bg-black/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-              >
-                {frame.dataUrl ? (
-                  <>
-                    <img
-                      src={frame.dataUrl}
-                      alt={`Animation frame ${index + 1}`}
-                      className="h-full w-full object-contain"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => handleFrameDownload(frame.dataUrl, index)}
-                      className="absolute right-1.5 top-1.5 inline-flex size-6 items-center justify-center rounded-full border border-black/30 bg-black/65 text-white transition hover:bg-black/80"
-                      aria-label={`Download frame ${index + 1}`}
-                    >
-                      <Download className="size-3" strokeWidth={1.9} />
-                    </button>
-                    <span className="absolute bottom-1.5 left-1.5 rounded-full border border-black/30 bg-black/55 px-1.5 py-0.5 text-[10px] text-zinc-200">
-                      {String(index + 1).padStart(2, '0')}
-                    </span>
-                  </>
-                ) : (
-                  <span className="text-[11px] text-zinc-500">
-                    {String(index + 1).padStart(2, '0')}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-4 rounded-[20px] border border-white/10 bg-black/25 p-4">
-          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-            Live Preview
-          </p>
-          <div className="mt-3 flex aspect-square items-center justify-center overflow-hidden rounded-[18px] border border-white/10 bg-black/30">
-            {currentFrame ? (
-              <img
-                src={currentFrame}
-                alt="Current animation frame preview"
-                className="h-full w-full object-contain"
-              />
-            ) : (
-              <span className="text-sm text-zinc-500">No frames generated yet</span>
-            )}
-          </div>
-        </div>
+      <div className="rounded-[22px] border border-dashed border-white/15 bg-white/[0.03] p-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Rewrite Scope
+        </p>
+        <p className="mt-2 text-sm text-zinc-300">
+          Generation, timing controls, preview playback, and export logic have been intentionally removed.
+          This tab now exists only to stage a source image and motion notes while we rebuild the animator from scratch.
+        </p>
       </div>
     </section>
   )

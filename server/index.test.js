@@ -278,57 +278,6 @@ describe('API hardening', () => {
     expect(JSON.stringify(response.body)).not.toContain('missing-service-account')
   })
 
-  it('rejects invalid action animator payloads before attempting generation', async () => {
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/action-animator')
-      .send({
-        actionType: 'walk',
-        fps: 8,
-        frameCount: 8,
-        image: {
-          data: 'abc123',
-          mimeType: 'text/plain',
-        },
-        modelId: 'veo-3.1-fast',
-        prompt: 'Walk cycle',
-      })
-
-    expect(response.status).toBe(400)
-    expect(response.body.error.code).toBe('invalid_request')
-  })
-
-  it('rejects invalid action animator strip payloads before attempting generation', async () => {
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/action-animator-strip')
-      .send({
-        actionType: 'hurt',
-        anchorImage: {
-          data: 'abc123',
-          mimeType: 'text/plain',
-        },
-        canvasImage: {
-          data: 'abc123',
-          mimeType: 'image/png',
-        },
-        chunkIndex: 0,
-        frameCount: 4,
-        fps: 8,
-        modelId: 'gemini-3-pro',
-        prompt: 'Hurt strip',
-      })
-
-    expect(response.status).toBe(400)
-    expect(response.body.error.code).toBe('invalid_request')
-  })
-
   it('rejects oversized inline media on forge requests', async () => {
     const app = await loadApp({
       GEMINI_API_KEY: 'test-key',
@@ -454,19 +403,6 @@ describe('API hardening', () => {
         ],
       }),
     )
-  })
-
-  it('rate limits repeated action animator requests', async () => {
-    const app = await loadApp({
-      ACTION_ANIMATOR_RATE_LIMIT_PER_MINUTE: '1',
-    })
-
-    const firstResponse = await request(app).post('/api/action-animator').send({})
-    const secondResponse = await request(app).post('/api/action-animator').send({})
-
-    expect(firstResponse.status).toBe(400)
-    expect(secondResponse.status).toBe(429)
-    expect(secondResponse.body.error.code).toBe('rate_limited')
   })
 
   it('rejects invalid material-map payloads before attempting generation', async () => {

@@ -125,7 +125,7 @@ export function getModePresentation({
     resultGridTitle: flags.isCharacterSheetMode
       ? 'Character sheet output slot'
       : flags.isActionAnimatorMode
-        ? 'Action Animator sprite sheet'
+        ? 'Action Animator rewrite scaffold'
         : flags.isVariantForgeMode
           ? 'Variant Forge output slot'
           : flags.isPortraitStudioMode
@@ -334,9 +334,7 @@ function getModeActivePromptValue(
   }
 
   if (flags.isActionAnimatorMode) {
-    return state.actionAnimator.actionType === 'custom'
-      ? state.actionAnimator.customActionPrompt
-      : buildActionAnimatorPrompt(state.actionAnimator)
+    return buildActionAnimatorPrompt(state.actionAnimator)
   }
 
   if (flags.isVariantForgeMode) {
@@ -419,9 +417,7 @@ function getIsReadyForApi(state: ForgeState, flags: ModeFlags) {
   }
 
   if (flags.isActionAnimatorMode) {
-    return Boolean(state.actionAnimator.characterImage) &&
-      (state.actionAnimator.actionType !== 'custom' ||
-        state.actionAnimator.customActionPrompt.trim().length > 0)
+    return false
   }
 
   if (flags.isVariantForgeMode) {
@@ -474,12 +470,12 @@ function getBriefItems(state: ForgeState, flags: ModeFlags): ForgeBriefItem[] {
   if (flags.isActionAnimatorMode) {
     return [
       {
-        label: state.actionAnimator.pipeline === 'sprite-strip' ? 'Seed' : 'Source',
+        label: 'Source',
         value: state.actionAnimator.characterImage?.name ?? 'Not attached',
       },
       {
-        label: 'Pipeline',
-        value: state.actionAnimator.pipeline === 'sprite-strip' ? 'Sprite Strip' : 'Veo Video',
+        label: 'Status',
+        value: 'Scaffold only',
       },
       {
         label: 'Action',
@@ -489,16 +485,8 @@ function getBriefItems(state: ForgeState, flags: ModeFlags): ForgeBriefItem[] {
             : state.actionAnimator.actionType,
       },
       {
-        label: 'Frames',
-        value: String(state.actionAnimator.frameCount),
-      },
-      {
-        label: 'FPS',
-        value: String(state.actionAnimator.fps),
-      },
-      {
-        label: 'Export',
-        value: `${state.actionAnimator.normalizedSize}px`,
+        label: 'Notes',
+        value: state.actionAnimator.customActionPrompt.trim() || 'None yet',
       },
     ]
   }
@@ -660,7 +648,7 @@ function getPrimaryActionLabel({
 }) {
   if (isForging) {
     if (flags.isActionAnimatorMode) {
-      return 'ANIMATING'
+      return 'SCAFFOLD ONLY'
     }
 
     if (flags.isCharacterSheetMode) {
@@ -691,7 +679,7 @@ function getPrimaryActionLabel({
   }
 
   if (flags.isActionAnimatorMode) {
-    return 'ANIMATE'
+    return 'SCAFFOLD ONLY'
   }
 
   if (flags.isCharacterSheetMode) {
@@ -734,9 +722,7 @@ function getPrimaryActionDescription({
 }) {
   if (isForging) {
     if (flags.isActionAnimatorMode) {
-      return state.actionAnimator.pipeline === 'sprite-strip'
-        ? 'Generating strip chunks from the seed frame and normalizing the final spritesheet'
-        : 'Sending character image to Veo and building a spritesheet'
+      return 'Action Animator scaffold is active while the rewrite is in progress'
     }
 
     if (flags.isCharacterSheetMode) {
@@ -772,13 +758,11 @@ function getPrimaryActionDescription({
     return 'Selected model is not supported for this tab'
   }
 
-  if (getIsReadyForApi(state, flags)) {
-    if (flags.isActionAnimatorMode) {
-      return state.actionAnimator.pipeline === 'sprite-strip'
-        ? 'Seed frame staged for strip generation and normalization'
-        : 'Character image staged for Veo animation'
-    }
+  if (flags.isActionAnimatorMode) {
+    return 'Legacy animation generation is disabled while the new Action Animator is rebuilt'
+  }
 
+  if (getIsReadyForApi(state, flags)) {
     if (flags.isVariantForgeMode) {
       return 'Base asset staged for single-variant transformation'
     }
@@ -809,9 +793,7 @@ function getPrimaryActionDescription({
   }
 
   if (flags.isActionAnimatorMode) {
-    return state.actionAnimator.pipeline === 'sprite-strip'
-      ? 'Attach a seed frame and choose an action'
-      : 'Attach a character image and choose an action'
+    return 'Scaffold active: stage an image and notes for the rewrite'
   }
 
   if (flags.isVariantForgeMode) {
@@ -852,7 +834,7 @@ function getReadinessLabel({
     }
 
     if (flags.isActionAnimatorMode) {
-      return 'Animating'
+      return 'Scaffold only'
     }
 
     if (flags.isUvLabMode) {
@@ -865,10 +847,6 @@ function getReadinessLabel({
   if (isReadyForApi) {
     if (flags.isTextureExpansionMode) {
       return 'Source ready'
-    }
-
-    if (flags.isActionAnimatorMode) {
-      return 'Animation ready'
     }
 
     if (flags.isUvLabMode) {
@@ -886,7 +864,11 @@ function getReadinessLabel({
     return 'Source required'
   }
 
-  if (flags.isActionAnimatorMode || flags.isPortraitStudioMode || flags.isVariantForgeMode) {
+  if (flags.isActionAnimatorMode) {
+    return 'Rewrite scaffold'
+  }
+
+  if (flags.isPortraitStudioMode || flags.isVariantForgeMode) {
     return 'Image required'
   }
 

@@ -1,7 +1,5 @@
 import type {
   ActionAnimatorActionType,
-  ActionAnimatorNormalizedSize,
-  ActionAnimatorPipeline,
   CharacterSheetGenerationMode,
   ForgeMode,
   GenerationCount,
@@ -18,8 +16,6 @@ import type {
 } from './forge'
 import { isForgeMode } from '../../shared/modeCatalog.js'
 import {
-  clampActionAnimatorFps,
-  clampActionAnimatorNormalizedSize,
   clampFrameCount,
   clampIntensity,
   clampTextureLabOutputSize,
@@ -54,10 +50,6 @@ import {
 type StoredActionAnimatorSettings = {
   actionType: ActionAnimatorActionType
   customActionPrompt: string
-  frameCount: number
-  fps: number
-  normalizedSize: ActionAnimatorNormalizedSize
-  pipeline: ActionAnimatorPipeline
 }
 
 type StoredCharacterSheetSettings = {
@@ -251,10 +243,6 @@ export function loadStoredState(): StoredState | null {
 
   try {
     const parsed = JSON.parse(rawValue) as Partial<StoredState>
-    const actionAnimatorPipeline: ActionAnimatorPipeline =
-      parsed.settings?.actionAnimator?.pipeline === 'veo-video'
-        ? 'veo-video'
-        : 'sprite-strip'
     const legacyLootLevelerRarity = readLegacyLootLevelerRarity(
       (parsed.settings as { lootLeveler?: { rarity?: unknown } } | undefined)?.lootLeveler
         ?.rarity,
@@ -349,25 +337,6 @@ export function loadStoredState(): StoredState | null {
             typeof parsed.settings?.actionAnimator?.customActionPrompt === 'string'
               ? parsed.settings.actionAnimator.customActionPrompt
               : '',
-          frameCount:
-            typeof parsed.settings?.actionAnimator?.frameCount === 'number' &&
-            Number.isFinite(parsed.settings.actionAnimator.frameCount)
-              ? clampFrameCount(parsed.settings.actionAnimator.frameCount)
-              : 8,
-          fps:
-            typeof parsed.settings?.actionAnimator?.fps === 'number' &&
-            Number.isFinite(parsed.settings.actionAnimator.fps)
-              ? clampActionAnimatorFps(parsed.settings.actionAnimator.fps)
-              : 8,
-          normalizedSize:
-            typeof parsed.settings?.actionAnimator?.normalizedSize === 'number' &&
-            Number.isFinite(parsed.settings.actionAnimator.normalizedSize)
-              ? clampActionAnimatorNormalizedSize(
-                  parsed.settings.actionAnimator.normalizedSize,
-                  actionAnimatorPipeline,
-                )
-              : clampActionAnimatorNormalizedSize(64, actionAnimatorPipeline),
-          pipeline: actionAnimatorPipeline,
         },
         characterSheet: {
           consistencyEnabled: Boolean(

@@ -1,4 +1,3 @@
-import type { ActionAnimatorPipeline } from '../lib/forge'
 import type { ForgeMode } from '../../shared/modeCatalog.js'
 
 export const MODEL_LABELS = {
@@ -21,7 +20,7 @@ export const TELEMETRY_ROW_BY_MODEL_ID: Record<ModelId, string> = {
 
 const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
   armory: 'gemini-3-flash',
-  'action-animator': 'gemini-3-pro',
+  'action-animator': 'veo-3.1-fast',
   'character-sheet': 'gemini-3-pro',
   'portrait-studio': 'gemini-3-pro',
   'texture-lab': 'gemini-3-flash',
@@ -33,7 +32,7 @@ const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
 
 const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
   armory: ['gemini-3-flash', 'gemini-2.5-flash-image'],
-  'action-animator': ['gemini-3-pro', 'gemini-2.5-flash-image', 'veo-3.1-fast'],
+  'action-animator': ['veo-3.1-fast'],
   'character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   'portrait-studio': ['gemini-3-pro'],
   'texture-lab': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
@@ -43,30 +42,20 @@ const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
   visualizer: ['gemini-3-flash', 'gemini-2.5-flash-image'],
 }
 
-export function getActionAnimatorDefaultModel(
-  pipeline: ActionAnimatorPipeline,
-): ModelId {
-  return pipeline === 'veo-video' ? 'veo-3.1-fast' : 'gemini-3-pro'
+export function getActionAnimatorDefaultModel(): ModelId {
+  return 'veo-3.1-fast'
 }
 
-export function getModeDefaultModel(
-  mode: ForgeMode,
-  actionAnimatorPipeline: ActionAnimatorPipeline,
-): ModelId {
+export function getModeDefaultModel(mode: ForgeMode): ModelId {
   return mode === 'action-animator'
-    ? getActionAnimatorDefaultModel(actionAnimatorPipeline)
+    ? getActionAnimatorDefaultModel()
     : smartDefaultModelByMode[mode]
 }
 
-export function getAvailableModelsForMode(
-  mode: ForgeMode,
-  actionAnimatorPipeline: ActionAnimatorPipeline,
-): ModelId[] {
+export function getAvailableModelsForMode(mode: ForgeMode): ModelId[] {
   if (mode !== 'action-animator') {
     return availableModelsByMode[mode]
   }
 
-  return actionAnimatorPipeline === 'veo-video'
-    ? ['veo-3.1-fast']
-    : ['gemini-3-pro', 'gemini-2.5-flash-image']
+  return ['veo-3.1-fast']
 }

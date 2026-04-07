@@ -1,4 +1,5 @@
 import http from 'node:http'
+import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -8,16 +9,15 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const appRoot = path.resolve(__dirname, '..')
 const defaultPort = Number(process.env.PORT ?? 3001)
-const appUrl = `http://127.0.0.1:${defaultPort}`
 const maxHealthWaitMs = 30000
 const healthRetryDelayMs = 750
 
 process.env.FOUNDRY_ELECTRON_MAIN = 'true'
 process.env.NODE_ENV = 'production'
-process.env.PORT = String(defaultPort)
 
 let mainWindow = null
 let localServer = null
+let localPort = defaultPort
 let isQuitting = false
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
@@ -75,9 +75,8 @@ app.whenReady().then(async () => {
 })
 
 async function ensureLocalServer() {
-  if (await isServerHealthy()) {
-    return
-  }
+  localPort = await findAvailablePort(defaultPort)
+  process.env.PORT = String(localPort)
 
   const serverModule = await import(
     pathToFileURL(path.join(appRoot, 'server', 'index.js')).href
@@ -120,7 +119,7 @@ function createMainWindow() {
     mainWindow = null
   })
 
-  void mainWindow.loadURL(appUrl)
+  void mainWindow.loadURL(getAppUrl())
 }
 
 async function stopLocalServer() {
@@ -134,6 +133,7 @@ async function stopLocalServer() {
       resolve()
     })
   })
+  localServer = null
 }
 
 async function waitForListeningServer(server) {
@@ -174,7 +174,7 @@ async function waitForHealthyServer() {
 
 async function isServerHealthy() {
   return new Promise((resolve) => {
-    const request = http.get(`${appUrl}/api/health`, (response) => {
+    const request = http.get(getHealthUrl(), (response) => {
       response.resume()
       resolve((response.statusCode ?? 500) >= 200 && (response.statusCode ?? 500) < 300)
     })
@@ -188,6 +188,42 @@ async function isServerHealthy() {
       resolve(false)
     })
   })
+}
+
+async function findAvailablePort(startingPort) {
+  let candidatePort = Math.max(0, Math.round(startingPort) || defaultPort)
+
+  while (!(await isPortAvailable(candidatePort))) {
+    candidatePort += 1
+  }
+
+  return candidatePort
+}
+
+async function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer()
+
+    server.once('error', () => {
+      resolve(false)
+    })
+
+    server.once('listening', () => {
+      server.close(() => {
+        resolve(true)
+      })
+    })
+
+    server.listen(port, '127.0.0.1')
+  })
+}
+
+function getAppUrl() {
+  return `http://127.0.0.1:${localPort}`
+}
+
+function getHealthUrl() {
+  return `${getAppUrl()}/api/health`
 }
 
 function sleep(durationMs) {

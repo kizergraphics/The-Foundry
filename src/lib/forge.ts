@@ -52,8 +52,6 @@ export type UvLabAtlasSize = 1024 | 2048 | 4096
 export type GenerationCount = 1 | 2 | 3 | 4
 export type ForgeStatus = 'idle' | 'loading' | 'success' | 'error'
 export type ModelFormat = 'obj' | 'fbx'
-export type ActionAnimatorPipeline = 'sprite-strip' | 'veo-video'
-export type ActionAnimatorNormalizedSize = 64 | 128 | 256 | 512 | 1080
 export type ActionAnimatorActionType =
   | 'idle'
   | 'walk'
@@ -96,10 +94,6 @@ export type ActionAnimatorState = {
   actionType: ActionAnimatorActionType
   characterImage: ReferenceAsset | null
   customActionPrompt: string
-  frameCount: number
-  fps: number
-  normalizedSize: ActionAnimatorNormalizedSize
-  pipeline: ActionAnimatorPipeline
 }
 
 export type CharacterSheetState = {
@@ -183,10 +177,6 @@ export type ForgeAction =
   | { type: 'set-action-animator-image'; asset: ReferenceAsset | null }
   | { type: 'set-action-animator-action'; actionType: ActionAnimatorActionType }
   | { type: 'set-action-animator-custom-prompt'; prompt: string }
-  | { type: 'set-action-animator-frame-count'; frameCount: number }
-  | { type: 'set-action-animator-fps'; fps: number }
-  | { type: 'set-action-animator-normalized-size'; size: ActionAnimatorNormalizedSize }
-  | { type: 'set-action-animator-pipeline'; pipeline: ActionAnimatorPipeline }
   | { type: 'set-character-sheet-mode'; mode: CharacterSheetGenerationMode }
   | { type: 'set-character-sheet-manifest'; prompt: string }
   | { type: 'set-character-sheet-reference-prompt'; prompt: string }
@@ -321,15 +311,15 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     label: 'Action Animator',
     eyebrow: 'Motion',
     description:
-      'Turns one approved sprite frame into a normalized motion strip, with Veo fallback for looser motion work.',
+      'Turns a locked character image into a Veo-driven motion strip for quick animation blocking.',
     instruction:
-      '2D sprite strip from a seed frame, shared scale normalization, feet locked to the same horizon',
+      '2D side-view animation strip, locked camera, consistent scale, readable motion spacing',
     surfaceClassName:
       'from-cyan-400/18 via-slate-950/80 to-slate-950/95 ring-cyan-300/20',
     previewAspectClassName: 'aspect-[8/1]',
     previewImageClassName: 'object-contain',
     icon: Clapperboard,
-    focus: 'Sprite sheets, motion loops, frame timing',
+    focus: 'Motion strips, animation loops, frame timing',
   },
   'variant-forge': {
     label: 'Variant Forge',
@@ -388,8 +378,6 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
   },
 }
 
-export const actionAnimatorStripNormalizedSizes = [64, 128, 256, 512] as const
-export const actionAnimatorVideoFrameSizes = [512, 1080] as const
 export const defaultTextureMaterialMapDefaults: TextureMaterialMapDefaults = {
   heightStrength: 60,
   normalStrength: 60,
@@ -462,10 +450,6 @@ export const initialState: ForgeState = {
     actionType: 'idle',
     characterImage: null,
     customActionPrompt: '',
-    frameCount: 8,
-    fps: 8,
-    normalizedSize: 64,
-    pipeline: 'sprite-strip',
   },
   generationCount: 3,
   portraitStudio: {
@@ -573,45 +557,6 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         actionAnimator: {
           ...state.actionAnimator,
           customActionPrompt: action.prompt,
-        },
-      }
-    case 'set-action-animator-frame-count':
-      return {
-        ...state,
-        actionAnimator: {
-          ...state.actionAnimator,
-          frameCount: clampFrameCount(action.frameCount),
-        },
-      }
-    case 'set-action-animator-fps':
-      return {
-        ...state,
-        actionAnimator: {
-          ...state.actionAnimator,
-          fps: clampActionAnimatorFps(action.fps),
-        },
-      }
-    case 'set-action-animator-normalized-size':
-      return {
-        ...state,
-        actionAnimator: {
-          ...state.actionAnimator,
-          normalizedSize: clampActionAnimatorNormalizedSize(
-            action.size,
-            state.actionAnimator.pipeline,
-          ),
-        },
-      }
-    case 'set-action-animator-pipeline':
-      return {
-        ...state,
-        actionAnimator: {
-          ...state.actionAnimator,
-          pipeline: action.pipeline,
-          normalizedSize: clampActionAnimatorNormalizedSize(
-            state.actionAnimator.normalizedSize,
-            action.pipeline,
-          ),
         },
       }
     case 'set-texture-lab-workflow':
@@ -959,50 +904,6 @@ export function clampFrameCount(value: number) {
   }
 
   return Math.round(value)
-}
-
-export function clampActionAnimatorFps(value: number) {
-  if (value <= 1) {
-    return 1
-  }
-
-  if (value >= 30) {
-    return 30
-  }
-
-  return Math.round(value)
-}
-
-export function clampActionAnimatorNormalizedSize(
-  value: number,
-  pipeline: ActionAnimatorPipeline = 'sprite-strip',
-): ActionAnimatorNormalizedSize {
-  if (pipeline === 'veo-video') {
-    return Number(value) === 1080 ? 1080 : 512
-  }
-
-  const normalizedValue = Number.isFinite(value) ? value : 64
-  let nearestSize: ActionAnimatorNormalizedSize = actionAnimatorStripNormalizedSizes[0]
-  let nearestDistance = Math.abs(normalizedValue - nearestSize)
-
-  for (const candidate of actionAnimatorStripNormalizedSizes.slice(1)) {
-    const candidateDistance = Math.abs(normalizedValue - candidate)
-
-    if (candidateDistance < nearestDistance) {
-      nearestSize = candidate
-      nearestDistance = candidateDistance
-    }
-  }
-
-  return nearestSize
-}
-
-export function getActionAnimatorNormalizedSizeOptions(
-  pipeline: ActionAnimatorPipeline,
-): readonly ActionAnimatorNormalizedSize[] {
-  return pipeline === 'veo-video'
-    ? actionAnimatorVideoFrameSizes
-    : actionAnimatorStripNormalizedSizes
 }
 
 export function clampIntensity(value: number) {

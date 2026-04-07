@@ -246,6 +246,8 @@ export function buildVfxForgePrompt({
       'Generate a stylized 2D VFX flipbook for game-ready sprite sheet usage.',
       `Effect label: ${normalizedEffectLabel}.`,
       `Layout: exactly ${normalizedFrameCount} frames in one horizontal row.`,
+      'Each frame must stay fully inside its own equally sized slot.',
+      'Do not overlap adjacent frames, stack frames vertically, or turn the strip into one continuous panorama.',
       'Use a pure #000000 black background and bright additive-friendly energy.',
       looping
         ? 'Make the first and last frames connect cleanly for looping playback.'
@@ -302,6 +304,8 @@ export function resolveVfxForgeSystemInstruction(
       ? [
           'Generate a 2D effect flipbook on a pure #000000 black background.',
           `Layout: ${normalizedFrameCount} frames in a single horizontal row.`,
+          'Each frame must be isolated inside an equally sized slot.',
+          'Do not let the effect cross frame boundaries or read like one continuous panoramic image.',
           'Do not include props, characters, floor planes, or UI.',
           'Keep the effect centered with clean frame-to-frame timing.',
         ]

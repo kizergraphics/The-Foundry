@@ -8,10 +8,6 @@ const baseStoredSettings = {
   actionAnimator: {
     actionType: 'idle' as const,
     customActionPrompt: '',
-    frameCount: 8,
-    fps: 8,
-    normalizedSize: 64 as const,
-    pipeline: 'sprite-strip' as const,
   },
   characterSheet: {
     consistencyEnabled: false,
@@ -249,7 +245,7 @@ describe('persistStoredState', () => {
     })
   })
 
-  it('restores animator sizes with pipeline-aware clamping', () => {
+  it('keeps only the scaffold animator fields when restoring state', () => {
     window.localStorage.setItem(
       'kizer-forge-state',
       JSON.stringify({
@@ -260,32 +256,11 @@ describe('persistStoredState', () => {
           actionAnimator: {
             ...baseStoredSettings.actionAnimator,
             actionType: 'walk',
+            frameCount: 99,
+            fps: 99,
             normalizedSize: 700,
-          },
-          generationCount: 1,
-          prompt: '',
-        },
-        session: null,
-      }),
-    )
-
-    expect(loadStoredState()?.settings.actionAnimator).toMatchObject({
-      normalizedSize: 512,
-      pipeline: 'sprite-strip',
-    })
-
-    window.localStorage.setItem(
-      'kizer-forge-state',
-      JSON.stringify({
-        recentPrompts: [],
-        settings: {
-          ...baseStoredSettings,
-          activeMode: 'action-animator',
-          actionAnimator: {
-            ...baseStoredSettings.actionAnimator,
-            actionType: 'walk',
-            normalizedSize: 256,
             pipeline: 'veo-video',
+            customActionPrompt: 'Heavy forward lean.',
           },
           generationCount: 1,
           prompt: '',
@@ -295,8 +270,8 @@ describe('persistStoredState', () => {
     )
 
     expect(loadStoredState()?.settings.actionAnimator).toMatchObject({
-      normalizedSize: 512,
-      pipeline: 'veo-video',
+      actionType: 'walk',
+      customActionPrompt: 'Heavy forward lean.',
     })
   })
 
