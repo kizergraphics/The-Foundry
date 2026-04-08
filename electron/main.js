@@ -4,6 +4,11 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { app, BrowserWindow, dialog, shell } from 'electron'
+import {
+  buildPortableRelaunchOptions,
+  isPortableRelaunchArg,
+  shouldHandlePortableSecondInstance,
+} from './portableRelaunch.js'
 import { cleanupStaleServices } from '../shared/serviceCleanup.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -20,6 +25,7 @@ let mainWindow = null
 let localServer = null
 let localPort = defaultPort
 let isQuitting = false
+let isPortableRelaunchInProgress = false
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 
@@ -27,7 +33,11 @@ if (!hasSingleInstanceLock) {
   app.quit()
 }
 
-app.on('second-instance', () => {
+app.on('second-instance', async (_event, commandLine) => {
+  if (await relaunchPortableApp(commandLine)) {
+    return
+  }
+
   if (!mainWindow) {
     return
   }
@@ -93,6 +103,39 @@ async function cleanupAppServices() {
       } before launch.`,
     )
   }
+}
+
+async function relaunchPortableApp(commandLine) {
+  if (
+    isPortableRelaunchInProgress ||
+    process.argv.some((value) => isPortableRelaunchArg(value))
+  ) {
+    return false
+  }
+
+  const relaunchOptions = buildPortableRelaunchOptions({
+    argv: process.argv,
+    commandLine,
+    env: process.env,
+    isPackaged: app.isPackaged,
+  })
+
+  if (
+    !shouldHandlePortableSecondInstance({
+      env: process.env,
+      isPackaged: app.isPackaged,
+    }) ||
+    !relaunchOptions
+  ) {
+    return false
+  }
+
+  isPortableRelaunchInProgress = true
+  isQuitting = true
+  app.relaunch(relaunchOptions)
+  await stopLocalServer()
+  app.quit()
+  return true
 }
 
 async function ensureLocalServer() {
