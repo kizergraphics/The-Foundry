@@ -37,6 +37,8 @@ const allowedCharacterReferenceRoles = new Set([
 const allowedStandardReferenceSlots = new Set(['style', 'subject'])
 const allowedCharacterReferenceSlots = new Set(['face', 'outfit', 'art-style'])
 const allowedResponseModalities = new Set(['IMAGE', 'TEXT'])
+const allowedActionAnimatorKeyColors = new Set(['green', 'blue'])
+const allowedActionAnimatorPipelines = new Set(['veo-video'])
 
 function buildValidationError(message, details) {
   return {
@@ -350,6 +352,22 @@ function validateOptionalPreviewList(value) {
   })
 }
 
+function readActionAnimatorFrameSize(value, fieldName) {
+  const frameSize = readInteger(value, fieldName, {
+    fallback: 512,
+    max: 1080,
+    min: 512,
+  })
+
+  if (frameSize !== 512 && frameSize !== 1080) {
+    throw buildValidationError(`${fieldName} contains an unsupported value.`, [
+      'Allowed values: 512, 1080',
+    ])
+  }
+
+  return frameSize
+}
+
 export function validateForgeRequest(body) {
   const mode = readOptionalEnum(body?.mode, 'mode', supportedForgeModes)
 
@@ -648,6 +666,31 @@ export function validateCharacterSheetRequest(body) {
       'systemInstruction',
       maxSystemInstructionLength,
     ),
+  }
+}
+
+export function validateActionAnimatorRequest(body) {
+  return {
+    actionType: readOptionalTrimmedString(body?.actionType, 'actionType', 40) || 'idle',
+    fps: readInteger(body?.fps, 'fps', {
+      fallback: 8,
+      max: 30,
+      min: 1,
+    }),
+    frameCount: readInteger(body?.frameCount, 'frameCount', {
+      fallback: 8,
+      max: 30,
+      min: 4,
+    }),
+    image: validateInlineImage(body?.image, 'image'),
+    keyColor:
+      readOptionalEnum(body?.keyColor, 'keyColor', allowedActionAnimatorKeyColors) ?? 'green',
+    modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
+    normalizedSize: readActionAnimatorFrameSize(body?.normalizedSize, 'normalizedSize'),
+    pipeline:
+      readOptionalEnum(body?.pipeline, 'pipeline', allowedActionAnimatorPipelines) ??
+      'veo-video',
+    prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
   }
 }
 

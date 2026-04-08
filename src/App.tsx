@@ -60,6 +60,8 @@ import { GeneratedResultCard, PlaceholderCard } from './components/ResultCards'
 import { TextureMaterialPack } from './components/TextureMaterialPack'
 import {
   actionAnimatorActionOptions,
+  generateActionAnimator,
+  type ActionAnimatorArtifacts,
 } from './lib/actionAnimator'
 import {
   generateCharacterSheet,
@@ -68,6 +70,7 @@ import {
   buildTextureSeamRepairInput,
   copyResultToClipboard,
   createDataUrl,
+  dataUrlToBlob,
   dataUrlToFile,
   downloadBlob,
   downloadDataUrl,
@@ -103,6 +106,7 @@ import {
 } from './lib/uiLayout'
 import {
   forgeReducer,
+  getActionAnimatorNormalizedSizeOptions,
   getVariantForgeEnabledPresets,
   getVariantForgeFamilyCustomDirection,
   getVariantForgeOptionState,
@@ -113,6 +117,8 @@ import {
 } from './lib/forge'
 import type {
   ActionAnimatorActionType,
+  ActionAnimatorKeyColor,
+  ActionAnimatorNormalizedSize,
   CharacterSheetGenerationMode,
   CharacterSheetReferenceSlot,
   ForgeErrorInfo,
@@ -259,6 +265,7 @@ type TextureMaterialPackState = {
 }
 
 type VfxTextureResultMap = Partial<Record<VfxTextureKind, ForgeResult>>
+type ActionAnimatorRunArtifacts = ActionAnimatorArtifacts
 
 type ForgeBatchSlotStatus =
   | 'queued'
@@ -738,6 +745,11 @@ function buildStoredStateSnapshot(
       actionAnimator: {
         actionType: state.actionAnimator.actionType,
         customActionPrompt: state.actionAnimator.customActionPrompt,
+        frameCount: state.actionAnimator.frameCount,
+        fps: state.actionAnimator.fps,
+        keyColor: state.actionAnimator.keyColor,
+        normalizedSize: state.actionAnimator.normalizedSize,
+        pipeline: state.actionAnimator.pipeline,
       },
       characterSheet: {
         consistencyEnabled: state.characterSheet.consistencyEnabled,
@@ -819,6 +831,8 @@ function App() {
   const [repairingResultId, setRepairingResultId] = useState<string | null>(null)
   const [vfxRecipeManifest, setVfxRecipeManifest] = useState<VfxRecipeManifest | null>(null)
   const [vfxTextureResults, setVfxTextureResults] = useState<VfxTextureResultMap>({})
+  const [actionAnimatorArtifacts, setActionAnimatorArtifacts] =
+    useState<ActionAnimatorRunArtifacts | null>(null)
   const [isBuildingVfxRecipe, setIsBuildingVfxRecipe] = useState(false)
   const [isDownloadingVfxBundle, setIsDownloadingVfxBundle] = useState(false)
   const [hasRestoredState, setHasRestoredState] = useState(false)
@@ -1469,6 +1483,7 @@ function App() {
     nextServerPrompt: string | null,
     nextNotice: string,
     options?: {
+      actionAnimatorArtifacts?: ActionAnimatorRunArtifacts | null
       runContext?: TextureLabRunContext | null
       telemetryModel?: string | null
       trackTelemetry?: boolean
@@ -1489,6 +1504,7 @@ function App() {
     setLastResultMode(state.activeMode)
     setRecentPrompts(nextRecentPrompts)
     setRepairingResultId(null)
+    setActionAnimatorArtifacts(options?.actionAnimatorArtifacts ?? null)
 
     if (options?.runContext !== undefined) {
       setLastTextureLabRun(options.runContext)
@@ -1553,6 +1569,7 @@ function App() {
 
     setForgeSlots(buildForgeBatchSlots(totalCount))
     setResults([])
+    setActionAnimatorArtifacts(null)
     setMaterialPacksByResultId({})
     setRepairingResultId(null)
     setNotice(
@@ -1774,6 +1791,7 @@ function App() {
     setNotice(null)
     setForgeSlots([])
     setServerPrompt(null)
+    setActionAnimatorArtifacts(null)
     if (isUvLabMode) {
       setUvJob(null)
     }
@@ -1838,10 +1856,22 @@ function App() {
       }
 
       if (isActionAnimatorMode) {
-        setStatus('idle')
-        setError(null)
-        setNotice(
-          'Action Animator is currently a bare rewrite scaffold. Generation is disabled until the new system is built.',
+        const payload = await generateActionAnimator({
+          modelId: activeModel,
+          state: state.actionAnimator,
+        })
+
+        finalizeForgeRun(
+          payload.results,
+          payload.model,
+          payload.prompt ?? promptPreview,
+          `Action Animator extracted ${payload.artifacts.frames.length} keyed frame${payload.artifacts.frames.length === 1 ? '' : 's'} from Veo video output.`,
+          {
+            actionAnimatorArtifacts: payload.artifacts,
+            runContext: null,
+            telemetryModel: payload.model,
+            trackTelemetry: true,
+          },
         )
         return
       }
@@ -2152,13 +2182,71 @@ function App() {
       return
     }
 
+    if (isActionAnimatorMode) {
+      const actionSlug =
+        state.actionAnimator.actionType === 'custom'
+          ? slugifyFileSegment(state.actionAnimator.customActionPrompt, 'custom')
+          : state.actionAnimator.actionType
+      downloadResult(result, `kizer-forge-action-animator-${actionSlug}.${extension}`)
+      setNotice('Downloaded the Action Animator sprite sheet.')
+      return
+    }
+
     downloadResult(result, `kizer-forge-${state.activeMode}-${index + 1}.${extension}`)
     setNotice(`Downloaded candidate ${index + 1}.`)
   }, [
+    isActionAnimatorMode,
     isVfxForgeMode,
     state.activeMode,
+    state.actionAnimator.actionType,
+    state.actionAnimator.customActionPrompt,
     state.vfxForge.effectLabel,
     vfxTextureResults,
+  ])
+
+  const handleDownloadActionAnimatorFrames = useCallback(() => {
+    if (!actionAnimatorArtifacts || actionAnimatorArtifacts.frames.length === 0) {
+      return
+    }
+
+    const actionSlug =
+      state.actionAnimator.actionType === 'custom'
+        ? slugifyFileSegment(state.actionAnimator.customActionPrompt, 'custom')
+        : state.actionAnimator.actionType
+
+    actionAnimatorArtifacts.frames.forEach((frame, frameIndex) => {
+      window.setTimeout(() => {
+        downloadDataUrl(
+          frame.dataUrl,
+          `kizer-forge-action-animator-${actionSlug}-frame-${String(frameIndex + 1).padStart(2, '0')}.png`,
+        )
+      }, frameIndex * 120)
+    })
+
+    setNotice(`Queued ${actionAnimatorArtifacts.frames.length} Action Animator frame downloads.`)
+  }, [
+    actionAnimatorArtifacts,
+    state.actionAnimator.actionType,
+    state.actionAnimator.customActionPrompt,
+  ])
+
+  const handleDownloadActionAnimatorVideo = useCallback(async () => {
+    if (!actionAnimatorArtifacts?.video) {
+      return
+    }
+
+    const actionSlug =
+      state.actionAnimator.actionType === 'custom'
+        ? slugifyFileSegment(state.actionAnimator.customActionPrompt, 'custom')
+        : state.actionAnimator.actionType
+    const videoBlob = await dataUrlToBlob(actionAnimatorArtifacts.video.dataUrl)
+
+    downloadBlob(videoBlob, `kizer-forge-action-animator-${actionSlug}.mp4`)
+    setNotice('Downloaded the Action Animator source video.')
+  }, [
+    actionAnimatorArtifacts,
+    state.actionAnimator.actionType,
+    state.actionAnimator.customActionPrompt,
   ])
 
   const handleBuildVfxRecipe = useCallback(async () => {
@@ -2666,6 +2754,7 @@ function App() {
         <ModelSelector
           activeModel={activeModel}
           availableModels={modeAvailableModels}
+          mode={state.activeMode}
           onSelect={handleModelSelect}
         />
       ),
@@ -2737,8 +2826,15 @@ function App() {
         <ActionAnimatorPanel
           actionType={state.actionAnimator.actionType}
           asset={state.actionAnimator.characterImage}
+          artifacts={actionAnimatorArtifacts}
           canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
           customActionPrompt={state.actionAnimator.customActionPrompt}
+          fps={state.actionAnimator.fps}
+          frameCount={state.actionAnimator.frameCount}
+          keyColor={state.actionAnimator.keyColor}
+          normalizedSize={state.actionAnimator.normalizedSize}
+          onDownloadFrames={handleDownloadActionAnimatorFrames}
+          onDownloadVideo={() => void handleDownloadActionAnimatorVideo()}
           onActionTypeChange={(actionType) =>
             dispatch({ type: 'set-action-animator-action', actionType })
           }
@@ -2750,6 +2846,18 @@ function App() {
           }
           onFileSelect={(asset) =>
             dispatch({ type: 'set-action-animator-image', asset })
+          }
+          onFpsChange={(fps) =>
+            dispatch({ type: 'set-action-animator-fps', fps })
+          }
+          onFrameCountChange={(frameCount) =>
+            dispatch({ type: 'set-action-animator-frame-count', frameCount })
+          }
+          onKeyColorChange={(keyColor) =>
+            dispatch({ type: 'set-action-animator-key-color', keyColor })
+          }
+          onNormalizedSizeChange={(size) =>
+            dispatch({ type: 'set-action-animator-normalized-size', size })
           }
           onUseLatestCharacterSheet={() =>
             void hydrateLatestCharacterSheetInto({
@@ -3237,7 +3345,9 @@ function App() {
                         lastTextureLabRun.workflow === 'generate'
                       }
                       extraActionLabel={
-                        isPortraitStudioMode
+                        isActionAnimatorMode
+                          ? 'Download Frames'
+                          : isPortraitStudioMode
                           ? 'Download Faces'
                           : isVfxForgeMode && vfxTextureKind === 'flipbook'
                             ? 'Download Frames'
@@ -3260,7 +3370,9 @@ function App() {
                       onCopy={handleCopy}
                       onDownload={handleDownload}
                       onExtraAction={
-                        isPortraitStudioMode
+                        isActionAnimatorMode
+                          ? handleDownloadActionAnimatorFrames
+                          : isPortraitStudioMode
                           ? handleDownloadPortraitFaces
                           : isVfxForgeMode && vfxTextureKind === 'flipbook'
                             ? handleDownloadVfxFrames
@@ -3334,7 +3446,9 @@ function App() {
                         lastTextureLabRun.workflow === 'generate'
                       }
                       extraActionLabel={
-                        isPortraitStudioMode
+                        isActionAnimatorMode
+                          ? 'Download Frames'
+                          : isPortraitStudioMode
                           ? 'Download Faces'
                           : isVfxForgeMode && vfxTextureKind === 'flipbook'
                             ? 'Download Frames'
@@ -3357,7 +3471,9 @@ function App() {
                       onCopy={handleCopy}
                       onDownload={handleDownload}
                       onExtraAction={
-                        isPortraitStudioMode
+                        isActionAnimatorMode
+                          ? handleDownloadActionAnimatorFrames
+                          : isPortraitStudioMode
                           ? handleDownloadPortraitFaces
                           : isVfxForgeMode && vfxTextureKind === 'flipbook'
                             ? handleDownloadVfxFrames
@@ -3946,6 +4062,7 @@ function App() {
                     <ModelSelector
                       activeModel={activeModel}
                       availableModels={modeAvailableModels}
+                      mode={state.activeMode}
                       onSelect={handleModelSelect}
                     />
                   </div>
@@ -4010,26 +4127,45 @@ function App() {
                   </div>
                 ) : isActionAnimatorMode ? (
                   <div className={controlPanelFullSpanClassName}>
-                    <ActionAnimatorPanel
-                      actionType={state.actionAnimator.actionType}
-                      asset={state.actionAnimator.characterImage}
-                      canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
-                      customActionPrompt={state.actionAnimator.customActionPrompt}
-                      onActionTypeChange={(actionType) =>
-                        dispatch({ type: 'set-action-animator-action', actionType })
-                      }
-                      onCustomActionPromptChange={(prompt) =>
-                        dispatch({
-                          type: 'set-action-animator-custom-prompt',
-                          prompt,
-                        })
-                      }
-                      onFileSelect={(asset) =>
-                        dispatch({ type: 'set-action-animator-image', asset })
-                      }
-                      onUseLatestCharacterSheet={() =>
-                        void hydrateLatestCharacterSheetInto({
-                          type: 'set-action-animator-image',
+                  <ActionAnimatorPanel
+                    actionType={state.actionAnimator.actionType}
+                    asset={state.actionAnimator.characterImage}
+                    artifacts={actionAnimatorArtifacts}
+                    canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
+                    customActionPrompt={state.actionAnimator.customActionPrompt}
+                    fps={state.actionAnimator.fps}
+                    frameCount={state.actionAnimator.frameCount}
+                    keyColor={state.actionAnimator.keyColor}
+                    normalizedSize={state.actionAnimator.normalizedSize}
+                    onDownloadFrames={handleDownloadActionAnimatorFrames}
+                    onDownloadVideo={() => void handleDownloadActionAnimatorVideo()}
+                    onActionTypeChange={(actionType) =>
+                      dispatch({ type: 'set-action-animator-action', actionType })
+                    }
+                    onCustomActionPromptChange={(prompt) =>
+                      dispatch({
+                        type: 'set-action-animator-custom-prompt',
+                        prompt,
+                      })
+                    }
+                    onFileSelect={(asset) =>
+                      dispatch({ type: 'set-action-animator-image', asset })
+                    }
+                    onFpsChange={(fps) =>
+                      dispatch({ type: 'set-action-animator-fps', fps })
+                    }
+                    onFrameCountChange={(frameCount) =>
+                      dispatch({ type: 'set-action-animator-frame-count', frameCount })
+                    }
+                    onKeyColorChange={(keyColor) =>
+                      dispatch({ type: 'set-action-animator-key-color', keyColor })
+                    }
+                    onNormalizedSizeChange={(size) =>
+                      dispatch({ type: 'set-action-animator-normalized-size', size })
+                    }
+                    onUseLatestCharacterSheet={() =>
+                      void hydrateLatestCharacterSheetInto({
+                        type: 'set-action-animator-image',
                         })
                       }
                     />
@@ -4464,7 +4600,9 @@ function App() {
                                     lastTextureLabRun.workflow === 'generate'
                                   }
                                   extraActionLabel={
-                                    isPortraitStudioMode
+                                    isActionAnimatorMode
+                                      ? 'Download Frames'
+                                      : isPortraitStudioMode
                                       ? 'Download Faces'
                                       : isVfxForgeMode && vfxTextureKind === 'flipbook'
                                         ? 'Download Frames'
@@ -4487,7 +4625,9 @@ function App() {
                                   onCopy={handleCopy}
                                   onDownload={handleDownload}
                                   onExtraAction={
-                                    isPortraitStudioMode
+                                    isActionAnimatorMode
+                                      ? handleDownloadActionAnimatorFrames
+                                      : isPortraitStudioMode
                                       ? handleDownloadPortraitFaces
                                       : isVfxForgeMode && vfxTextureKind === 'flipbook'
                                         ? handleDownloadVfxFrames
@@ -4561,7 +4701,9 @@ function App() {
                                   lastTextureLabRun.workflow === 'generate'
                                 }
                                 extraActionLabel={
-                                  isPortraitStudioMode
+                                  isActionAnimatorMode
+                                    ? 'Download Frames'
+                                    : isPortraitStudioMode
                                     ? 'Download Faces'
                                     : isVfxForgeMode && vfxTextureKind === 'flipbook'
                                       ? 'Download Frames'
@@ -4584,7 +4726,9 @@ function App() {
                                 onCopy={handleCopy}
                                 onDownload={handleDownload}
                                 onExtraAction={
-                                  isPortraitStudioMode
+                                  isActionAnimatorMode
+                                    ? handleDownloadActionAnimatorFrames
+                                    : isPortraitStudioMode
                                     ? handleDownloadPortraitFaces
                                     : isVfxForgeMode && vfxTextureKind === 'flipbook'
                                       ? handleDownloadVfxFrames
@@ -5176,14 +5320,21 @@ function MetricCard({ label, value }: MetricCardProps) {
 type ModelSelectorProps = {
   activeModel: ModelId
   availableModels: ModelId[]
+  mode: ForgeMode
   onSelect: (model: ModelId) => void
 }
 
 function ModelSelector({
   activeModel,
   availableModels,
+  mode,
   onSelect,
 }: ModelSelectorProps) {
+  const visibleModels =
+    mode === 'action-animator'
+      ? (['veo-3.1-fast'] satisfies ModelId[])
+      : availableModels
+
   return (
     <section className="rounded-[22px] border border-white/10 bg-black/20 p-4">
       <div className="flex items-center justify-between">
@@ -5191,11 +5342,11 @@ function ModelSelector({
           Model Override
         </p>
         <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-400">
-          Smart Default + Manual
+          {mode === 'action-animator' ? 'Veo Only' : 'Smart Default + Manual'}
         </span>
       </div>
       <div className="mt-3 inline-flex w-full gap-2 rounded-full border border-white/10 bg-white/[0.02] p-1.5">
-        {availableModels.map((model) => {
+        {visibleModels.map((model) => {
           const isActive = activeModel === model
 
           return (
@@ -5834,24 +5985,83 @@ function CharacterSheetPanel({
 type ActionAnimatorPanelProps = {
   actionType: ActionAnimatorActionType
   asset: ReferenceAsset | null
+  artifacts: ActionAnimatorRunArtifacts | null
   canUseLatestCharacterSheet: boolean
   customActionPrompt: string
+  fps: number
+  frameCount: number
+  keyColor: ActionAnimatorKeyColor
+  normalizedSize: ActionAnimatorNormalizedSize
   onActionTypeChange: (actionType: ActionAnimatorActionType) => void
   onCustomActionPromptChange: (prompt: string) => void
+  onDownloadFrames: () => void
+  onDownloadVideo: () => void
   onFileSelect: (asset: ReferenceAsset | null) => void
+  onFpsChange: (fps: number) => void
+  onFrameCountChange: (frameCount: number) => void
+  onKeyColorChange: (keyColor: ActionAnimatorKeyColor) => void
+  onNormalizedSizeChange: (size: ActionAnimatorNormalizedSize) => void
   onUseLatestCharacterSheet: () => void
 }
 
 function ActionAnimatorPanel({
   actionType,
   asset,
+  artifacts,
   canUseLatestCharacterSheet,
   customActionPrompt,
+  fps,
+  frameCount,
+  keyColor,
+  normalizedSize,
   onActionTypeChange,
   onCustomActionPromptChange,
+  onDownloadFrames,
+  onDownloadVideo,
   onFileSelect,
+  onFpsChange,
+  onFrameCountChange,
+  onKeyColorChange,
+  onNormalizedSizeChange,
   onUseLatestCharacterSheet,
 }: ActionAnimatorPanelProps) {
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [previewIndex, setPreviewIndex] = useState(0)
+  const frames = artifacts?.frames ?? []
+  const currentFrame = frames[previewIndex] ?? null
+  const normalizedSizeOptions = getActionAnimatorNormalizedSizeOptions()
+
+  useEffect(() => {
+    setPreviewIndex(0)
+    setIsPlaying(false)
+  }, [artifacts?.spriteSheet.id, frameCount])
+
+  useEffect(() => {
+    if (!isPlaying || frames.length <= 1) {
+      return undefined
+    }
+
+    const intervalId = window.setInterval(() => {
+      setPreviewIndex((previousIndex) => (previousIndex + 1) % frames.length)
+    }, Math.max(33, Math.round(1000 / Math.max(1, fps))))
+
+    return () => {
+      window.clearInterval(intervalId)
+    }
+  }, [fps, frames, isPlaying])
+
+  function handleFrameDownload(frame: ForgeResult, index: number) {
+    const actionSlug =
+      actionType === 'custom'
+        ? slugifyFileSegment(customActionPrompt, 'custom')
+        : actionType
+
+    downloadDataUrl(
+      frame.dataUrl,
+      `kizer-forge-action-animator-${actionSlug}-frame-${String(index + 1).padStart(2, '0')}.png`,
+    )
+  }
+
   return (
     <section className="space-y-5 rounded-[24px] border border-white/10 bg-black/20 p-4">
       <div className="flex items-center justify-between gap-4">
@@ -5860,17 +6070,17 @@ function ActionAnimatorPanel({
             Action Animator
           </p>
           <p className="mt-2 text-sm font-medium text-white">
-            Bare scaffold only. We are keeping just the source image, action intent, and notes for the rewrite.
+            Generate a Veo clip, extract keyed frames server-side, and review the normalized sprite output before export.
           </p>
         </div>
-        <div className="rounded-full border border-amber-300/20 bg-amber-500/10 px-3 py-1 font-mono text-xs text-amber-100">
-          Rewrite scaffold
+        <div className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 font-mono text-xs text-cyan-100">
+          Veo video pipeline
         </div>
       </div>
 
       <ImageUploadField
         label="Character Image"
-        helper="Upload a character render, concept, or sheet to anchor the future rewrite."
+        helper="Upload the source character image Veo should preserve while generating motion."
         asset={asset}
         icon={ImagePlus}
         isRequired
@@ -5909,27 +6119,216 @@ function ActionAnimatorPanel({
           onChange={(event) => onCustomActionPromptChange(event.target.value)}
           placeholder={
             actionType === 'custom'
-              ? 'Describe the exact motion you want the rewrite to support.'
-              : 'Optional rewrite notes. Ex: heavier footfalls, stronger anticipation, aggressive lean.'
+              ? 'Describe the exact motion you want Veo to animate.'
+              : 'Optional motion notes. Ex: heavier footfalls, stronger anticipation, aggressive lean.'
           }
           rows={4}
           className="mt-4 w-full resize-none rounded-[18px] border border-white/10 bg-black/20 px-4 py-3 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-sky-300/35"
         />
         <p className="mt-3 text-xs leading-6 text-zinc-500">
           {actionType === 'custom'
-            ? 'Required for Custom. Capture the motion idea we should design around.'
-            : 'Optional. Capture rewrite notes without locking us into final controls yet.'}
+            ? 'Required for Custom. Describe the full motion arc you want extracted.'
+            : 'Optional. Add pose and timing notes without changing the character identity.'}
         </p>
       </div>
 
-      <div className="rounded-[22px] border border-dashed border-white/15 bg-white/[0.03] p-4">
-        <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-          Rewrite Scope
-        </p>
-        <p className="mt-2 text-sm text-zinc-300">
-          Generation, timing controls, preview playback, and export logic have been intentionally removed.
-          This tab now exists only to stage a source image and motion notes while we rebuild the animator from scratch.
-        </p>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex items-center justify-between">
+            <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Frames
+            </label>
+            <span className="text-xs text-zinc-400">{frameCount}</span>
+          </div>
+          <input
+            type="range"
+            min={4}
+            max={30}
+            step={1}
+            value={frameCount}
+            aria-label="Action Animator frame count"
+            onChange={(event) => onFrameCountChange(Number(event.target.value))}
+            className="mt-3 w-full cursor-pointer accent-cyan-400"
+          />
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Sample this many frames evenly across the generated video.
+          </p>
+        </div>
+
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex items-center justify-between">
+            <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Playback FPS
+            </label>
+            <span className="text-xs text-zinc-400">{fps}</span>
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={30}
+            step={1}
+            value={fps}
+            aria-label="Action Animator fps"
+            onChange={(event) => onFpsChange(Number(event.target.value))}
+            className="mt-3 w-full cursor-pointer accent-cyan-400"
+          />
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Controls the local preview speed and the target motion pacing.
+          </p>
+        </div>
+
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Key Color
+          </label>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            <ModeToggleButton
+              icon={Play}
+              isActive={keyColor === 'green'}
+              label="Green"
+              onClick={() => onKeyColorChange('green')}
+            />
+            <ModeToggleButton
+              icon={Sparkles}
+              isActive={keyColor === 'blue'}
+              label="Blue"
+              onClick={() => onKeyColorChange('blue')}
+            />
+          </div>
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Switch to blue when the character or effect already contains strong green values.
+          </p>
+        </div>
+
+        <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+          <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+            Output Size
+          </label>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            {normalizedSizeOptions.map((size) => (
+              <ModeToggleButton
+                key={size}
+                icon={Box}
+                isActive={normalizedSize === size}
+                label={`${size}px`}
+                onClick={() => onNormalizedSizeChange(size)}
+              />
+            ))}
+          </div>
+          <p className="mt-3 text-sm leading-6 text-zinc-400">
+            Frames are normalized onto square keyed canvases after extraction.
+          </p>
+        </div>
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Preview
+            </p>
+            <p className="mt-2 text-sm text-zinc-400">
+              {artifacts
+                ? `${artifacts.metadata.frameCount} frames extracted with even sampling on a ${artifacts.metadata.keyColor} key.`
+                : 'Run Action Animator to preview the returned frames and download the source video.'}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={frames.length <= 1}
+              onClick={() => setIsPlaying((previous) => !previous)}
+              className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isPlaying ? 'Pause Preview' : 'Play Preview'}
+            </button>
+            <button
+              type="button"
+              disabled={frames.length === 0}
+              onClick={onDownloadFrames}
+              className="rounded-full border border-white/10 bg-black/20 px-4 py-2 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Download Frames
+            </button>
+            <button
+              type="button"
+              disabled={!artifacts?.video}
+              onClick={onDownloadVideo}
+              className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-4 py-2 text-sm text-cyan-50 transition hover:border-cyan-300/35 hover:bg-cyan-400/16 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Download Video
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(260px,0.85fr)]">
+          <div className="rounded-[20px] border border-white/10 bg-black/30 p-4">
+            <div className="aspect-square overflow-hidden rounded-[18px] border border-white/10 bg-black/40">
+              {currentFrame ? (
+                <img
+                  alt={`Action Animator preview frame ${previewIndex + 1}`}
+                  className="h-full w-full object-contain"
+                  src={currentFrame.dataUrl}
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm text-zinc-500">
+                  No frames yet
+                </div>
+              )}
+            </div>
+            <p className="mt-3 text-sm text-zinc-400">
+              {currentFrame
+                ? `Frame ${previewIndex + 1} of ${frames.length}`
+                : 'The sprite preview will appear here after generation.'}
+            </p>
+          </div>
+
+          <div className="rounded-[20px] border border-white/10 bg-black/20 p-4">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              Frame Tiles
+            </p>
+            <div className="mt-4 grid max-h-[320px] grid-cols-3 gap-3 overflow-y-auto pr-1">
+              {(frames.length > 0
+                ? frames
+                : Array.from({ length: frameCount }, (_, index) => ({
+                    dataUrl: '',
+                    id: `placeholder-${index}`,
+                    mimeType: 'image/png',
+                  } as ForgeResult))).map((frame, index) => (
+                <button
+                  key={frame.id}
+                  type="button"
+                  disabled={!frame.dataUrl}
+                  onClick={() => {
+                    setPreviewIndex(index)
+                    if (frame.dataUrl) {
+                      handleFrameDownload(frame, index)
+                    }
+                  }}
+                  className={`overflow-hidden rounded-[16px] border p-2 text-left transition ${
+                    index === previewIndex
+                      ? 'border-cyan-300/30 bg-cyan-400/10'
+                      : 'border-white/10 bg-black/20'
+                  } disabled:cursor-default disabled:opacity-50`}
+                >
+                  <div className="aspect-square overflow-hidden rounded-[12px] bg-black/30">
+                    {frame.dataUrl ? (
+                      <img
+                        alt={`Action Animator frame ${index + 1}`}
+                        className="h-full w-full object-contain"
+                        src={frame.dataUrl}
+                      />
+                    ) : null}
+                  </div>
+                  <span className="mt-2 block text-xs text-zinc-300">Frame {index + 1}</span>
+                </button>
+              ))}
+            </div>
+            <p className="mt-3 text-xs leading-6 text-zinc-500">
+              Click a frame tile to focus it in the preview and download that frame immediately.
+            </p>
+          </div>
+        </div>
       </div>
     </section>
   )

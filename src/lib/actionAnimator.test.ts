@@ -7,12 +7,17 @@ const baseState: ActionAnimatorState = {
   actionType: 'walk',
   characterImage: null,
   customActionPrompt: '',
+  fps: 8,
+  frameCount: 8,
+  keyColor: 'green',
+  normalizedSize: 512,
+  pipeline: 'veo-video',
 }
 
 describe('action animator prompt helpers', () => {
-  it('describes the rewrite scaffold status', () => {
+  it('describes the Veo video extraction flow', () => {
     expect(buildActionAnimatorPrompt(baseState)).toContain(
-      'Legacy generation is intentionally disabled while the animation system is rebuilt.',
+      'Use a flat #00FF00 green chroma background',
     )
   })
 
@@ -22,6 +27,6 @@ describe('action animator prompt helpers', () => {
         ...baseState,
         customActionPrompt: 'Add heavier footfalls and a slight shoulder dip.',
       }),
-    ).toContain('Notes: Add heavier footfalls and a slight shoulder dip.')
+    ).toContain('Additional direction: Add heavier footfalls and a slight shoulder dip.')
   })
 })

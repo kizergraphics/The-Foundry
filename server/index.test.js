@@ -1,22 +1,40 @@
 import JSZip from 'jszip'
+import { spawn } from 'node:child_process'
+import os from 'node:os'
+import path from 'node:path'
+import fs from 'node:fs/promises'
 import request from 'supertest'
 import sharp from 'sharp'
+import ffmpegPath from 'ffmpeg-static'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const originalEnv = { ...process.env }
 
 vi.mock('@google/genai/node', () => {
   const generateContent = vi.fn()
+  const generateVideos = vi.fn()
+  const getVideosOperation = vi.fn()
+  const download = vi.fn()
   const GoogleGenAI = vi.fn(function GoogleGenAI() {
     this.models = {
       generateContent,
+      generateVideos,
+    }
+    this.operations = {
+      getVideosOperation,
+    }
+    this.files = {
+      download,
     }
   })
 
   return {
     GoogleGenAI,
     __mock: {
+      download,
       generateContent,
+      generateVideos,
+      getVideosOperation,
     },
   }
 })
@@ -53,6 +71,91 @@ async function createPngBase64(width, height, channelValues) {
     .png()
     .toBuffer()
     .then((buffer) => buffer.toString('base64'))
+}
+
+async function createActionAnimatorVideoBuffer() {
+  if (!ffmpegPath) {
+    throw new Error('ffmpeg-static is required for action animator route tests.')
+  }
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foundry-action-animator-test-'))
+  const framePattern = path.join(tempDir, 'frame-%02d.png')
+  const videoPath = path.join(tempDir, 'fixture.mp4')
+  const background = { alpha: 1, b: 0, g: 255, r: 0 }
+
+  try {
+    await Promise.all([
+      sharp({
+        create: {
+          background,
+          channels: 4,
+          height: 512,
+          width: 512,
+        },
+      })
+        .composite([
+          {
+            input: await sharp({
+              create: {
+                background: { alpha: 1, b: 255, g: 255, r: 255 },
+                channels: 4,
+                height: 220,
+                width: 140,
+              },
+            })
+              .png()
+              .toBuffer(),
+            left: 180,
+            top: 250,
+          },
+        ])
+        .png()
+        .toFile(path.join(tempDir, 'frame-01.png')),
+      sharp({
+        create: {
+          background,
+          channels: 4,
+          height: 512,
+          width: 512,
+        },
+      })
+        .composite([
+          {
+            input: await sharp({
+              create: {
+                background: { alpha: 1, b: 255, g: 255, r: 255 },
+                channels: 4,
+                height: 220,
+                width: 140,
+              },
+            })
+              .png()
+              .toBuffer(),
+            left: 210,
+            top: 250,
+          },
+        ])
+        .png()
+        .toFile(path.join(tempDir, 'frame-02.png')),
+    ])
+
+    await runBinaryProcess(ffmpegPath, [
+      '-y',
+      '-framerate',
+      '1',
+      '-i',
+      framePattern,
+      '-pix_fmt',
+      'yuv420p',
+      '-vf',
+      'format=yuv420p',
+      videoPath,
+    ])
+
+    return await fs.readFile(videoPath)
+  } finally {
+    await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
+  }
 }
 
 function buildImageGeneration(base64, mimeType = 'image/png') {
@@ -107,6 +210,29 @@ function buildBinaryParser() {
       callback(null, Buffer.concat(chunks))
     })
   }
+}
+
+async function runBinaryProcess(binaryPath, args) {
+  await new Promise((resolve, reject) => {
+    const child = spawn(binaryPath, args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let stderr = ''
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString()
+    })
+
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve(undefined)
+        return
+      }
+
+      reject(new Error(stderr || `Process exited with code ${code}.`))
+    })
+  })
 }
 
 describe('Texture Lab batch scheduling', () => {
@@ -679,6 +805,69 @@ describe('API hardening', () => {
       .toBuffer()
 
     expect(Buffer.compare(lowHeightNormal, highHeightNormal)).not.toBe(0)
+  })
+})
+
+describe('Action Animator route', () => {
+  it('returns video, sprite sheet, frames, and metadata for Veo extraction', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateVideos.mockReset()
+    __mock.getVideosOperation.mockReset()
+    __mock.download.mockReset()
+    const videoBuffer = await createActionAnimatorVideoBuffer()
+
+    __mock.generateVideos.mockResolvedValue({
+      done: true,
+      response: {
+        generatedVideos: [
+          {
+            video: {
+              uri: 'mock://generated-video',
+            },
+          },
+        ],
+      },
+    })
+    __mock.download.mockImplementation(async ({ downloadPath }) => {
+      await fs.writeFile(downloadPath, videoBuffer)
+    })
+
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/action-animator')
+      .send({
+        actionType: 'walk',
+        fps: 8,
+        frameCount: 4,
+        image: {
+          data: await createPngBase64(1, 1, [255, 255, 255]),
+          mimeType: 'image/png',
+        },
+        keyColor: 'green',
+        modelId: 'veo-3.1-fast',
+        normalizedSize: 512,
+        pipeline: 'veo-video',
+        prompt: 'Side-profile walk cycle on a green key background.',
+      })
+
+    expect(response.status).toBe(200)
+    expect(__mock.generateVideos).toHaveBeenCalledTimes(1)
+    expect(response.body.model).toBe('veo-3.1-fast')
+    expect(response.body.artifacts.metadata).toMatchObject({
+      fps: 8,
+      frameCount: 4,
+      keyColor: 'green',
+      normalizedSize: 512,
+      sampleStrategy: 'even',
+      sourceModel: 'veo-3.1-fast',
+    })
+    expect(response.body.artifacts.video.mimeType).toBe('video/mp4')
+    expect(response.body.artifacts.spriteSheet.mimeType).toBe('image/png')
+    expect(response.body.artifacts.frames).toHaveLength(4)
+    expect(response.body.prompt).toContain('green')
   })
 })
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  validateActionAnimatorRequest,
   validateVfxExportRequest,
   validateForgeRequest,
   validateMaterialMapsRequest,
@@ -169,6 +170,46 @@ describe('validateVariantForgeIdeaRequest', () => {
       textureOutputs: ['flipbook', 'noise'],
       unityPipeline: 'urp',
     })
+  })
+})
+
+describe('validateActionAnimatorRequest', () => {
+  it('accepts keyed Veo animator payloads and defaults optional values', () => {
+    expect(
+      validateActionAnimatorRequest({
+        fps: 10,
+        frameCount: 12,
+        image: {
+          data: validPngBase64,
+          mimeType: 'image/png',
+        },
+        keyColor: 'blue',
+        normalizedSize: 1080,
+      }),
+    ).toMatchObject({
+      actionType: 'idle',
+      fps: 10,
+      frameCount: 12,
+      image: {
+        mimeType: 'image/png',
+      },
+      keyColor: 'blue',
+      normalizedSize: 1080,
+      pipeline: 'veo-video',
+      prompt: '',
+    })
+  })
+
+  it('rejects unsupported key colors', () => {
+    expect(() =>
+      validateActionAnimatorRequest({
+        image: {
+          data: validPngBase64,
+          mimeType: 'image/png',
+        },
+        keyColor: 'magenta',
+      }),
+    ).toThrow()
   })
 })
 

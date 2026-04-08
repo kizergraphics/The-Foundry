@@ -52,6 +52,9 @@ export type UvLabAtlasSize = 1024 | 2048 | 4096
 export type GenerationCount = 1 | 2 | 3 | 4
 export type ForgeStatus = 'idle' | 'loading' | 'success' | 'error'
 export type ModelFormat = 'obj' | 'fbx'
+export type ActionAnimatorPipeline = 'veo-video'
+export type ActionAnimatorKeyColor = 'green' | 'blue'
+export type ActionAnimatorNormalizedSize = 512 | 1080
 export type ActionAnimatorActionType =
   | 'idle'
   | 'walk'
@@ -94,6 +97,11 @@ export type ActionAnimatorState = {
   actionType: ActionAnimatorActionType
   characterImage: ReferenceAsset | null
   customActionPrompt: string
+  frameCount: number
+  fps: number
+  keyColor: ActionAnimatorKeyColor
+  normalizedSize: ActionAnimatorNormalizedSize
+  pipeline: ActionAnimatorPipeline
 }
 
 export type CharacterSheetState = {
@@ -177,6 +185,11 @@ export type ForgeAction =
   | { type: 'set-action-animator-image'; asset: ReferenceAsset | null }
   | { type: 'set-action-animator-action'; actionType: ActionAnimatorActionType }
   | { type: 'set-action-animator-custom-prompt'; prompt: string }
+  | { type: 'set-action-animator-frame-count'; frameCount: number }
+  | { type: 'set-action-animator-fps'; fps: number }
+  | { type: 'set-action-animator-key-color'; keyColor: ActionAnimatorKeyColor }
+  | { type: 'set-action-animator-normalized-size'; size: ActionAnimatorNormalizedSize }
+  | { type: 'set-action-animator-pipeline'; pipeline: ActionAnimatorPipeline }
   | { type: 'set-character-sheet-mode'; mode: CharacterSheetGenerationMode }
   | { type: 'set-character-sheet-manifest'; prompt: string }
   | { type: 'set-character-sheet-reference-prompt'; prompt: string }
@@ -385,6 +398,8 @@ export const defaultTextureMaterialMapDefaults: TextureMaterialMapDefaults = {
   metallicStrength: 60,
 }
 
+export const actionAnimatorVideoFrameSizes = [512, 1080] as const
+
 function buildVariantForgeOptionState(enabled = false, customSetting = ''): VariantForgeOptionState {
   return {
     customSetting,
@@ -450,6 +465,11 @@ export const initialState: ForgeState = {
     actionType: 'idle',
     characterImage: null,
     customActionPrompt: '',
+    frameCount: 8,
+    fps: 8,
+    keyColor: 'green',
+    normalizedSize: 512,
+    pipeline: 'veo-video',
   },
   generationCount: 3,
   portraitStudio: {
@@ -557,6 +577,47 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         actionAnimator: {
           ...state.actionAnimator,
           customActionPrompt: action.prompt,
+        },
+      }
+    case 'set-action-animator-frame-count':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          frameCount: clampFrameCount(action.frameCount),
+        },
+      }
+    case 'set-action-animator-fps':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          fps: clampActionAnimatorFps(action.fps),
+        },
+      }
+    case 'set-action-animator-key-color':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          keyColor: action.keyColor,
+        },
+      }
+    case 'set-action-animator-normalized-size':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          normalizedSize: clampActionAnimatorNormalizedSize(action.size),
+        },
+      }
+    case 'set-action-animator-pipeline':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          normalizedSize: clampActionAnimatorNormalizedSize(state.actionAnimator.normalizedSize),
+          pipeline: action.pipeline,
         },
       }
     case 'set-texture-lab-workflow':
@@ -904,6 +965,28 @@ export function clampFrameCount(value: number) {
   }
 
   return Math.round(value)
+}
+
+export function clampActionAnimatorFps(value: number) {
+  if (value <= 1) {
+    return 1
+  }
+
+  if (value >= 30) {
+    return 30
+  }
+
+  return Math.round(value)
+}
+
+export function clampActionAnimatorNormalizedSize(
+  value: number,
+): ActionAnimatorNormalizedSize {
+  return Number(value) === 1080 ? 1080 : 512
+}
+
+export function getActionAnimatorNormalizedSizeOptions(): readonly ActionAnimatorNormalizedSize[] {
+  return actionAnimatorVideoFrameSizes
 }
 
 export function clampIntensity(value: number) {

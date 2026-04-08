@@ -6,6 +6,7 @@ import {
   buildVariantForgeIdeaPrompt,
   buildVariantForgePrompt,
   normalizeActionAnimatorFrameSize,
+  resolveActionAnimatorSampleFps,
   normalizeVariantForgeIdeaResponse,
   resolveVariantForgeSystemInstruction,
 } from './index.js'
@@ -20,14 +21,25 @@ describe('action animator server sizing helpers', () => {
   it('builds the ffmpeg matte filter using the requested square frame size', () => {
     const filter = buildAnimatorMatteFilter({
       frameSizePx: 1080,
+      keyColor: 'blue',
       sampleFps: 2,
     })
 
     expect(filter).toContain('fps=2')
     expect(filter).toContain('scale=1080:1080')
     expect(filter).toContain('pad=1080:1080')
+    expect(filter).toContain('chromakey=0x0000FF')
     expect(filter).toContain('format=rgba')
     expect(filter).not.toContain('overlay=')
+  })
+
+  it('derives evenly sampled extraction fps from frame count and duration', () => {
+    expect(
+      resolveActionAnimatorSampleFps({
+        durationSeconds: 4,
+        frameCount: 8,
+      }),
+    ).toBe(2)
   })
 
   it('keeps variant forge prompts free of fallback presets when no options are active', () => {

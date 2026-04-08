@@ -1,5 +1,8 @@
 import type {
   ActionAnimatorActionType,
+  ActionAnimatorKeyColor,
+  ActionAnimatorNormalizedSize,
+  ActionAnimatorPipeline,
   CharacterSheetGenerationMode,
   ForgeMode,
   GenerationCount,
@@ -16,6 +19,8 @@ import type {
 } from './forge'
 import { isForgeMode } from '../../shared/modeCatalog.js'
 import {
+  clampActionAnimatorFps,
+  clampActionAnimatorNormalizedSize,
   clampFrameCount,
   clampIntensity,
   clampTextureLabOutputSize,
@@ -50,6 +55,11 @@ import {
 type StoredActionAnimatorSettings = {
   actionType: ActionAnimatorActionType
   customActionPrompt: string
+  frameCount: number
+  fps: number
+  keyColor: ActionAnimatorKeyColor
+  normalizedSize: ActionAnimatorNormalizedSize
+  pipeline: ActionAnimatorPipeline
 }
 
 type StoredCharacterSheetSettings = {
@@ -337,6 +347,27 @@ export function loadStoredState(): StoredState | null {
             typeof parsed.settings?.actionAnimator?.customActionPrompt === 'string'
               ? parsed.settings.actionAnimator.customActionPrompt
               : '',
+          frameCount:
+            typeof parsed.settings?.actionAnimator?.frameCount === 'number' &&
+            Number.isFinite(parsed.settings.actionAnimator.frameCount)
+              ? clampFrameCount(parsed.settings.actionAnimator.frameCount)
+              : 8,
+          fps:
+            typeof parsed.settings?.actionAnimator?.fps === 'number' &&
+            Number.isFinite(parsed.settings.actionAnimator.fps)
+              ? clampActionAnimatorFps(parsed.settings.actionAnimator.fps)
+              : 8,
+          keyColor:
+            parsed.settings?.actionAnimator?.keyColor === 'blue'
+              ? 'blue'
+              : 'green',
+          normalizedSize: clampActionAnimatorNormalizedSize(
+            typeof parsed.settings?.actionAnimator?.normalizedSize === 'number' &&
+              Number.isFinite(parsed.settings.actionAnimator.normalizedSize)
+              ? parsed.settings.actionAnimator.normalizedSize
+              : 512,
+          ),
+          pipeline: 'veo-video',
         },
         characterSheet: {
           consistencyEnabled: Boolean(

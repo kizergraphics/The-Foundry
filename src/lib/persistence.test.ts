@@ -8,6 +8,11 @@ const baseStoredSettings = {
   actionAnimator: {
     actionType: 'idle' as const,
     customActionPrompt: '',
+    fps: 8,
+    frameCount: 8,
+    keyColor: 'green' as const,
+    normalizedSize: 512 as const,
+    pipeline: 'veo-video' as const,
   },
   characterSheet: {
     consistencyEnabled: false,
@@ -245,7 +250,7 @@ describe('persistStoredState', () => {
     })
   })
 
-  it('keeps only the scaffold animator fields when restoring state', () => {
+  it('restores the Veo animator settings with normalized values', () => {
     window.localStorage.setItem(
       'kizer-forge-state',
       JSON.stringify({
@@ -272,6 +277,11 @@ describe('persistStoredState', () => {
     expect(loadStoredState()?.settings.actionAnimator).toMatchObject({
       actionType: 'walk',
       customActionPrompt: 'Heavy forward lean.',
+      fps: 30,
+      frameCount: 30,
+      keyColor: 'green',
+      normalizedSize: 512,
+      pipeline: 'veo-video',
     })
   })
 

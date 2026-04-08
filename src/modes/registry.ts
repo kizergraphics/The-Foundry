@@ -125,7 +125,7 @@ export function getModePresentation({
     resultGridTitle: flags.isCharacterSheetMode
       ? 'Character sheet output slot'
       : flags.isActionAnimatorMode
-        ? 'Action Animator rewrite scaffold'
+        ? 'Action Animator sprite sheet'
         : flags.isVariantForgeMode
           ? 'Variant Forge output slot'
           : flags.isPortraitStudioMode
@@ -417,7 +417,7 @@ function getIsReadyForApi(state: ForgeState, flags: ModeFlags) {
   }
 
   if (flags.isActionAnimatorMode) {
-    return false
+    return Boolean(state.actionAnimator.characterImage)
   }
 
   if (flags.isVariantForgeMode) {
@@ -474,8 +474,8 @@ function getBriefItems(state: ForgeState, flags: ModeFlags): ForgeBriefItem[] {
         value: state.actionAnimator.characterImage?.name ?? 'Not attached',
       },
       {
-        label: 'Status',
-        value: 'Scaffold only',
+        label: 'Pipeline',
+        value: 'Veo Video',
       },
       {
         label: 'Action',
@@ -485,8 +485,12 @@ function getBriefItems(state: ForgeState, flags: ModeFlags): ForgeBriefItem[] {
             : state.actionAnimator.actionType,
       },
       {
-        label: 'Notes',
-        value: state.actionAnimator.customActionPrompt.trim() || 'None yet',
+        label: 'Frames',
+        value: `${state.actionAnimator.frameCount} @ ${state.actionAnimator.fps} fps`,
+      },
+      {
+        label: 'Key',
+        value: state.actionAnimator.keyColor === 'blue' ? 'Blue' : 'Green',
       },
     ]
   }
@@ -648,7 +652,7 @@ function getPrimaryActionLabel({
 }) {
   if (isForging) {
     if (flags.isActionAnimatorMode) {
-      return 'SCAFFOLD ONLY'
+      return 'GENERATING SPRITES'
     }
 
     if (flags.isCharacterSheetMode) {
@@ -679,7 +683,7 @@ function getPrimaryActionLabel({
   }
 
   if (flags.isActionAnimatorMode) {
-    return 'SCAFFOLD ONLY'
+    return 'GENERATE SPRITES'
   }
 
   if (flags.isCharacterSheetMode) {
@@ -722,7 +726,7 @@ function getPrimaryActionDescription({
 }) {
   if (isForging) {
     if (flags.isActionAnimatorMode) {
-      return 'Action Animator scaffold is active while the rewrite is in progress'
+      return 'Generating a Veo clip and extracting keyed sprite frames'
     }
 
     if (flags.isCharacterSheetMode) {
@@ -759,7 +763,7 @@ function getPrimaryActionDescription({
   }
 
   if (flags.isActionAnimatorMode) {
-    return 'Legacy animation generation is disabled while the new Action Animator is rebuilt'
+    return 'Character image staged for Veo-driven sprite extraction'
   }
 
   if (getIsReadyForApi(state, flags)) {
@@ -793,7 +797,7 @@ function getPrimaryActionDescription({
   }
 
   if (flags.isActionAnimatorMode) {
-    return 'Scaffold active: stage an image and notes for the rewrite'
+    return 'Attach a character image to generate keyed sprite frames'
   }
 
   if (flags.isVariantForgeMode) {
@@ -834,7 +838,7 @@ function getReadinessLabel({
     }
 
     if (flags.isActionAnimatorMode) {
-      return 'Scaffold only'
+      return 'Sprite extraction'
     }
 
     if (flags.isUvLabMode) {
@@ -865,7 +869,7 @@ function getReadinessLabel({
   }
 
   if (flags.isActionAnimatorMode) {
-    return 'Rewrite scaffold'
+    return 'Image required'
   }
 
   if (flags.isPortraitStudioMode || flags.isVariantForgeMode) {

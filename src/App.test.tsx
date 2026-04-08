@@ -703,6 +703,164 @@ describe('App VFX Forge flow', () => {
   })
 })
 
+describe('App Action Animator flow', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+
+  beforeEach(() => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+
+      if (url === '/api/health') {
+        return buildJsonResponse({ ok: true })
+      }
+
+      if (url === '/api/usage/telemetry') {
+        return buildJsonResponse({
+          generatedAt: new Date('2026-03-19T12:00:00.000Z').toISOString(),
+          rows: [],
+          source: 'local',
+          timeZone: 'America/Los_Angeles',
+        })
+      }
+
+      if (url === '/api/action-animator') {
+        return buildJsonResponse({
+          artifacts: {
+            frames: [
+              {
+                data: 'AAAA',
+                id: 'frame-01',
+                mimeType: 'image/png',
+              },
+              {
+                data: 'BBBB',
+                id: 'frame-02',
+                mimeType: 'image/png',
+              },
+            ],
+            metadata: {
+              fps: 10,
+              frameCount: 2,
+              keyColor: 'blue',
+              normalizedSize: 512,
+              prompt: 'Blue key prompt',
+              sampleStrategy: 'even',
+              sourceModel: 'veo-3.1-fast',
+            },
+            spriteSheet: {
+              data: 'CCCC',
+              id: 'sprite-sheet',
+              mimeType: 'image/png',
+            },
+            video: {
+              data: 'AAAA',
+              mimeType: 'video/mp4',
+            },
+          },
+          model: 'veo-3.1-fast',
+          prompt: 'Blue key prompt',
+        })
+      }
+
+      return buildJsonResponse({})
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+    installImageUploadMocks()
+    window.localStorage.clear()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    fetchMock.mockReset()
+    downloadBlobMock.mockReset()
+    downloadDataUrlMock.mockReset()
+    window.localStorage.clear()
+  })
+
+  it('shows Veo as the only model option in Action Animator', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByTestId('mode-tab-button-action-animator'))
+
+    const modelSelector = await screen.findByTestId('layout-item-model-selector')
+
+    expect(within(modelSelector).getByRole('button', { name: /Veo 3 Fast Generate/i })).toBeInTheDocument()
+    expect(
+      within(modelSelector).queryByRole('button', { name: /Gemini 3 Pro Image/i }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(modelSelector).queryByRole('button', { name: /Gemini 2.5 Flash Image/i }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('submits keyed Veo settings and exposes video and frame downloads', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByTestId('mode-tab-button-action-animator'))
+
+    const animatorPanel = await screen.findByTestId('layout-item-action-animator-panel')
+    const characterInput = animatorPanel.querySelector('input[type="file"]')
+
+    expect(characterInput).not.toBeNull()
+    if (!characterInput) {
+      throw new Error('Expected the Action Animator upload input to render.')
+    }
+
+    fireEvent.change(characterInput, {
+      target: {
+        files: [buildReferenceFile('hero.png')],
+      },
+    })
+
+    const frameSlider = await screen.findByLabelText('Action Animator frame count')
+    const fpsSlider = await screen.findByLabelText('Action Animator fps')
+
+    fireEvent.change(frameSlider, {
+      target: {
+        value: '12',
+      },
+    })
+    fireEvent.change(fpsSlider, {
+      target: {
+        value: '10',
+      },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Blue$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /generate sprites/i }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/action-animator')).toHaveLength(1)
+    })
+
+    const animatorRequest = JSON.parse(
+      String(fetchMock.mock.calls.find(([url]) => url === '/api/action-animator')?.[1]?.body ?? '{}'),
+    )
+
+    expect(animatorRequest).toMatchObject({
+      fps: 10,
+      frameCount: 12,
+      keyColor: 'blue',
+      modelId: 'veo-3.1-fast',
+      normalizedSize: 512,
+      pipeline: 'veo-video',
+    })
+
+    await screen.findByRole('button', { name: /Download Video/i })
+
+    fireEvent.click(within(animatorPanel).getByRole('button', { name: /Download Frames/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Download Video/i }))
+
+    await waitFor(() => {
+      expect(downloadDataUrlMock).toHaveBeenCalledTimes(2)
+    })
+    await waitFor(() => {
+      expect(downloadBlobMock).toHaveBeenCalledTimes(1)
+    })
+  })
+})
+
 describe('App persistent drag-and-drop layout', () => {
   const fetchMock = vi.fn<typeof fetch>()
 

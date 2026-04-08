@@ -1,9 +1,14 @@
+import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import dotenv from 'dotenv'
 import express from 'express'
 import { GoogleGenAI } from '@google/genai/node'
+import ffmpegPath from 'ffmpeg-static'
+import sharp from 'sharp'
 import {
   createConcurrencyLimiter,
   createCorsMiddleware,
@@ -12,6 +17,7 @@ import {
   createTokenAuthMiddleware,
 } from './requestGuards.js'
 import {
+  validateActionAnimatorRequest,
   toValidationResponse,
   validateCharacterSheetRequest,
   validateForgeRequest,
@@ -113,6 +119,7 @@ const internalApiToken = process.env.INTERNAL_API_TOKEN
 const enablePromptOrchestration = process.env.ENABLE_PROMPT_ORCHESTRATION === 'true'
 const forgeJsonLimit = process.env.FORGE_JSON_LIMIT ?? '12mb'
 const characterSheetJsonLimit = process.env.CHARACTER_SHEET_JSON_LIMIT ?? '14mb'
+const actionAnimatorJsonLimit = process.env.ACTION_ANIMATOR_JSON_LIMIT ?? '14mb'
 const modelRegistry = {
   'gemini-2.5-flash-image':
     process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
@@ -120,14 +127,18 @@ const modelRegistry = {
     process.env.GEMINI_FLASH_MODEL ?? 'gemini-3.1-flash-image-preview',
   'gemini-3-pro':
     process.env.GEMINI_PRO_MODEL ?? 'gemini-3-pro-image-preview',
+  'veo-3.1-fast':
+    process.env.GEMINI_VEO_MODEL ?? 'veo-3.1-fast-generate-preview',
 }
 const routeModelDefaults = {
+  '/api/action-animator': 'veo-3.1-fast',
   '/api/character-sheet': 'gemini-3-pro',
   '/api/forge': 'gemini-3-flash',
   '/api/material-maps': 'gemini-3-pro',
   '/api/variant-forge-ideas': 'gemini-3-flash',
 }
 const routeModelAllowlist = {
+  '/api/action-animator': ['veo-3.1-fast'],
   '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
   '/api/material-maps': ['gemini-3-pro', 'gemini-2.5-flash-image', 'gemini-3-flash'],
@@ -170,6 +181,22 @@ const forgeBatchInterRequestDelayMs = 250
 const forgeBatchRetryDelayMs = 1200
 const maxPromptOrchestrationWordCount = 24
 const maxPromptEnhancerWordCount = 9
+const actionAnimatorPollingIntervalMs = 10000
+const actionAnimatorTimeoutMs = 5 * 60 * 1000
+const minActionAnimatorDurationSeconds = 4
+const maxActionAnimatorDurationSeconds = 8
+const actionAnimatorDurationSeconds = clampActionAnimatorDurationSeconds(
+  Number(process.env.GEMINI_VEO_DURATION_SECONDS ?? minActionAnimatorDurationSeconds),
+)
+const actionAnimatorKeyColorHexById = {
+  blue: '0x0000FF',
+  green: '0x00FF00',
+}
+const actionAnimatorKeyColorCssById = {
+  blue: '#0000FF',
+  green: '#00FF00',
+}
+const defaultActionAnimatorFrameSizePx = 512
 const coreSystemRules = [
   'Always render assets on a neutral gray #808080 background.',
   'Never include text, logos, or watermarks in the image.',
@@ -180,6 +207,7 @@ const uvLabModelId = 'browser-uv-engine'
 const app = express()
 const parseForgeBody = express.json({ limit: forgeJsonLimit })
 const parseCharacterSheetBody = express.json({ limit: characterSheetJsonLimit })
+const parseActionAnimatorBody = express.json({ limit: actionAnimatorJsonLimit })
 const usageAuth = createTokenAuthMiddleware({
   allowLoopback: true,
   envToken: internalApiToken,
@@ -201,6 +229,10 @@ const characterSheetRateLimit = createRateLimiter({
   keyPrefix: 'character-sheet',
   maxRequests: Number(process.env.CHARACTER_SHEET_RATE_LIMIT_PER_MINUTE ?? 8),
 })
+const actionAnimatorRateLimit = createRateLimiter({
+  keyPrefix: 'action-animator',
+  maxRequests: Number(process.env.ACTION_ANIMATOR_RATE_LIMIT_PER_MINUTE ?? 6),
+})
 const forgeConcurrencyLimit = createConcurrencyLimiter({
   limit: Number(process.env.FORGE_MAX_IN_FLIGHT ?? 3),
   routeLabel: 'Forge',
@@ -208,6 +240,10 @@ const forgeConcurrencyLimit = createConcurrencyLimiter({
 const characterSheetConcurrencyLimit = createConcurrencyLimiter({
   limit: Number(process.env.CHARACTER_SHEET_MAX_IN_FLIGHT ?? 2),
   routeLabel: 'Character Sheet',
+})
+const actionAnimatorConcurrencyLimit = createConcurrencyLimiter({
+  limit: Number(process.env.ACTION_ANIMATOR_MAX_IN_FLIGHT ?? 1),
+  routeLabel: 'Action Animator',
 })
 
 app.use(createSecurityHeadersMiddleware())
@@ -239,6 +275,84 @@ app.get('/api/usage', usageAuth, async (request, response) => {
     })
   }
 })
+
+app.post(
+  '/api/action-animator',
+  optionalGenerationAuth,
+  actionAnimatorRateLimit,
+  actionAnimatorConcurrencyLimit,
+  parseActionAnimatorBody,
+  async (request, response) => {
+    if (!apiKey) {
+      response.status(500).json({
+        error:
+          'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
+      })
+      return
+    }
+
+    let validatedRequest
+
+    try {
+      validatedRequest = validateActionAnimatorRequest(request.body ?? {})
+    } catch (error) {
+      response.status(400).json(toValidationResponse(error))
+      return
+    }
+
+    const modelSelection = resolveModelForRoute('/api/action-animator', validatedRequest.modelId)
+
+    if (!modelSelection.ok) {
+      response.status(400).json({
+        error: {
+          code: 'model_unsupported',
+          details: modelSelection.details,
+          message: modelSelection.message,
+          title: 'Model Not Supported For This Tab',
+        },
+      })
+      return
+    }
+
+    const ai = new GoogleGenAI({ apiKey })
+
+    try {
+      const animatorResult = await generateAnimatorArtifacts({
+        actionType: validatedRequest.actionType,
+        ai,
+        fps: validatedRequest.fps,
+        frameCount: validatedRequest.frameCount,
+        frameSize: validatedRequest.normalizedSize,
+        image: validatedRequest.image,
+        keyColor: validatedRequest.keyColor,
+        modelSelection,
+        prompt: validatedRequest.prompt,
+      })
+
+      await recordUsageEvent({
+        model: modelSelection.modelId,
+        route: '/api/action-animator',
+        telemetryModel: resolveTelemetryModelId(
+          modelSelection.modelId,
+          '/api/action-animator',
+        ),
+      }).catch((logError) => {
+        console.warn('Telemetry logging failed for /api/action-animator:', logError)
+      })
+
+      response.json({
+        artifacts: animatorResult.artifacts,
+        model: modelSelection.modelId,
+        prompt: animatorResult.prompt,
+        providerModel: modelSelection.providerModel,
+      })
+    } catch (error) {
+      const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
+
+      response.status(normalizedError.status).json(normalizedError.body)
+    }
+  },
+)
 
 app.post(
   '/api/variant-forge-ideas',
@@ -2645,6 +2759,450 @@ function normalizeSeamRepair(seamRepair) {
       data: originalImage.data,
       mimeType: originalImage.mimeType,
     },
+  }
+}
+
+async function generateAnimatorArtifacts({
+  actionType,
+  ai,
+  fps,
+  frameCount,
+  frameSize,
+  image,
+  keyColor,
+  modelSelection,
+  prompt,
+}) {
+  const normalizedFrameSize = normalizeActionAnimatorFrameSize(frameSize)
+  const normalizedFps = clampActionAnimatorFps(fps)
+  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
+  const normalizedKeyColor = resolveActionAnimatorKeyColor(keyColor)
+  const normalizedPrompt = buildAnimatorPrompt({
+    actionType,
+    fps: normalizedFps,
+    frameCount: normalizedFrameCount,
+    keyColor: normalizedKeyColor,
+    prompt,
+  })
+  const sourceImage = {
+    imageBytes: image.data,
+    mimeType: image.mimeType,
+  }
+  const operation = await ai.models.generateVideos({
+    model: modelSelection.providerModel,
+    source: {
+      image: sourceImage,
+      prompt: normalizedPrompt,
+    },
+    config: {
+      durationSeconds: actionAnimatorDurationSeconds,
+      numberOfVideos: 1,
+      personGeneration: 'allow_adult',
+    },
+  })
+
+  const settledOperation = await waitForVideoOperation(ai, operation)
+  const video = settledOperation.response?.generatedVideos?.[0]?.video
+  const videoBuffer = await readGeneratedVideo(ai, video)
+  const artifactPayload = await createActionAnimatorArtifactsFromVideo({
+    frameCount: normalizedFrameCount,
+    frameSize: normalizedFrameSize,
+    fps: normalizedFps,
+    keyColor: normalizedKeyColor,
+    prompt: normalizedPrompt,
+    sourceModel: modelSelection.modelId,
+    videoBuffer,
+  })
+
+  return {
+    artifacts: artifactPayload,
+    prompt: normalizedPrompt,
+  }
+}
+
+async function waitForVideoOperation(ai, operation) {
+  const startedAt = Date.now()
+  let currentOperation = operation
+
+  while (!currentOperation.done) {
+    if (Date.now() - startedAt > actionAnimatorTimeoutMs) {
+      throw new Error('Veo video generation timed out before the operation completed.')
+    }
+
+    await sleep(actionAnimatorPollingIntervalMs)
+    currentOperation = await ai.operations.getVideosOperation({
+      operation: currentOperation,
+    })
+  }
+
+  if (currentOperation.error) {
+    throw new Error(JSON.stringify(currentOperation.error))
+  }
+
+  return currentOperation
+}
+
+async function readGeneratedVideo(ai, video) {
+  if (video?.videoBytes) {
+    return Buffer.from(video.videoBytes, 'base64')
+  }
+
+  if (typeof video?.uri === 'string' && video.uri.length > 0) {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-veo-download-'))
+    const downloadPath = path.join(tempDir, 'generated-video.mp4')
+
+    try {
+      if (ai.files?.download) {
+        await ai.files.download({
+          file: video,
+          downloadPath,
+        })
+
+        return await fs.readFile(downloadPath)
+      }
+
+      const videoResponse = await fetch(video.uri, {
+        headers: apiKey
+          ? {
+              'x-goog-api-key': apiKey,
+            }
+          : undefined,
+      })
+
+      if (!videoResponse.ok) {
+        throw new Error('Generated video could not be downloaded from the returned URI.')
+      }
+
+      return Buffer.from(await videoResponse.arrayBuffer())
+    } finally {
+      await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
+    }
+  }
+
+  throw new Error('Veo returned no downloadable video bytes for the animation request.')
+}
+
+async function createActionAnimatorArtifactsFromVideo({
+  frameCount,
+  frameSize,
+  fps,
+  keyColor,
+  prompt,
+  sourceModel,
+  videoBuffer,
+}) {
+  if (!ffmpegPath) {
+    throw new Error('ffmpeg-static is unavailable, so sprite extraction cannot run.')
+  }
+
+  const safeFrameCount = clampAnimatorFrameCount(frameCount)
+  const safeFrameSize = normalizeActionAnimatorFrameSize(frameSize)
+  const normalizedKeyColor = resolveActionAnimatorKeyColor(keyColor)
+  const sampleFps = resolveActionAnimatorSampleFps({
+    durationSeconds: actionAnimatorDurationSeconds,
+    frameCount: safeFrameCount,
+  })
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-action-animator-'))
+  const videoPath = path.join(tempDir, 'source.mp4')
+  const framePattern = path.join(tempDir, 'frame-%03d.png')
+
+  try {
+    await fs.writeFile(videoPath, videoBuffer)
+    await runFfmpeg([
+      '-y',
+      '-i',
+      videoPath,
+      '-filter_complex',
+      buildAnimatorMatteFilter({
+        frameSizePx: safeFrameSize,
+        keyColor: normalizedKeyColor,
+        sampleFps,
+      }),
+      '-map',
+      '[out]',
+      '-frames:v',
+      String(safeFrameCount),
+      '-start_number',
+      '1',
+      framePattern,
+    ])
+
+    const extractedFrameNames = (await fs.readdir(tempDir))
+      .filter((fileName) => /^frame-\d{3}\.png$/i.test(fileName))
+      .sort((left, right) => left.localeCompare(right))
+    const extractedFrames = await Promise.all(
+      extractedFrameNames.map((fileName) => fs.readFile(path.join(tempDir, fileName))),
+    )
+
+    if (extractedFrames.length === 0) {
+      throw new Error('Sprite extraction completed without any decoded frames.')
+    }
+
+    const rawFrames = extractedFrames.slice(0, safeFrameCount)
+
+    while (rawFrames.length < safeFrameCount) {
+      rawFrames.push(rawFrames.at(-1))
+    }
+
+    const normalizedFrames = await normalizeAnimatorFrameBuffers(rawFrames, {
+      keyColor: normalizedKeyColor,
+      targetSize: safeFrameSize,
+    })
+    const spriteSheetBuffer = await composeHorizontalSpriteSheet(normalizedFrames, safeFrameSize, normalizedKeyColor)
+
+    return {
+      frames: normalizedFrames.map((frameBuffer, index) => ({
+        data: frameBuffer.toString('base64'),
+        id: `action-animator-frame-${String(index + 1).padStart(2, '0')}`,
+        mimeType: 'image/png',
+        text: `Frame ${index + 1} of ${safeFrameCount}.`,
+      })),
+      metadata: {
+        fps,
+        frameCount: safeFrameCount,
+        keyColor: normalizedKeyColor,
+        normalizedSize: safeFrameSize,
+        prompt,
+        sampleStrategy: 'even',
+        sourceModel,
+      },
+      spriteSheet: {
+        data: spriteSheetBuffer.toString('base64'),
+        id: 'action-animator-sprite-sheet',
+        mimeType: 'image/png',
+        text:
+          `Generated ${safeFrameCount} keyed sprite frames from Veo 3.1 Fast at ${safeFrameSize} x ${safeFrameSize}. ` +
+          'Frames were sampled evenly across the full clip and normalized onto a flat chroma background.',
+      },
+      video: {
+        data: videoBuffer.toString('base64'),
+        mimeType: 'video/mp4',
+      },
+    }
+  } finally {
+    await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
+  }
+}
+
+async function normalizeAnimatorFrameBuffers(
+  frameBuffers,
+  {
+    keyColor,
+    targetSize,
+  },
+) {
+  const background = actionAnimatorKeyColorCssById[resolveActionAnimatorKeyColor(keyColor)]
+  const padding = Math.max(16, Math.round(targetSize * 0.0625))
+  const measuredFrames = await Promise.all(
+    frameBuffers.map(async (frameBuffer) => {
+      const trimmed = await sharp(frameBuffer)
+        .trim({ background })
+        .png()
+        .toBuffer({ resolveWithObject: true })
+
+      return {
+        buffer: trimmed.data,
+        height: trimmed.info.height,
+        width: trimmed.info.width,
+      }
+    }),
+  )
+  const maxWidth = Math.max(...measuredFrames.map((frame) => Math.max(1, frame.width)))
+  const maxHeight = Math.max(...measuredFrames.map((frame) => Math.max(1, frame.height)))
+  const scale = Math.min(
+    1,
+    (targetSize - padding * 2) / maxWidth,
+    (targetSize - padding * 2) / maxHeight,
+  )
+
+  return Promise.all(
+    measuredFrames.map(async (frame) => {
+      const outputWidth = Math.max(1, Math.round(frame.width * scale))
+      const outputHeight = Math.max(1, Math.round(frame.height * scale))
+      const resizedBuffer = await sharp(frame.buffer)
+        .resize(outputWidth, outputHeight, {
+          fit: 'fill',
+          kernel: sharp.kernel.nearest,
+        })
+        .png()
+        .toBuffer()
+
+      return sharp({
+        create: {
+          background,
+          channels: 4,
+          height: targetSize,
+          width: targetSize,
+        },
+      })
+        .composite([
+          {
+            input: resizedBuffer,
+            left: Math.round((targetSize - outputWidth) / 2),
+            top: targetSize - padding - outputHeight,
+          },
+        ])
+        .png()
+        .toBuffer()
+    }),
+  )
+}
+
+async function composeHorizontalSpriteSheet(frameBuffers, targetSize, keyColor) {
+  const background = actionAnimatorKeyColorCssById[resolveActionAnimatorKeyColor(keyColor)]
+
+  return sharp({
+    create: {
+      background,
+      channels: 4,
+      height: targetSize,
+      width: targetSize * frameBuffers.length,
+    },
+  })
+    .composite(
+      frameBuffers.map((frameBuffer, index) => ({
+        input: frameBuffer,
+        left: index * targetSize,
+        top: 0,
+      })),
+    )
+    .png()
+    .toBuffer()
+}
+
+function buildAnimatorPrompt({ actionType, fps, frameCount, keyColor, prompt }) {
+  const keyColorLabel = resolveActionAnimatorKeyColor(keyColor) === 'blue'
+    ? '#0000FF blue'
+    : '#00FF00 green'
+  const basePrompt =
+    typeof prompt === 'string' && prompt.trim().length > 0
+      ? prompt.trim()
+      : [
+          `Create a 2D side-profile ${actionType || 'idle'} cycle from the supplied character image.`,
+          `Target playback: ${frameCount} frames at ${fps} fps.`,
+        ].join(' ')
+
+  return [
+    basePrompt,
+    'Keep the camera locked in side view with no pans, zooms, or rotation.',
+    'Preserve the exact character identity, proportions, colors, clothing shapes, and silhouette from the reference image.',
+    'Keep the full body visible at a consistent scale with no floor plane, scenery, props, or extra characters.',
+    `Use a solid ${keyColorLabel} background that stays flat and consistent in every frame.`,
+    describeAnimatorMotion(actionType),
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+export function buildAnimatorMatteFilter(options = {}) {
+  const frameSizePx = normalizeActionAnimatorFrameSize(options.frameSizePx)
+  const keyColor = resolveActionAnimatorKeyColor(options.keyColor)
+  const keyColorHex = actionAnimatorKeyColorHexById[keyColor]
+  const filterSteps = []
+
+  if (typeof options.sampleFps === 'number' && Number.isFinite(options.sampleFps)) {
+    filterSteps.push(`fps=${Math.max(0.25, options.sampleFps)}`)
+  }
+
+  filterSteps.push(
+    `scale=${frameSizePx}:${frameSizePx}:force_original_aspect_ratio=decrease:flags=lanczos`,
+    `pad=${frameSizePx}:${frameSizePx}:(ow-iw)/2:(oh-ih)/2:color=${keyColorHex}`,
+    `chromakey=${keyColorHex}:0.22:0.06`,
+    'colorkey=0xFFFFFF:0.18:0.05',
+    'format=rgba',
+  )
+
+  return `[0:v]${filterSteps.join(',')}[out]`
+}
+
+export function normalizeActionAnimatorFrameSize(value) {
+  return Number(value) === 1080 ? 1080 : defaultActionAnimatorFrameSizePx
+}
+
+export function resolveActionAnimatorKeyColor(value) {
+  return value === 'blue' ? 'blue' : 'green'
+}
+
+export function resolveActionAnimatorSampleFps(options = {}) {
+  const durationSeconds = clampActionAnimatorDurationSeconds(options.durationSeconds)
+  const frameCount = clampAnimatorFrameCount(options.frameCount)
+
+  return Math.max(0.25, frameCount / durationSeconds)
+}
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const process = spawn(ffmpegPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stderr = ''
+
+    process.stderr.on('data', (chunk) => {
+      stderr += chunk.toString()
+    })
+
+    process.on('error', (error) => {
+      reject(error)
+    })
+
+    process.on('close', (code) => {
+      if (code === 0) {
+        resolve()
+        return
+      }
+
+      reject(new Error(stderr || `ffmpeg exited with code ${code}.`))
+    })
+  })
+}
+
+function clampAnimatorFrameCount(frameCount) {
+  const numericValue = Number(frameCount)
+
+  if (!Number.isFinite(numericValue)) {
+    return 8
+  }
+
+  return Math.max(4, Math.min(30, Math.round(numericValue)))
+}
+
+function clampActionAnimatorFps(fps) {
+  const numericValue = Number(fps)
+
+  if (!Number.isFinite(numericValue)) {
+    return 8
+  }
+
+  return Math.max(1, Math.min(30, Math.round(numericValue)))
+}
+
+function clampActionAnimatorDurationSeconds(durationSeconds) {
+  const numericValue = Number(durationSeconds)
+
+  if (!Number.isFinite(numericValue)) {
+    return minActionAnimatorDurationSeconds
+  }
+
+  return Math.max(
+    minActionAnimatorDurationSeconds,
+    Math.min(maxActionAnimatorDurationSeconds, Math.round(numericValue)),
+  )
+}
+
+function describeAnimatorMotion(actionType) {
+  switch (actionType) {
+    case 'attack':
+      return 'Stage one complete attack cycle with anticipation, a decisive strike, follow-through, and recovery so adjacent frames show obvious motion.'
+    case 'jump':
+      return 'Stage one complete jump with crouch, launch, airborne apex, and landing, making each phase visually distinct.'
+    case 'run':
+      return 'Emphasize aggressive forward lean, arm swing, leg extension, and airborne stride changes for a readable run cycle.'
+    case 'walk':
+      return 'Emphasize alternating contact, passing, and recoil poses so the walk cycle has clear readable spacing.'
+    case 'idle':
+      return 'Keep the idle subtle but still readable, with weight shift, cloth drag, and arm movement that changes the silhouette.'
+    default:
+      return 'Show one complete readable action arc with strong silhouette changes and no duplicate adjacent poses.'
   }
 }
 
