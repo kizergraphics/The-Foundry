@@ -1,6 +1,20 @@
 export const telemetryModelDefinitions = [
   {
     category: 'Multi-modal generative models',
+    id: 'gpt-image-2',
+    label: 'OpenAI GPT Image 2',
+    limits: {
+      rpm: null,
+      rpd: null,
+      tpm: null,
+    },
+    metricFamily: 'generate',
+    modelAliases: ['openai-gpt-image-2'],
+    modelMatchers: ['gpt-image-2'],
+    provider: 'openai',
+  },
+  {
+    category: 'Multi-modal generative models',
     id: 'nano-banana-pro',
     label: 'Nano Banana Pro (Gemini 3 Pro Image)',
     limits: {
@@ -11,6 +25,7 @@ export const telemetryModelDefinitions = [
     metricFamily: 'generate',
     modelAliases: ['gemini-3-pro'],
     modelMatchers: ['gemini-3-pro-image'],
+    provider: 'google',
   },
   {
     category: 'Multi-modal generative models',
@@ -24,6 +39,7 @@ export const telemetryModelDefinitions = [
     metricFamily: 'video',
     modelAliases: ['veo-3.1-fast'],
     modelMatchers: ['veo-3.1-fast-generate', 'veo-3.0-fast-generate'],
+    provider: 'google',
   },
   {
     category: 'Multi-modal generative models',
@@ -37,6 +53,7 @@ export const telemetryModelDefinitions = [
     metricFamily: 'generate',
     modelAliases: ['gemini-3-flash'],
     modelMatchers: ['gemini-3.1-flash-image'],
+    provider: 'google',
   },
   {
     category: 'Multi-modal generative models',
@@ -50,6 +67,7 @@ export const telemetryModelDefinitions = [
     metricFamily: 'generate',
     modelAliases: ['gemini-2.5-flash-image'],
     modelMatchers: ['gemini-2.5-flash-preview-image'],
+    provider: 'google',
   },
   {
     category: 'Text-out models',
@@ -63,6 +81,7 @@ export const telemetryModelDefinitions = [
     metricFamily: 'generate',
     modelAliases: [],
     modelMatchers: ['gemini-3.1-flash', 'gemini-3-flash'],
+    provider: 'google',
   },
   {
     category: 'Text-out models',
@@ -76,6 +95,7 @@ export const telemetryModelDefinitions = [
     metricFamily: 'generate',
     modelAliases: [],
     modelMatchers: ['gemini-2.5-flash'],
+    provider: 'google',
   },
 ]
 

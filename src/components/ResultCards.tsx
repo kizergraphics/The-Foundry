@@ -135,7 +135,7 @@ export const PlaceholderCard = memo(function PlaceholderCard({
               </div>
             </div>
             <p className="text-center font-mono text-[11px] uppercase tracking-[0.28em] text-zinc-500">
-              {statusLabel ?? (isLoading ? 'Generating with Gemini' : 'Ready for forge pass')}
+              {statusLabel ?? (isLoading ? 'Generating image candidate' : 'Ready for forge pass')}
             </p>
           </div>
         )}
@@ -209,7 +209,7 @@ export const GeneratedResultCard = memo(function GeneratedResultCard({
       </div>
 
       <p className="mt-4 line-clamp-3 min-h-[3.75rem] text-sm leading-6 text-zinc-400">
-        {result.text ?? 'Generated image candidate returned from Gemini.'}
+        {result.text ?? 'Generated image candidate returned from the active image model.'}
       </p>
 
       <PaletteDisplay colors={result.paletteHexes ?? []} />

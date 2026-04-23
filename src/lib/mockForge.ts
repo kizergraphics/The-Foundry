@@ -80,7 +80,7 @@ export function buildMockResults({
       id: `mock-${mode}-${index + 1}`,
       mimeType: 'image/svg+xml',
       paletteHexes: mockPalettes[mode],
-      text: `Mock output ${index + 1} for ${modeAccents[mode].label}. Generated locally so you can continue UI work without live Gemini quota.`,
+      text: `Mock output ${index + 1} for ${modeAccents[mode].label}. Generated locally so you can continue UI work without live provider access.`,
     }
   })
 }
@@ -139,7 +139,7 @@ function buildMockSvg({
         .join('')}
       <rect x="88" y="${mode === 'character-sheet' ? 612 : 858}" width="${width - 176}" height="${mode === 'character-sheet' ? 188 : 220}" rx="24" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
       <text x="128" y="${mode === 'character-sheet' ? 666 : 928}" fill="rgba(226,232,240,0.72)" font-size="18" font-family="monospace" letter-spacing="2">WHY YOU ARE SEEING THIS</text>
-      <text x="128" y="${mode === 'character-sheet' ? 718 : 986}" fill="#F8FAFC" font-size="30" font-family="Space Grotesk, sans-serif">Gemini quota or auth is unavailable, so Kizer Forge generated a local</text>
+      <text x="128" y="${mode === 'character-sheet' ? 718 : 986}" fill="#F8FAFC" font-size="30" font-family="Space Grotesk, sans-serif">Live provider access is unavailable, so Kizer Forge generated a local</text>
       <text x="128" y="${mode === 'character-sheet' ? 762 : 1034}" fill="#F8FAFC" font-size="30" font-family="Space Grotesk, sans-serif">stand-in result. UI, layout, downloads, and asset review can still move forward.</text>
     </svg>
   `.trim()

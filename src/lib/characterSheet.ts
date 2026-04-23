@@ -6,7 +6,7 @@ import type {
   ForgeResult,
 } from './forge'
 
-export const defaultCharacterSheetModel = 'gemini-3-pro'
+export const defaultCharacterSheetModel = 'openai-gpt-image-2'
 
 export type CharacterSheetReferenceRole =
   | 'Identity_Reference'

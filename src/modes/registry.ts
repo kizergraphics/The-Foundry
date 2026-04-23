@@ -730,7 +730,7 @@ function getPrimaryActionDescription({
     }
 
     if (flags.isCharacterSheetMode) {
-      return 'Sending character sheet request to Gemini'
+      return 'Sending character sheet request to the selected image model'
     }
 
     if (flags.isVariantForgeMode) {
@@ -746,7 +746,7 @@ function getPrimaryActionDescription({
     }
 
     if (flags.isTextureExpansionMode) {
-      return 'Sending centered outpaint canvas to Gemini 3 Pro'
+      return 'Sending centered outpaint canvas to the selected image model'
     }
 
     if (flags.isVfxForgeMode) {
@@ -755,7 +755,7 @@ function getPrimaryActionDescription({
         : `Generating ${state.vfxForge.textureOutputs.length} VFX output${state.vfxForge.textureOutputs.length === 1 ? '' : 's'} for ${getVfxExportTargetLabel(state.vfxForge.exportTarget)} export`
     }
 
-    return 'Sending prompt and references to Gemini'
+    return 'Sending prompt and references to the selected image model'
   }
 
   if (!selectedModelSupported) {

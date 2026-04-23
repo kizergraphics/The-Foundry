@@ -618,7 +618,7 @@ function buildTextureMaterialPackState(
 function buildForgeBatchSlots(count: number): ForgeBatchSlotState[] {
   return Array.from({ length: count }, () => ({
     attempt: 1,
-    detail: 'Queued for Gemini image generation.',
+    detail: 'Queued for image generation.',
     error: null,
     result: null,
     status: 'queued',
@@ -1065,7 +1065,7 @@ function App() {
     },
     (_, index) => index,
   )
-  const effectiveModel = isTextureExpansionMode ? 'gemini-3-pro' : activeModel
+  const effectiveModel = activeModel
   const activeModelName = serverModel ?? effectiveModel
   const selectedTelemetryModel = effectiveModel
   const highlightedTelemetryRowId =
@@ -1590,7 +1590,7 @@ function App() {
           attempt,
           detail:
             attempt === 1
-              ? 'Generating with Gemini.'
+              ? 'Generating image candidate.'
               : `Retrying after the previous attempt stalled. Attempt ${attempt} of ${maxAttempts}.`,
           error: null,
           status: attempt === 1 ? 'generating' : 'retrying',
@@ -1681,10 +1681,10 @@ function App() {
             ...slot,
             detail:
               normalizedError.code === 'quota_exceeded'
-                ? `Gemini rate-limited this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
+                ? `The active provider rate-limited this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
                 : normalizedError.code === 'model_output_incompatible'
-                  ? `Gemini returned no image for this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
-                  : `Gemini timed out on this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`,
+                  ? `The active model returned no image for this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
+                  : `The active provider timed out on this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`,
             error: normalizedError,
             status:
               normalizedError.code === 'quota_exceeded'
@@ -2398,7 +2398,7 @@ function App() {
         },
       }))
       setNotice('Material maps are ready below the selected texture.')
-      registerSuccessfulApiCall(payload.model ?? 'gemini-3-pro')
+      registerSuccessfulApiCall(payload.model ?? activeModel)
     } catch (materialMapError) {
       const nextError = toForgeError(materialMapError, 'Material Maps Failed')
 
@@ -2422,6 +2422,7 @@ function App() {
       setError(nextError)
     }
   }, [
+    activeModel,
     activeStyleInput,
     lastTextureLabRun?.prompt,
     lastTextureLabRun?.styleText,
@@ -2620,7 +2621,7 @@ function App() {
         },
         body: JSON.stringify({
           mode: 'texture-lab',
-          modelId: 'gemini-3-pro',
+          modelId: activeModel,
           prompt: repairContext.prompt,
           seamRepair: {
             offsetImage: {
@@ -2680,13 +2681,13 @@ function App() {
       setNotice('Seam repair pass completed for the selected texture.')
       setLastSavedAt(new Date().toISOString())
       setLastResultMode('texture-lab')
-      registerSuccessfulApiCall(payload.model ?? 'gemini-3-pro')
+      registerSuccessfulApiCall(payload.model ?? activeModel)
     } catch (repairError) {
       setError(toForgeError(repairError, 'Seam Repair Failed'))
     } finally {
       setRepairingResultId(null)
     }
-  }, [lastTextureLabRun, registerSuccessfulApiCall, serverModel, serverPrompt])
+  }, [activeModel, lastTextureLabRun, registerSuccessfulApiCall, serverModel, serverPrompt])
 
   async function handleMockForge() {
     const rawMockResults = buildMockResults({
@@ -2719,7 +2720,7 @@ function App() {
       promptPreview,
       isCharacterSheetMode
         ? 'Showing local mock character-sheet results so you can keep iterating on layout, palette, and review flow.'
-        : 'Showing local mock results so you can continue product work without live Gemini quota.',
+        : 'Showing local mock results so you can continue product work without live provider access.',
       {
         runContext: isTextureLabMode
           ? {
@@ -3769,7 +3770,7 @@ function App() {
                   : 'Ready for local unwrap execution'
                 : activeModelName
                   ? `${activeModelName} response stream`
-                  : 'Ready for Gemini execution'}
+                  : 'Ready for model execution'}
             </div>
           </div>
 
@@ -4500,7 +4501,7 @@ function App() {
                         : 'Ready for local unwrap execution'
                       : activeModelName
                         ? `${activeModelName} response stream`
-                        : 'Ready for Gemini execution'}
+                        : 'Ready for model execution'}
                   </div>
                 </div>
 
@@ -5073,7 +5074,7 @@ function TelemetryStatusCard({
             Live Telemetry
           </p>
           <p className="mt-2 text-sm text-zinc-300">
-            Auto-refreshing usage from the local log, with Google telemetry folded in when it
+            Auto-refreshing usage from the local log, with provider telemetry folded in when it
             catches up.
           </p>
         </div>
@@ -5139,7 +5140,7 @@ function TelemetryTableCard({
           </h2>
           <p className="mt-2 max-w-3xl text-sm text-zinc-400">
             RPM and RPD numbers shift from green to red as usage climbs. TPM uses live
-            token totals when Gemini returns usage metadata.
+            token totals when the active provider returns usage metadata.
           </p>
         </div>
         <p className="text-xs text-zinc-500">{telemetryRefreshLabel}</p>
@@ -5147,7 +5148,7 @@ function TelemetryTableCard({
 
       {telemetryError ? (
         <div className="mt-4 whitespace-pre-line rounded-[18px] border border-rose-300/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
-          Google telemetry is delayed or unavailable. Showing the live local usage log instead.
+          Provider telemetry is delayed or unavailable. Showing the live local usage log instead.
           {' '}
           {telemetryError}
         </div>
@@ -5704,9 +5705,9 @@ function TextureLabWorkflowPanel({
             Expansion Strategy
           </p>
           <p className="mt-2 text-sm leading-6 text-emerald-50">
-            The source texture is centered on a larger transparent canvas, then Gemini
-            fills the outer space while keeping the final map tile-safe. This workflow
-            routes through Gemini 3 Pro for the edit pass using the selected output size.
+            The source texture is centered on a larger transparent canvas, then the selected
+            image model fills the outer space while keeping the final map tile-safe. This
+            workflow uses the active model for the edit pass at the selected output size.
           </p>
         </div>
       ) : null}
@@ -5729,7 +5730,7 @@ function TextureExpansionPanel({
     <section className="space-y-4 rounded-[24px] border border-white/10 bg-black/20 p-4">
       <ImageUploadField
         label="Source Texture"
-        helper="Required. This image is centered on a larger transparent canvas before Gemini expands the surrounding material."
+        helper="Required. This image is centered on a larger transparent canvas before the selected image model expands the surrounding material."
         asset={asset}
         icon={ImagePlus}
         isRequired
@@ -5742,7 +5743,7 @@ function TextureExpansionPanel({
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-300">
           <li>The source is shrunk into the center 25% of the canvas area.</li>
-          <li>Gemini receives both the centered canvas and the original texture as reference.</li>
+          <li>The selected image model receives both the centered canvas and the original texture as reference.</li>
           <li>New edges are instructed to match opposite sides so the expanded result still tiles cleanly.</li>
           <li>Target canvas: {targetSize} x {targetSize}.</li>
         </ul>
@@ -7383,7 +7384,7 @@ function ForgeBrief({
 
       <div className="rounded-[28px] border border-white/10 bg-black/20 p-5">
         <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-          Gemini Status
+          Provider Status
         </p>
         <ul className="mt-4 space-y-3">
           <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
@@ -7394,7 +7395,7 @@ function ForgeBrief({
             Server health only exposes availability status. Credential state stays server-side.
           </li>
           <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
-            If live Gemini is blocked, use mock forge outputs to keep iterating on layout, downloads, palette extraction, and review flow.
+            If live provider access is blocked, use mock forge outputs to keep iterating on layout, downloads, palette extraction, and review flow.
           </li>
           <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
             Last saved session: {lastSavedAt ? new Date(lastSavedAt).toLocaleString() : 'none yet'}.
@@ -7426,7 +7427,7 @@ function ForgeBrief({
           onClick={onRefreshHealth}
           className="mt-4 rounded-full border border-white/10 bg-white/[0.03] px-4 py-2 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
         >
-          Refresh Gemini Status
+          Refresh Provider Status
         </button>
       </div>
     </div>

@@ -46,6 +46,11 @@ import {
   isGoogleTelemetryConfigured,
 } from './googleQuotaTelemetry.js'
 import {
+  getOpenAiTelemetrySnapshot,
+  isOpenAiTelemetryConfigured,
+  recordOpenAiRateLimitSnapshot,
+} from './openaiTelemetry.js'
+import {
   formatVariantForgeLabel,
   isVariantForgeFamily,
   isVariantForgePresetForFamily,
@@ -113,6 +118,9 @@ const port = Number(process.env.PORT ?? 3001)
 const apiKey =
   process.env.GEMINI_API_KEY ??
   process.env.GOOGLE_API_KEY
+const openAiApiKey = process.env.OPENAI_API_KEY
+const openAiOrganizationId = process.env.OPENAI_ORGANIZATION_ID
+const openAiProjectId = process.env.OPENAI_PROJECT_ID
 const allowedCorsOrigin = process.env.CORS_ORIGIN
 const generationApiToken = process.env.FORGE_API_TOKEN
 const internalApiToken = process.env.INTERNAL_API_TOKEN
@@ -127,21 +135,40 @@ const modelRegistry = {
     process.env.GEMINI_FLASH_MODEL ?? 'gemini-3.1-flash-image-preview',
   'gemini-3-pro':
     process.env.GEMINI_PRO_MODEL ?? 'gemini-3-pro-image-preview',
+  'openai-gpt-image-2':
+    process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
   'veo-3.1-fast':
     process.env.GEMINI_VEO_MODEL ?? 'veo-3.1-fast-generate-preview',
 }
+const modelProviderRegistry = {
+  'gemini-2.5-flash-image': 'google',
+  'gemini-3-flash': 'google',
+  'gemini-3-pro': 'google',
+  'openai-gpt-image-2': 'openai',
+  'veo-3.1-fast': 'google',
+}
 const routeModelDefaults = {
   '/api/action-animator': 'veo-3.1-fast',
-  '/api/character-sheet': 'gemini-3-pro',
-  '/api/forge': 'gemini-3-flash',
+  '/api/character-sheet': 'openai-gpt-image-2',
+  '/api/forge': 'openai-gpt-image-2',
   '/api/material-maps': 'gemini-3-pro',
   '/api/variant-forge-ideas': 'gemini-3-flash',
 }
 const routeModelAllowlist = {
   '/api/action-animator': ['veo-3.1-fast'],
-  '/api/character-sheet': ['gemini-3-pro', 'gemini-3-flash'],
-  '/api/forge': ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image'],
-  '/api/material-maps': ['gemini-3-pro', 'gemini-2.5-flash-image', 'gemini-3-flash'],
+  '/api/character-sheet': ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash'],
+  '/api/forge': [
+    'openai-gpt-image-2',
+    'gemini-3-pro',
+    'gemini-3-flash',
+    'gemini-2.5-flash-image',
+  ],
+  '/api/material-maps': [
+    'openai-gpt-image-2',
+    'gemini-3-pro',
+    'gemini-2.5-flash-image',
+    'gemini-3-flash',
+  ],
   '/api/variant-forge-ideas': ['gemini-3-flash'],
 }
 const supportedForgeModes = forgeApiModes
@@ -347,7 +374,11 @@ app.post(
         providerModel: modelSelection.providerModel,
       })
     } catch (error) {
-      const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
+      const normalizedError = normalizeGenerationError(
+        error,
+        modelSelection.modelId,
+        modelSelection.provider,
+      )
 
       response.status(normalizedError.status).json(normalizedError.body)
     }
@@ -442,14 +473,6 @@ app.post(
   forgeConcurrencyLimit,
   parseForgeBody,
   async (request, response) => {
-  if (!apiKey) {
-    response.status(500).json({
-      error:
-        'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
-    })
-    return
-  }
-
   let validatedRequest
 
   try {
@@ -529,10 +552,7 @@ app.post(
     requestedWorkflow === 'expand-texture' || requestedWorkflow === 'repair-seams'
       ? 1
       : Math.min(Math.max(Number(generationCount) || 1, 1), 4)
-  const modelSelection =
-    requestedWorkflow === 'expand-texture' || requestedWorkflow === 'repair-seams'
-      ? resolveModelForRoute('/api/forge', 'gemini-3-pro')
-      : resolveModelForRoute('/api/forge', modelId)
+  const modelSelection = resolveModelForRoute('/api/forge', modelId)
 
   if (!modelSelection.ok) {
     response.status(400).json({
@@ -555,7 +575,7 @@ app.post(
       )
     : []
 
-  const ai = new GoogleGenAI({ apiKey })
+  const ai = apiKey ? new GoogleGenAI({ apiKey }) : null
 
   try {
     const providedStyleText =
@@ -667,31 +687,17 @@ app.post(
         return
       }
 
-      const generation = await ai.models.generateContent({
-        model: modelSelection.providerModel,
-        contents: [
-          { text: finalPrompt },
-          {
-            inlineData: {
-              mimeType: validExpansion.canvasImage.mimeType,
-              data: validExpansion.canvasImage.data,
-            },
-          },
-          {
-            inlineData: {
-              mimeType: validExpansion.sourceImage.mimeType,
-              data: validExpansion.sourceImage.data,
-            },
-          },
-        ],
-        config: {
-          candidateCount: 1,
-          responseModalities: ['IMAGE', 'TEXT'],
-          systemInstruction: resolvedSystemInstruction,
-        },
+      const generation = await generateImagesWithModel({
+        candidateCount: 1,
+        modelSelection,
+        prompt: finalPrompt,
+        references: [validExpansion.canvasImage, validExpansion.sourceImage],
+        routeKey: '/api/forge',
+        size: '1024x1024',
+        systemInstruction: resolvedSystemInstruction,
+        timeoutMs: textureLabGenerationTimeoutMs,
       })
-
-      const images = extractImages(generation).slice(0, 1)
+      const images = generation.images
 
       if (images.length === 0) {
         response
@@ -704,7 +710,7 @@ app.post(
         model: modelSelection.modelId,
         route: '/api/forge',
         telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
-        tokenCount: extractTotalTokenCount(generation),
+        tokenCount: extractTotalTokenCount(generation.raw),
       }).catch((logError) => {
         console.warn('Telemetry logging failed for /api/forge texture expansion:', logError)
       })
@@ -730,31 +736,17 @@ app.post(
         return
       }
 
-      const generation = await ai.models.generateContent({
-        model: modelSelection.providerModel,
-        contents: [
-          { text: finalPrompt },
-          {
-            inlineData: {
-              mimeType: validRepair.offsetImage.mimeType,
-              data: validRepair.offsetImage.data,
-            },
-          },
-          {
-            inlineData: {
-              mimeType: validRepair.originalImage.mimeType,
-              data: validRepair.originalImage.data,
-            },
-          },
-        ],
-        config: {
-          candidateCount: 1,
-          responseModalities: ['IMAGE', 'TEXT'],
-          systemInstruction: resolvedSystemInstruction,
-        },
+      const generation = await generateImagesWithModel({
+        candidateCount: 1,
+        modelSelection,
+        prompt: finalPrompt,
+        references: [validRepair.offsetImage, validRepair.originalImage],
+        routeKey: '/api/forge',
+        size: '1024x1024',
+        systemInstruction: resolvedSystemInstruction,
+        timeoutMs: textureLabGenerationTimeoutMs,
       })
-
-      const images = extractImages(generation).slice(0, 1)
+      const images = generation.images
 
       if (images.length === 0) {
         response
@@ -767,7 +759,7 @@ app.post(
         model: modelSelection.modelId,
         route: '/api/forge',
         telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
-        tokenCount: extractTotalTokenCount(generation),
+        tokenCount: extractTotalTokenCount(generation.raw),
       }).catch((logError) => {
         console.warn('Telemetry logging failed for /api/forge seam repair:', logError)
       })
@@ -791,6 +783,46 @@ app.post(
         },
       })),
     ]
+
+    if (modelSelection.provider === 'openai') {
+      const generation = await generateImagesWithModel({
+        candidateCount,
+        modelSelection,
+        prompt: finalPrompt,
+        references: validReferences,
+        routeKey: '/api/forge',
+        size: resolveOpenAiForgeImageSize(mode),
+        systemInstruction: resolvedSystemInstruction,
+        timeoutMs:
+          mode === 'texture-lab' ? textureLabGenerationTimeoutMs : forgeGenerationTimeoutMs,
+      })
+
+      if (generation.images.length === 0) {
+        response
+          .status(422)
+          .json(buildNoImageResponseError('/api/forge', modelSelection, generation.text))
+        return
+      }
+
+      await recordUsageEvent({
+        model: modelSelection.modelId,
+        route: '/api/forge',
+        telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
+        tokenCount: extractTotalTokenCount(generation.raw),
+      }).catch((logError) => {
+        console.warn('Telemetry logging failed for /api/forge:', logError)
+      })
+
+      response.json({
+        images: generation.images,
+        model: modelSelection.modelId,
+        providerModel: modelSelection.providerModel,
+        prompt: finalPrompt,
+        styleId: providedStyleText || null,
+      })
+      return
+    }
+
     const batchRequestId = buildRequestId('forge-batch')
     const batchStartedAt = Date.now()
     logServerEvent(batchRequestId, 'batch started', {
@@ -909,9 +941,10 @@ app.post(
             await sleep(forgeBatchInterRequestDelayMs)
           }
         } catch (requestError) {
-          const normalizedError = normalizeGeminiError(
+          const normalizedError = normalizeGenerationError(
             requestError,
             modelSelection.modelId,
+            modelSelection.provider,
           )
           slotErrors.push(normalizedError)
           const isRetryable =
@@ -1180,7 +1213,11 @@ app.post(
       retryCount: normalizedErrors.length,
     })
   } catch (error) {
-    const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
+    const normalizedError = normalizeGenerationError(
+      error,
+      modelSelection.modelId,
+      modelSelection.provider,
+    )
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
@@ -1250,14 +1287,6 @@ app.post(
   forgeConcurrencyLimit,
   parseForgeBody,
   async (request, response) => {
-  if (!apiKey) {
-    response.status(500).json({
-      error:
-        'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
-    })
-    return
-  }
-
   let validatedRequest
 
   try {
@@ -1291,7 +1320,13 @@ app.post(
     return
   }
 
-  const ai = new GoogleGenAI({ apiKey })
+  if (!hasApiKeyForProvider(modelSelection.provider)) {
+    response.status(500).json({
+      error: buildMissingApiKeyMessage(modelSelection.provider),
+    })
+    return
+  }
+
   const sourceImageBuffer = Buffer.from(sourceImage.data, 'base64')
   const requestId = buildRequestId('material-maps')
 
@@ -1305,7 +1340,6 @@ app.post(
     })
     const generationRequests = ['height', 'roughness', 'metallic'].map((mapKind) =>
       generateMaterialMapImageWithFallback({
-        ai,
         mapKind,
         preferredModelId: modelSelection.modelId,
         promptContext,
@@ -1338,9 +1372,10 @@ app.post(
           return
         }
 
-        const normalizedError = normalizeGeminiError(
+        const normalizedError = normalizeGenerationError(
           generatedMap.error,
           generatedMap.modelSelection.modelId,
+          generatedMap.modelSelection.provider,
         )
         response.status(normalizedError.status).json(normalizedError.body)
         return
@@ -1415,7 +1450,11 @@ app.post(
       sourceWidth,
     })
   } catch (error) {
-    const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
+    const normalizedError = normalizeGenerationError(
+      error,
+      modelSelection.modelId,
+      modelSelection.provider,
+    )
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
@@ -1429,14 +1468,6 @@ app.post(
   characterSheetConcurrencyLimit,
   parseCharacterSheetBody,
   async (request, response) => {
-  if (!apiKey) {
-    response.status(500).json({
-      error:
-        'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
-    })
-    return
-  }
-
   let validatedRequest
 
   try {
@@ -1454,7 +1485,6 @@ app.post(
     parentId,
     prompt,
     references = [],
-    responseModalities = ['IMAGE', 'TEXT'],
     styleId,
     systemInstruction,
   } = validatedRequest
@@ -1483,6 +1513,13 @@ app.post(
     return
   }
 
+  if (!hasApiKeyForProvider(modelSelection.provider)) {
+    response.status(500).json({
+      error: buildMissingApiKeyMessage(modelSelection.provider),
+    })
+    return
+  }
+
   const validReferences = Array.isArray(references)
     ? references.filter(
         (reference) =>
@@ -1501,7 +1538,7 @@ app.post(
     return
   }
 
-  const ai = new GoogleGenAI({ apiKey })
+  const ai = apiKey ? new GoogleGenAI({ apiKey }) : null
 
   try {
     const trimmedPrompt = prompt.trim()
@@ -1513,44 +1550,30 @@ app.post(
       styleLabel,
     })
 
-    const generation = await ai.models.generateContent({
-      model: modelSelection.providerModel,
-      contents: [
-        {
-          text: consistencyReference
-            ? `${promptForGeneration}\n\nMaintain character identity, outfit structure, and palette continuity with the staged prior sheet reference.`
-            : promptForGeneration,
-        },
-        ...(consistencyReference
-          ? [
-              {
-                inlineData: {
-                  mimeType: consistencyReference.mimeType,
-                  data: consistencyReference.data,
-                },
-              },
-            ]
-          : []),
-        ...validReferences.map((reference) => ({
-          inlineData: {
-            mimeType: reference.mimeType,
-            data: reference.data,
-          },
-        })),
-      ],
-      config: {
+    const generation = await generateImagesWithModel({
+      candidateCount: 1,
+      googleConfig: {
         aspectRatio,
-        candidateCount: 1,
-        responseModalities,
-        systemInstruction: resolveSystemInstruction(
-          typeof systemInstruction === 'string' && systemInstruction.trim()
-            ? systemInstruction.trim()
-            : 'Provide the 5 dominant hex codes for this character at the end of the response.',
-        ),
       },
+      modelSelection,
+      prompt: consistencyReference
+        ? `${promptForGeneration}\n\nMaintain character identity, outfit structure, and palette continuity with the staged prior sheet reference.`
+        : promptForGeneration,
+      references: [
+        ...(consistencyReference ? [consistencyReference] : []),
+        ...validReferences,
+      ],
+      routeKey: '/api/character-sheet',
+      size: resolveOpenAiCharacterSheetSize(aspectRatio),
+      systemInstruction: resolveSystemInstruction(
+        typeof systemInstruction === 'string' && systemInstruction.trim()
+          ? systemInstruction.trim()
+          : 'Provide the 5 dominant hex codes for this character at the end of the response.',
+      ),
+      timeoutMs: forgeGenerationTimeoutMs,
     })
 
-    const images = extractImages(generation).slice(0, 1)
+    const images = generation.images
 
     if (images.length === 0) {
       response
@@ -1572,7 +1595,7 @@ app.post(
         modelSelection.modelId,
         '/api/character-sheet',
       ),
-      tokenCount: extractTotalTokenCount(generation),
+      tokenCount: extractTotalTokenCount(generation.raw),
     }).catch((logError) => {
       console.warn('Telemetry logging failed for /api/character-sheet:', logError)
     })
@@ -1586,7 +1609,11 @@ app.post(
       styleId: styleLabel,
     })
   } catch (error) {
-    const normalizedError = normalizeGeminiError(error, modelSelection.modelId)
+    const normalizedError = normalizeGenerationError(
+      error,
+      modelSelection.modelId,
+      modelSelection.provider,
+    )
 
     response.status(normalizedError.status).json(normalizedError.body)
   }
@@ -1600,25 +1627,45 @@ app.get('/api/usage/telemetry', usageAuth, async (_request, response) => {
       ...localTelemetrySnapshot,
       source: 'local',
     }
+    const telemetryErrors = []
 
     if (isGoogleTelemetryConfigured()) {
       try {
         const googleTelemetrySnapshot = await getGoogleTelemetrySnapshot()
         telemetrySnapshot = mergeTelemetrySnapshots(
-          localTelemetrySnapshot,
+          telemetrySnapshot,
           googleTelemetrySnapshot,
         )
       } catch (error) {
         console.warn('Google telemetry unavailable:', error)
-        telemetrySnapshot = {
-          ...localTelemetrySnapshot,
-          error: {
-            code: 'telemetry_unavailable',
-            message:
-              'Google quota telemetry is unavailable right now. Local telemetry is still active.',
-          },
-          source: 'local',
-        }
+        telemetryErrors.push(
+          'Google quota telemetry is unavailable right now. Local telemetry is still active.',
+        )
+      }
+    }
+
+    if (isOpenAiTelemetryConfigured()) {
+      try {
+        const openAiTelemetrySnapshot = await getOpenAiTelemetrySnapshot()
+        telemetrySnapshot = mergeTelemetrySnapshots(
+          telemetrySnapshot,
+          openAiTelemetrySnapshot,
+        )
+      } catch (error) {
+        console.warn('OpenAI telemetry unavailable:', error)
+        telemetryErrors.push(
+          'OpenAI usage telemetry is unavailable right now. Local telemetry is still active.',
+        )
+      }
+    }
+
+    if (telemetryErrors.length > 0) {
+      telemetrySnapshot = {
+        ...telemetrySnapshot,
+        error: {
+          code: 'telemetry_unavailable',
+          message: telemetryErrors.join(' '),
+        },
       }
     }
 
@@ -1647,9 +1694,9 @@ const googleTelemetryRowIdByLegacyId = {
   'veo-3-fast-generate': 'veo-3-fast-generate',
 }
 
-function mergeTelemetrySnapshots(localSnapshot, googleSnapshot) {
-  const googleRowsById = new Map(
-    googleSnapshot.rows.map((row) => [normalizeGoogleTelemetryRowId(row.id), row]),
+function mergeTelemetrySnapshots(localSnapshot, externalSnapshot) {
+  const externalRowsById = new Map(
+    externalSnapshot.rows.map((row) => [normalizeTelemetryRowId(row.id), row]),
   )
 
   return {
@@ -1658,7 +1705,7 @@ function mergeTelemetrySnapshots(localSnapshot, googleSnapshot) {
     source: 'hybrid',
     timeZone: localSnapshot.timeZone,
     rows: localSnapshot.rows.map((localRow) =>
-      mergeTelemetryRow(localRow, googleRowsById.get(localRow.id)),
+      mergeTelemetryRow(localRow, externalRowsById.get(localRow.id)),
     ),
   }
 }
@@ -1706,7 +1753,7 @@ function mergeTelemetryMetric(localMetric, googleMetric) {
   }
 }
 
-function normalizeGoogleTelemetryRowId(rowId) {
+function normalizeTelemetryRowId(rowId) {
   return googleTelemetryRowIdByLegacyId[rowId] ?? rowId
 }
 
@@ -1838,6 +1885,18 @@ async function buildForgePromptWithBestPractices({
     return buildSemanticTilingPrompt({
       prompt: normalizedPrompt,
       styleText: normalizedStyleText,
+      textureSize: normalizedTextureSize,
+    })
+  }
+
+  if (!ai || !ai.models || typeof ai.models.generateContent !== 'function') {
+    return buildForgePromptFallback({
+      mode,
+      prompt: normalizedPrompt,
+      seamlessMode,
+      styleText: normalizedStyleText,
+      hasStyleReference,
+      hasSubjectReference,
       textureSize: normalizedTextureSize,
     })
   }
@@ -2645,6 +2704,10 @@ async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
     return normalizedPrompt
   }
 
+  if (!ai || !ai.models || typeof ai.models.generateContent !== 'function') {
+    return normalizedPrompt
+  }
+
   try {
     const enhancement = await ai.models.generateContent({
       model: enhancerModel,
@@ -3048,6 +3111,290 @@ async function normalizeAnimatorFrameBuffers(
   )
 }
 
+function extractOpenAiImages(payload) {
+  return (payload?.data ?? []).flatMap((entry, index) => {
+    if (typeof entry?.b64_json !== 'string' || !entry.b64_json.trim()) {
+      return []
+    }
+
+    return [
+      {
+        data: entry.b64_json,
+        id: `openai-image-${index + 1}`,
+        mimeType: 'image/png',
+        text:
+          typeof entry?.revised_prompt === 'string' && entry.revised_prompt.trim()
+            ? entry.revised_prompt.trim()
+            : undefined,
+      },
+    ]
+  })
+}
+
+async function generateImagesWithModel({
+  candidateCount = 1,
+  googleConfig = {},
+  modelSelection,
+  prompt,
+  references = [],
+  routeKey,
+  size = 'auto',
+  systemInstruction,
+  timeoutMs,
+}) {
+  if (modelSelection.provider === 'openai') {
+    return generateImagesWithOpenAiModel({
+      candidateCount,
+      modelSelection,
+      prompt,
+      references,
+      routeKey,
+      size,
+      systemInstruction,
+      timeoutMs,
+    })
+  }
+
+  return generateImagesWithGoogleModel({
+    candidateCount,
+    googleConfig,
+    modelSelection,
+    prompt,
+    references,
+    systemInstruction,
+    timeoutMs,
+  })
+}
+
+async function generateImagesWithGoogleModel({
+  candidateCount,
+  googleConfig,
+  modelSelection,
+  prompt,
+  references,
+  systemInstruction,
+  timeoutMs,
+}) {
+  const ai = apiKey ? new GoogleGenAI({ apiKey }) : null
+  const generation = await withTimeout(
+    ai.models.generateContent({
+      model: modelSelection.providerModel,
+      contents: [
+        { text: prompt },
+        ...references.map((reference) => ({
+          inlineData: {
+            mimeType: reference.mimeType,
+            data: reference.data,
+          },
+        })),
+      ],
+      config: {
+        ...googleConfig,
+        candidateCount,
+        responseModalities: ['IMAGE', 'TEXT'],
+        systemInstruction,
+      },
+    }),
+    timeoutMs,
+    `${resolveProviderLabel('google')} image generation timed out after ${Math.round(
+      timeoutMs / 1000,
+    )} seconds.`,
+  )
+
+  return {
+    images: extractImages(generation).slice(0, candidateCount),
+    raw: generation,
+    text: generation.text,
+  }
+}
+
+async function generateImagesWithOpenAiModel({
+  candidateCount,
+  modelSelection,
+  prompt,
+  references,
+  routeKey,
+  size,
+  systemInstruction,
+  timeoutMs,
+}) {
+  const controller = new AbortController()
+  const timeoutHandle = setTimeout(() => {
+    controller.abort()
+  }, timeoutMs)
+  const telemetryModel = resolveTelemetryModelId(modelSelection.modelId, routeKey)
+  const combinedPrompt = buildOpenAiImagePrompt(prompt, systemInstruction)
+  const editHeaders = buildOpenAiRequestHeaders({
+    requestId: buildRequestId('openai-edit'),
+  })
+  const generationHeaders = buildOpenAiRequestHeaders({
+    contentType: 'application/json',
+    requestId: buildRequestId('openai-generate'),
+  })
+
+  try {
+    const response =
+      references.length > 0
+        ? await fetch('https://api.openai.com/v1/images/edits', {
+            method: 'POST',
+            headers: editHeaders,
+            body: buildOpenAiImageEditFormData({
+              candidateCount,
+              model: modelSelection.providerModel,
+              prompt: combinedPrompt,
+              references,
+              size,
+            }),
+            signal: controller.signal,
+          })
+        : await fetch('https://api.openai.com/v1/images/generations', {
+            method: 'POST',
+            headers: generationHeaders,
+            body: JSON.stringify({
+              model: modelSelection.providerModel,
+              moderation: 'auto',
+              n: candidateCount,
+              output_format: 'png',
+              prompt: combinedPrompt,
+              quality: 'auto',
+              size,
+            }),
+            signal: controller.signal,
+          })
+
+    recordOpenAiRateLimitSnapshot({
+      headers: response.headers,
+      telemetryModel,
+    })
+
+    const payload = await response.json().catch(() => null)
+
+    if (!response.ok) {
+      throw buildProviderHttpError('openai', response.status, payload)
+    }
+
+    return {
+      images: extractOpenAiImages(payload).slice(0, candidateCount),
+      raw: payload,
+      text:
+        typeof payload?.data?.[0]?.revised_prompt === 'string'
+          ? payload.data[0].revised_prompt
+          : '',
+    }
+  } catch (error) {
+    if (error && typeof error === 'object' && error.name === 'AbortError') {
+      throw buildProviderHttpError('openai', 504, {
+        error: {
+          message:
+            `${resolveProviderLabel('openai')} image generation timed out after ${Math.round(
+              timeoutMs / 1000,
+            )} seconds.`,
+        },
+      })
+    }
+
+    throw error
+  } finally {
+    clearTimeout(timeoutHandle)
+  }
+}
+
+function buildOpenAiImagePrompt(prompt, systemInstruction) {
+  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
+  const normalizedInstruction =
+    typeof systemInstruction === 'string' ? systemInstruction.trim() : ''
+
+  return [normalizedInstruction, normalizedPrompt].filter(Boolean).join('\n\n')
+}
+
+function buildOpenAiRequestHeaders({ contentType, requestId }) {
+  const headers = {
+    Authorization: `Bearer ${openAiApiKey}`,
+    'X-Client-Request-Id': requestId,
+  }
+  const normalizedOrganizationId =
+    typeof openAiOrganizationId === 'string' ? openAiOrganizationId.trim() : ''
+  const normalizedProjectId =
+    typeof openAiProjectId === 'string' ? openAiProjectId.trim() : ''
+
+  if (contentType) {
+    headers['Content-Type'] = contentType
+  }
+
+  if (normalizedOrganizationId) {
+    headers['OpenAI-Organization'] = normalizedOrganizationId
+  }
+
+  if (normalizedProjectId) {
+    headers['OpenAI-Project'] = normalizedProjectId
+  }
+
+  return headers
+}
+
+function resolveOpenAiForgeImageSize(mode) {
+  if (mode === 'visualizer') {
+    return '1536x1024'
+  }
+
+  return '1024x1024'
+}
+
+function resolveOpenAiCharacterSheetSize(aspectRatio) {
+  return aspectRatio === '16:9' ? '1536x1024' : '1024x1024'
+}
+
+function buildOpenAiImageEditFormData({
+  candidateCount,
+  model,
+  prompt,
+  references,
+  size,
+}) {
+  const formData = new FormData()
+  formData.set('model', model)
+  formData.set('prompt', prompt)
+  formData.set('n', String(candidateCount))
+  formData.set('output_format', 'png')
+  formData.set('quality', 'auto')
+  formData.set('size', size)
+
+  references.forEach((reference, index) => {
+    formData.append(
+      'image[]',
+      new Blob([Buffer.from(reference.data, 'base64')], {
+        type: reference.mimeType,
+      }),
+      reference.name || `reference-${index + 1}.${inferImageExtension(reference.mimeType)}`,
+    )
+  })
+
+  return formData
+}
+
+function inferImageExtension(mimeType) {
+  switch (mimeType) {
+    case 'image/jpeg':
+      return 'jpg'
+    case 'image/webp':
+      return 'webp'
+    default:
+      return 'png'
+  }
+}
+
+function buildProviderHttpError(provider, status, payload) {
+  const message =
+    typeof payload?.error?.message === 'string' && payload.error.message.trim()
+      ? payload.error.message.trim()
+      : `${resolveProviderLabel(provider)} request failed unexpectedly.`
+  const error = new Error(message)
+  error.provider = provider
+  error.status = status
+  error.payload = payload
+  return error
+}
+
 async function composeHorizontalSpriteSheet(frameBuffers, targetSize, keyColor) {
   const background = actionAnimatorKeyColorCssById[resolveActionAnimatorKeyColor(keyColor)]
 
@@ -3226,8 +3573,9 @@ function resolveModelForRoute(routeKey, requestedModelId) {
   }
 
   const providerModel = modelRegistry[normalizedRequestedModel]
+  const provider = modelProviderRegistry[normalizedRequestedModel]
 
-  if (!providerModel) {
+  if (!providerModel || !provider) {
     return {
       ok: false,
       details: [
@@ -3241,6 +3589,7 @@ function resolveModelForRoute(routeKey, requestedModelId) {
   return {
     modelId: normalizedRequestedModel,
     ok: true,
+    provider,
     providerModel,
   }
 }
@@ -3267,6 +3616,10 @@ function resolveTelemetryModelId(modelId, routeKey) {
     return 'nano-banana-pro'
   }
 
+  if (modelId === 'openai-gpt-image-2') {
+    return 'gpt-image-2'
+  }
+
   if (modelId === 'veo-3.1-fast') {
     return 'veo-3-fast-generate'
   }
@@ -3285,9 +3638,27 @@ function resolveTelemetryModelId(modelId, routeKey) {
 function extractTotalTokenCount(result) {
   const directCount = result?.usageMetadata?.totalTokenCount
   const nestedCount = result?.response?.usageMetadata?.totalTokenCount
-  const tokenCount = Number(directCount ?? nestedCount)
+  const openAiTotal =
+    result?.usage?.total_tokens ??
+    result?.usage?.totalTokens ??
+    ((Number(result?.usage?.input_tokens) || 0) + (Number(result?.usage?.output_tokens) || 0))
+  const tokenCount = Number(directCount ?? nestedCount ?? openAiTotal)
 
   return Number.isFinite(tokenCount) && tokenCount > 0 ? Math.round(tokenCount) : 0
+}
+
+function resolveProviderLabel(provider) {
+  return provider === 'openai' ? 'OpenAI' : 'Gemini'
+}
+
+function hasApiKeyForProvider(provider) {
+  return provider === 'openai' ? Boolean(openAiApiKey) : Boolean(apiKey)
+}
+
+function buildMissingApiKeyMessage(provider) {
+  return provider === 'openai'
+    ? 'OpenAI API key is missing. Set OPENAI_API_KEY in .env on the server.'
+    : 'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.'
 }
 
 function buildNoImageResponseError(routeKey, modelSelection, generationText, extraDetails = []) {
@@ -3349,8 +3720,8 @@ function buildIncompleteBatchResponseError({
       code: 'batch_incomplete',
       details,
       message:
-        'Gemini did not return the full requested image batch for this forge run. Try again or reduce the batch count.',
-      title: 'Incomplete Image Batch',
+        `${resolveProviderLabel(modelSelection.provider)} did not return the full requested image batch for this forge run. Try again or reduce the batch count.`,
+      title: `${resolveProviderLabel(modelSelection.provider)} Batch Incomplete`,
     },
   }
 }
@@ -3368,15 +3739,21 @@ function looksLikeToolDelegation(generationText) {
   )
 }
 
-function normalizeGeminiError(
+function normalizeGenerationError(
   error,
   modelName = routeModelDefaults['/api/forge'],
+  provider = 'google',
 ) {
+  const providerLabel = resolveProviderLabel(provider)
+  const payloadFromError =
+    error && typeof error === 'object' && 'payload' in error ? error.payload : null
+  const statusFromError =
+    error && typeof error === 'object' && 'status' in error ? Number(error.status) : null
   const fallbackMessage =
-    error instanceof Error ? error.message : 'Gemini request failed unexpectedly.'
+    error instanceof Error ? error.message : `${providerLabel} request failed unexpectedly.`
   const parsedPayload = tryParseErrorPayload(fallbackMessage)
-  const payload = parsedPayload?.error ?? parsedPayload
-  const statusCode = Number(payload?.code) || 500
+  const payload = payloadFromError?.error ?? payloadFromError ?? parsedPayload?.error ?? parsedPayload
+  const statusCode = Number(statusFromError ?? payload?.code) || 500
   const statusText = String(payload?.status ?? '').toUpperCase()
   const message = String(payload?.message || fallbackMessage)
   const retryAfterSeconds = extractRetryAfterSeconds(payload)
@@ -3384,19 +3761,26 @@ function normalizeGeminiError(
   if (
     statusCode === 429 ||
     statusText === 'RESOURCE_EXHAUSTED' ||
-    message.toLowerCase().includes('quota exceeded')
+    message.toLowerCase().includes('quota exceeded') ||
+    message.toLowerCase().includes('rate limit')
   ) {
     return {
       status: 429,
       body: {
         error: {
-          code: 'quota_exceeded',
-          details: buildQuotaDetails(payload, retryAfterSeconds),
+          code: provider === 'openai' ? 'rate_limit_exceeded' : 'quota_exceeded',
+          details:
+            provider === 'openai'
+              ? buildOpenAiRateLimitDetails(payload, retryAfterSeconds)
+              : buildQuotaDetails(payload, retryAfterSeconds),
           message:
-            `This Gemini key or project does not currently have usable quota for ${modelName}. ` +
-            'That can be caused by free-tier limits, missing billing, or model-specific quota restrictions.',
+            provider === 'openai'
+              ? `This OpenAI key or project does not currently have usable rate limit capacity for ${modelName}. Check your usage tier, project limits, and billing status.`
+              : `This Gemini key or project does not currently have usable quota for ${modelName}. ` +
+                'That can be caused by free-tier limits, missing billing, or model-specific quota restrictions.',
           retryAfterSeconds,
-          title: 'Gemini Quota Unavailable',
+          title:
+            provider === 'openai' ? 'OpenAI Rate Limit Unavailable' : 'Gemini Quota Unavailable',
         },
       },
     }
@@ -3408,13 +3792,16 @@ function normalizeGeminiError(
       body: {
         error: {
           code: 'auth_failed',
-          details: [
-            'Verify that the API key belongs to the intended Google AI Studio project.',
-            'Check that the project has access to Gemini image generation.',
-          ],
+          details:
+            provider === 'openai'
+              ? buildOpenAiAuthDetails(payload)
+              : [
+                  'Verify that the API key belongs to the intended Google AI Studio project.',
+                  'Check that the project has access to Gemini image generation.',
+                ],
           message:
-            'Gemini rejected the request because the API key or project permissions are not valid for this model.',
-          title: 'Gemini Authentication Failed',
+            `${providerLabel} rejected the request because the API key or project permissions are not valid for this model.`,
+          title: `${providerLabel} Authentication Failed`,
         },
       },
     }
@@ -3428,8 +3815,8 @@ function normalizeGeminiError(
           code: 'request_timeout',
           details: message ? [message] : undefined,
           message:
-            'Gemini did not finish this image request before the server timeout. Try again or reduce the batch count.',
-          title: 'Gemini Request Timed Out',
+            `${providerLabel} did not finish this image request before the server timeout. Try again or reduce the batch count.`,
+          title: `${providerLabel} Request Timed Out`,
         },
       },
     }
@@ -3441,8 +3828,8 @@ function normalizeGeminiError(
       error: {
         code: 'request_failed',
         details: message ? [message] : undefined,
-        message: 'Gemini returned an unexpected error while processing this forge request.',
-        title: 'Gemini Request Failed',
+        message: `${providerLabel} returned an unexpected error while processing this forge request.`,
+        title: `${providerLabel} Request Failed`,
       },
     },
   }
@@ -3578,8 +3965,47 @@ function buildQuotaDetails(payload, retryAfterSeconds) {
   return details
 }
 
+function buildOpenAiRateLimitDetails(payload, retryAfterSeconds) {
+  const details = []
+
+  if (typeof payload?.type === 'string' && payload.type) {
+    details.push(`OpenAI error type: ${payload.type}`)
+  }
+
+  details.push('Check your project limits, usage tier, and billing status in the OpenAI dashboard.')
+
+  if (retryAfterSeconds) {
+    details.push(`Retry hint from OpenAI: wait about ${retryAfterSeconds} seconds before testing again.`)
+  }
+
+  return details
+}
+
+function buildOpenAiAuthDetails(payload) {
+  const details = [
+    'Verify that the API key belongs to the intended OpenAI project or organization.',
+    'If this key is tied to a specific project, set OPENAI_PROJECT_ID so requests are scoped to the same project.',
+    'If your account spans multiple organizations and you use a legacy user key, set OPENAI_ORGANIZATION_ID too.',
+    'Check that the project has access to GPT Image generation.',
+    'Some OpenAI projects require API Organization Verification before GPT Image requests will succeed.',
+  ]
+
+  if (typeof payload?.type === 'string' && payload.type) {
+    details.push(`OpenAI error type: ${payload.type}`)
+  }
+
+  if (typeof payload?.code === 'string' && payload.code) {
+    details.push(`OpenAI error code: ${payload.code}`)
+  }
+
+  if (typeof payload?.message === 'string' && payload.message.trim()) {
+    details.push(`OpenAI response: ${payload.message.trim()}`)
+  }
+
+  return details
+}
+
 async function generateMaterialMapImageWithFallback({
-  ai,
   mapKind,
   preferredModelId,
   promptContext,
@@ -3597,37 +4023,24 @@ async function generateMaterialMapImageWithFallback({
   )) {
     const modelSelection = resolveModelForRoute('/api/material-maps', candidateModelId)
 
-    if (!modelSelection.ok) {
+    if (!modelSelection.ok || !hasApiKeyForProvider(modelSelection.provider)) {
       continue
     }
 
     attemptedModelIds.push(modelSelection.modelId)
 
     try {
-      const generation = await withTimeout(
-        ai.models.generateContent({
-          model: modelSelection.providerModel,
-          contents: [
-            {
-              text: buildMaterialMapPrompt(mapKind, promptContext),
-            },
-            {
-              inlineData: {
-                mimeType: sourceImage.mimeType,
-                data: sourceImage.data,
-              },
-            },
-          ],
-          config: {
-            candidateCount: 1,
-            responseModalities: ['IMAGE', 'TEXT'],
-            systemInstruction: buildMaterialMapSystemInstruction(mapKind),
-          },
-        }),
-        forgeGenerationTimeoutMs,
-        `Material ${mapKind} map generation timed out.`,
-      )
-      const [generatedImage] = extractImages(generation)
+      const generation = await generateImagesWithModel({
+        candidateCount: 1,
+        modelSelection,
+        prompt: buildMaterialMapPrompt(mapKind, promptContext),
+        references: [sourceImage],
+        routeKey: '/api/material-maps',
+        size: '1024x1024',
+        systemInstruction: buildMaterialMapSystemInstruction(mapKind),
+        timeoutMs: forgeGenerationTimeoutMs,
+      })
+      const [generatedImage] = generation.images
 
       if (generatedImage) {
         if (attemptedModelIds.length > 1) {
@@ -3641,7 +4054,7 @@ async function generateMaterialMapImageWithFallback({
         return {
           attemptedModelIds,
           generatedImage,
-          generation,
+          generation: generation.raw,
           mapKind,
           modelSelection,
           ok: true,

@@ -57,6 +57,7 @@ async function loadServerModule(env = {}) {
 
 afterEach(() => {
   process.env = { ...originalEnv }
+  vi.unstubAllGlobals()
   vi.resetModules()
 })
 
@@ -321,6 +322,7 @@ describe('Texture Lab batch scheduling', () => {
       .post('/api/forge')
       .send({
         generationCount: 2,
+        modelId: 'gemini-3-flash',
         mode: 'texture-lab',
         prompt: 'weathered basalt floor tile',
         workflow: 'generate',
@@ -352,6 +354,7 @@ describe('Texture Lab batch scheduling', () => {
       .post('/api/forge')
       .send({
         generationCount: 2,
+        modelId: 'gemini-3-flash',
         mode: 'armory',
         prompt: 'iron longsword concept',
         workflow: 'generate',
@@ -365,6 +368,111 @@ describe('Texture Lab batch scheduling', () => {
 })
 
 describe('API hardening', () => {
+  it('supports OpenAI GPT Image 2 on forge routes', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateContent.mockReset()
+    const generatedBase64 = await createPngBase64(1, 1, [120, 80, 40])
+    const fetchMock = vi.fn().mockResolvedValue({
+      headers: new Headers({
+        'x-ratelimit-limit-requests': '20',
+        'x-ratelimit-limit-tokens': '250000',
+        'x-ratelimit-remaining-requests': '19',
+        'x-ratelimit-remaining-tokens': '249100',
+      }),
+      json: async () => ({
+        data: [
+          {
+            b64_json: generatedBase64,
+            revised_prompt: 'Studio-lit bronze gauntlet concept render',
+          },
+        ],
+        usage: {
+          input_tokens: 34,
+          output_tokens: 1200,
+          total_tokens: 1234,
+        },
+      }),
+      ok: true,
+      status: 200,
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    const app = await loadApp({
+      OPENAI_API_KEY: 'openai-test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/forge')
+      .send({
+        mode: 'armory',
+        modelId: 'openai-gpt-image-2',
+        prompt: 'bronze gauntlet concept',
+        workflow: 'generate',
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body.model).toBe('openai-gpt-image-2')
+    expect(response.body.providerModel).toBe('gpt-image-2')
+    expect(response.body.images).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.openai.com/v1/images/generations',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer openai-test-key',
+          'Content-Type': 'application/json',
+        }),
+        method: 'POST',
+      }),
+    )
+    expect(__mock.generateContent).not.toHaveBeenCalled()
+  })
+
+  it('passes optional OpenAI project scoping headers on forge routes', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      headers: new Headers(),
+      json: async () => ({
+        data: [
+          {
+            b64_json: await createPngBase64(1, 1, [80, 120, 160]),
+            revised_prompt: 'Silver signet ring product render',
+          },
+        ],
+      }),
+      ok: true,
+      status: 200,
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    const app = await loadApp({
+      OPENAI_API_KEY: 'openai-test-key',
+      OPENAI_ORGANIZATION_ID: 'org_test_123',
+      OPENAI_PROJECT_ID: 'proj_test_456',
+    })
+
+    const response = await request(app)
+      .post('/api/forge')
+      .send({
+        mode: 'armory',
+        modelId: 'openai-gpt-image-2',
+        prompt: 'silver signet ring',
+        workflow: 'generate',
+      })
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.openai.com/v1/images/generations',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer openai-test-key',
+          'OpenAI-Organization': 'org_test_123',
+          'OpenAI-Project': 'proj_test_456',
+        }),
+      }),
+    )
+  })
+
   it('requires the internal token for usage telemetry when configured', async () => {
     const app = await loadApp({
       INTERNAL_API_TOKEN: 'top-secret',
@@ -500,6 +608,7 @@ describe('API hardening', () => {
     const response = await request(app)
       .post('/api/forge')
       .send({
+        modelId: 'gemini-3-flash',
         mode: 'vfx-forge',
         references: [
           {

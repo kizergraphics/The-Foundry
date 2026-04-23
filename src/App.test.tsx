@@ -795,6 +795,16 @@ describe('App Action Animator flow', () => {
     ).not.toBeInTheDocument()
   })
 
+  it('shows OpenAI GPT Image 2 in the default image model selector', async () => {
+    render(<App />)
+
+    const modelSelector = await screen.findByTestId('layout-item-model-selector')
+
+    expect(
+      within(modelSelector).getByRole('button', { name: /OpenAI GPT Image 2/i }),
+    ).toBeInTheDocument()
+  })
+
   it('submits keyed Veo settings and exposes video and frame downloads', async () => {
     render(<App />)
 

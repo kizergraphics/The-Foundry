@@ -26,6 +26,8 @@ const requestCostByModel = {
   'gemini-3-pro-image-preview': 0.0012,
   'gemini-3-flash-text': 0.0003,
   'gemini-2.5-flash-text': 0.0003,
+  'openai-gpt-image-2': 0.053,
+  'gpt-image-2': 0.053,
 }
 
 const dateKeyFormatter = new Intl.DateTimeFormat('en-CA', {
@@ -402,7 +404,9 @@ function resolveRequestCostEstimate(model) {
         ? 'gemini-3-flash'
         : model === 'nano-banana'
           ? 'gemini-2.5-flash-image'
-          : model
+          : model === 'gpt-image-2'
+            ? 'openai-gpt-image-2'
+            : model
     : model
 
   return requestCostByModel[normalizedModel] ?? defaultRequestCostEstimate

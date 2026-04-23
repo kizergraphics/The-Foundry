@@ -59,6 +59,7 @@ The executable looks for a `.env` file in these places, in this order:
 - the same folder as the built `.exe`
 
 For distribution, copy `.env.example` to `.env` next to the packaged `.exe` and fill in `GEMINI_API_KEY`.
+If you are using OpenAI image generation with a project-scoped key, also set `OPENAI_API_KEY` and, when needed, `OPENAI_PROJECT_ID` (plus `OPENAI_ORGANIZATION_ID` for legacy multi-org keys).
 
 ## Windows Signing
 
