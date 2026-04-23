@@ -285,6 +285,26 @@ describe('persistStoredState', () => {
     })
   })
 
+  it('restores the image-strip animator pipeline when saved', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          ...baseStoredSettings,
+          activeMode: 'action-animator',
+          actionAnimator: {
+            ...baseStoredSettings.actionAnimator,
+            pipeline: 'image-strip',
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.actionAnimator.pipeline).toBe('image-strip')
+  })
+
   it('migrates legacy loot leveler settings into variant forge', () => {
     window.localStorage.setItem(
       'kizer-forge-state',

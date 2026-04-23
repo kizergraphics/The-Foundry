@@ -367,7 +367,10 @@ export function loadStoredState(): StoredState | null {
               ? parsed.settings.actionAnimator.normalizedSize
               : 512,
           ),
-          pipeline: 'veo-video',
+          pipeline:
+            parsed.settings?.actionAnimator?.pipeline === 'image-strip'
+              ? 'image-strip'
+              : 'veo-video',
         },
         characterSheet: {
           consistencyEnabled: Boolean(

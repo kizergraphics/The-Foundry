@@ -9,7 +9,9 @@ const baseState: ActionAnimatorState = {
   customActionPrompt: '',
   fps: 8,
   frameCount: 8,
+  firstFrameGuide: null,
   keyColor: 'green',
+  lastFrameGuide: null,
   normalizedSize: 512,
   pipeline: 'veo-video',
 }
@@ -28,5 +30,14 @@ describe('action animator prompt helpers', () => {
         customActionPrompt: 'Add heavier footfalls and a slight shoulder dip.',
       }),
     ).toContain('Additional direction: Add heavier footfalls and a slight shoulder dip.')
+  })
+
+  it('describes the image-strip flow when selected', () => {
+    expect(
+      buildActionAnimatorPrompt({
+        ...baseState,
+        pipeline: 'image-strip',
+      }),
+    ).toContain('Return a single horizontal sprite strip with 8 evenly spaced square frames in one row.')
   })
 })

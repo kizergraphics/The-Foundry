@@ -200,6 +200,38 @@ describe('validateActionAnimatorRequest', () => {
     })
   })
 
+  it('accepts optional first and last frame guides for image-strip runs', () => {
+    expect(
+      validateActionAnimatorRequest({
+        firstFrame: {
+          data: validPngBase64,
+          mimeType: 'image/png',
+          name: 'first-frame.png',
+        },
+        image: {
+          data: validPngBase64,
+          mimeType: 'image/png',
+        },
+        lastFrame: {
+          data: validPngBase64,
+          mimeType: 'image/png',
+          name: 'last-frame.png',
+        },
+        pipeline: 'image-strip',
+      }),
+    ).toMatchObject({
+      firstFrame: {
+        mimeType: 'image/png',
+        name: 'first-frame.png',
+      },
+      lastFrame: {
+        mimeType: 'image/png',
+        name: 'last-frame.png',
+      },
+      pipeline: 'image-strip',
+    })
+  })
+
   it('rejects unsupported key colors', () => {
     expect(() =>
       validateActionAnimatorRequest({

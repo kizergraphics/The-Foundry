@@ -38,7 +38,7 @@ const allowedStandardReferenceSlots = new Set(['style', 'subject'])
 const allowedCharacterReferenceSlots = new Set(['face', 'outfit', 'art-style'])
 const allowedResponseModalities = new Set(['IMAGE', 'TEXT'])
 const allowedActionAnimatorKeyColors = new Set(['green', 'blue'])
-const allowedActionAnimatorPipelines = new Set(['veo-video'])
+const allowedActionAnimatorPipelines = new Set(['veo-video', 'image-strip'])
 
 function buildValidationError(message, details) {
   return {
@@ -234,6 +234,10 @@ function validateInlineImage(image, fieldName, maxBytes = maxBase64ImageBytes) {
   return {
     data,
     mimeType,
+    name:
+      typeof image.name === 'string' && image.name.trim()
+        ? image.name.trim().slice(0, maxReferenceNameLength)
+        : undefined,
     sizeBytes: estimatedBytes,
   }
 }
@@ -677,6 +681,9 @@ export function validateActionAnimatorRequest(body) {
       max: 30,
       min: 1,
     }),
+    firstFrame: body?.firstFrame
+      ? validateInlineImage(body.firstFrame, 'firstFrame')
+      : undefined,
     frameCount: readInteger(body?.frameCount, 'frameCount', {
       fallback: 8,
       max: 30,
@@ -685,6 +692,9 @@ export function validateActionAnimatorRequest(body) {
     image: validateInlineImage(body?.image, 'image'),
     keyColor:
       readOptionalEnum(body?.keyColor, 'keyColor', allowedActionAnimatorKeyColors) ?? 'green',
+    lastFrame: body?.lastFrame
+      ? validateInlineImage(body.lastFrame, 'lastFrame')
+      : undefined,
     modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
     normalizedSize: readActionAnimatorFrameSize(body?.normalizedSize, 'normalizedSize'),
     pipeline:

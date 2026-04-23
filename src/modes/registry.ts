@@ -475,7 +475,8 @@ function getBriefItems(state: ForgeState, flags: ModeFlags): ForgeBriefItem[] {
       },
       {
         label: 'Pipeline',
-        value: 'Veo Video',
+        value:
+          state.actionAnimator.pipeline === 'image-strip' ? 'Image Strip' : 'Veo Video',
       },
       {
         label: 'Action',
@@ -726,7 +727,9 @@ function getPrimaryActionDescription({
 }) {
   if (isForging) {
     if (flags.isActionAnimatorMode) {
-      return 'Generating a Veo clip and extracting keyed sprite frames'
+      return state.actionAnimator.pipeline === 'image-strip'
+        ? 'Generating a guided sprite strip and preparing keyed frame tiles'
+        : 'Generating a Veo clip and extracting keyed sprite frames'
     }
 
     if (flags.isCharacterSheetMode) {
@@ -763,7 +766,9 @@ function getPrimaryActionDescription({
   }
 
   if (flags.isActionAnimatorMode) {
-    return 'Character image staged for Veo-driven sprite extraction'
+    return state.actionAnimator.pipeline === 'image-strip'
+      ? 'Character image staged for guided sprite-strip generation'
+      : 'Character image staged for Veo-driven sprite extraction'
   }
 
   if (getIsReadyForApi(state, flags)) {

@@ -707,7 +707,7 @@ describe('App Action Animator flow', () => {
   const fetchMock = vi.fn<typeof fetch>()
 
   beforeEach(() => {
-    fetchMock.mockImplementation(async (input) => {
+    fetchMock.mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : String(input)
 
       if (url === '/api/health') {
@@ -724,6 +724,48 @@ describe('App Action Animator flow', () => {
       }
 
       if (url === '/api/action-animator') {
+        const body =
+          init && typeof init === 'object' && 'body' in init && typeof init.body === 'string'
+            ? JSON.parse(init.body)
+            : {}
+
+        if (body.pipeline === 'image-strip') {
+          return buildJsonResponse({
+            artifacts: {
+              frames: [
+                {
+                  data: 'DDDD',
+                  id: 'frame-01',
+                  mimeType: 'image/png',
+                },
+                {
+                  data: 'EEEE',
+                  id: 'frame-02',
+                  mimeType: 'image/png',
+                },
+              ],
+              metadata: {
+                fps: 10,
+                frameCount: 2,
+                keyColor: 'green',
+                normalizedSize: 1080,
+                pipeline: 'image-strip',
+                prompt: 'Image strip prompt',
+                sampleStrategy: 'strip',
+                sourceModel: 'openai-gpt-image-2',
+              },
+              spriteSheet: {
+                data: 'FFFF',
+                id: 'sprite-sheet',
+                mimeType: 'image/png',
+              },
+              video: null,
+            },
+            model: 'openai-gpt-image-2',
+            prompt: 'Image strip prompt',
+          })
+        }
+
         return buildJsonResponse({
           artifacts: {
             frames: [
@@ -743,6 +785,7 @@ describe('App Action Animator flow', () => {
               frameCount: 2,
               keyColor: 'blue',
               normalizedSize: 512,
+              pipeline: 'veo-video',
               prompt: 'Blue key prompt',
               sampleStrategy: 'even',
               sourceModel: 'veo-3.1-fast',
@@ -868,6 +911,79 @@ describe('App Action Animator flow', () => {
     await waitFor(() => {
       expect(downloadBlobMock).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('switches to image-strip models and submits first and last frame guides', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByTestId('mode-tab-button-action-animator'))
+    fireEvent.click(screen.getByRole('button', { name: /Image Strip/i }))
+
+    const modelSelector = await screen.findByTestId('layout-item-model-selector')
+    expect(
+      within(modelSelector).getByRole('button', { name: /OpenAI GPT Image 2/i }),
+    ).toBeInTheDocument()
+    expect(
+      within(modelSelector).getByRole('button', { name: /Gemini 3 Pro Image/i }),
+    ).toBeInTheDocument()
+    expect(
+      within(modelSelector).queryByRole('button', { name: /Veo 3 Fast Generate/i }),
+    ).not.toBeInTheDocument()
+
+    const animatorPanel = await screen.findByTestId('layout-item-action-animator-panel')
+    const fileInputs = animatorPanel.querySelectorAll('input[type="file"]')
+
+    expect(fileInputs).toHaveLength(3)
+
+    fireEvent.change(fileInputs[0], {
+      target: {
+        files: [buildReferenceFile('hero.png')],
+      },
+    })
+    fireEvent.change(fileInputs[1], {
+      target: {
+        files: [buildReferenceFile('first.png')],
+      },
+    })
+    fireEvent.change(fileInputs[2], {
+      target: {
+        files: [buildReferenceFile('last.png')],
+      },
+    })
+
+    await waitFor(() => {
+      expect(within(animatorPanel).queryAllByText('hero.png').length).toBeGreaterThan(0)
+      expect(within(animatorPanel).queryAllByText('first.png').length).toBeGreaterThan(0)
+      expect(within(animatorPanel).queryAllByText('last.png').length).toBeGreaterThan(0)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /OpenAI GPT Image 2/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^1080px$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /generate sprites/i }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/action-animator')).toHaveLength(1)
+    })
+
+    const animatorRequest = JSON.parse(
+      String(fetchMock.mock.calls.find(([url]) => url === '/api/action-animator')?.[1]?.body ?? '{}'),
+    )
+
+    expect(animatorRequest).toMatchObject({
+      firstFrame: {
+        mimeType: 'image/png',
+        name: 'first.png',
+      },
+      lastFrame: {
+        mimeType: 'image/png',
+        name: 'last.png',
+      },
+      modelId: 'openai-gpt-image-2',
+      normalizedSize: 1080,
+      pipeline: 'image-strip',
+    })
+
+    expect(screen.queryByRole('button', { name: /Download Video/i })).not.toBeInTheDocument()
   })
 })
 

@@ -978,6 +978,70 @@ describe('Action Animator route', () => {
     expect(response.body.artifacts.frames).toHaveLength(4)
     expect(response.body.prompt).toContain('green')
   })
+
+  it('returns sprite-strip frames without video for image-strip generation', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateContent.mockReset()
+    __mock.generateContent.mockResolvedValue(
+      buildImageGeneration(
+        await createPngBase64(4, 1, [
+          255, 255, 255,
+          240, 240, 240,
+          225, 225, 225,
+          210, 210, 210,
+        ]),
+      ),
+    )
+
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/action-animator')
+      .send({
+        actionType: 'idle',
+        firstFrame: {
+          data: await createPngBase64(1, 1, [255, 255, 255]),
+          mimeType: 'image/png',
+          name: 'first-frame.png',
+        },
+        fps: 8,
+        frameCount: 4,
+        image: {
+          data: await createPngBase64(1, 1, [255, 255, 255]),
+          mimeType: 'image/png',
+          name: 'hero.png',
+        },
+        keyColor: 'blue',
+        lastFrame: {
+          data: await createPngBase64(1, 1, [255, 255, 255]),
+          mimeType: 'image/png',
+          name: 'last-frame.png',
+        },
+        modelId: 'gemini-3-flash',
+        normalizedSize: 512,
+        pipeline: 'image-strip',
+        prompt: 'Side-profile idle strip on a blue key background.',
+      })
+
+    expect(response.status).toBe(200)
+    expect(__mock.generateContent).toHaveBeenCalledTimes(1)
+    expect(response.body.model).toBe('gemini-3-flash')
+    expect(response.body.artifacts.metadata).toMatchObject({
+      fps: 8,
+      frameCount: 4,
+      keyColor: 'blue',
+      normalizedSize: 512,
+      pipeline: 'image-strip',
+      sampleStrategy: 'strip',
+      sourceModel: 'gemini-3-flash',
+    })
+    expect(response.body.artifacts.video).toBeNull()
+    expect(response.body.artifacts.spriteSheet.mimeType).toBe('image/png')
+    expect(response.body.artifacts.frames).toHaveLength(4)
+    expect(response.body.prompt).toContain('sprite strip')
+  })
 })
 
 describe('VFX recipe export routes', () => {

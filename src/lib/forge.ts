@@ -52,7 +52,7 @@ export type UvLabAtlasSize = 1024 | 2048 | 4096
 export type GenerationCount = 1 | 2 | 3 | 4
 export type ForgeStatus = 'idle' | 'loading' | 'success' | 'error'
 export type ModelFormat = 'obj' | 'fbx'
-export type ActionAnimatorPipeline = 'veo-video'
+export type ActionAnimatorPipeline = 'veo-video' | 'image-strip'
 export type ActionAnimatorKeyColor = 'green' | 'blue'
 export type ActionAnimatorNormalizedSize = 512 | 1080
 export type ActionAnimatorActionType =
@@ -98,8 +98,10 @@ export type ActionAnimatorState = {
   characterImage: ReferenceAsset | null
   customActionPrompt: string
   frameCount: number
+  firstFrameGuide: ReferenceAsset | null
   fps: number
   keyColor: ActionAnimatorKeyColor
+  lastFrameGuide: ReferenceAsset | null
   normalizedSize: ActionAnimatorNormalizedSize
   pipeline: ActionAnimatorPipeline
 }
@@ -186,8 +188,10 @@ export type ForgeAction =
   | { type: 'set-action-animator-action'; actionType: ActionAnimatorActionType }
   | { type: 'set-action-animator-custom-prompt'; prompt: string }
   | { type: 'set-action-animator-frame-count'; frameCount: number }
+  | { type: 'set-action-animator-first-frame-guide'; asset: ReferenceAsset | null }
   | { type: 'set-action-animator-fps'; fps: number }
   | { type: 'set-action-animator-key-color'; keyColor: ActionAnimatorKeyColor }
+  | { type: 'set-action-animator-last-frame-guide'; asset: ReferenceAsset | null }
   | { type: 'set-action-animator-normalized-size'; size: ActionAnimatorNormalizedSize }
   | { type: 'set-action-animator-pipeline'; pipeline: ActionAnimatorPipeline }
   | { type: 'set-character-sheet-mode'; mode: CharacterSheetGenerationMode }
@@ -466,8 +470,10 @@ export const initialState: ForgeState = {
     characterImage: null,
     customActionPrompt: '',
     frameCount: 8,
+    firstFrameGuide: null,
     fps: 8,
     keyColor: 'green',
+    lastFrameGuide: null,
     normalizedSize: 512,
     pipeline: 'veo-video',
   },
@@ -587,6 +593,14 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           frameCount: clampFrameCount(action.frameCount),
         },
       }
+    case 'set-action-animator-first-frame-guide':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          firstFrameGuide: action.asset,
+        },
+      }
     case 'set-action-animator-fps':
       return {
         ...state,
@@ -601,6 +615,14 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         actionAnimator: {
           ...state.actionAnimator,
           keyColor: action.keyColor,
+        },
+      }
+    case 'set-action-animator-last-frame-guide':
+      return {
+        ...state,
+        actionAnimator: {
+          ...state.actionAnimator,
+          lastFrameGuide: action.asset,
         },
       }
     case 'set-action-animator-normalized-size':

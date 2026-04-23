@@ -119,6 +119,7 @@ import type {
   ActionAnimatorActionType,
   ActionAnimatorKeyColor,
   ActionAnimatorNormalizedSize,
+  ActionAnimatorPipeline,
   CharacterSheetGenerationMode,
   CharacterSheetReferenceSlot,
   ForgeErrorInfo,
@@ -929,7 +930,9 @@ function App() {
       }))
     }
   })
-  const modeAvailableModels = getAvailableModelsForMode(state.activeMode)
+  const modeAvailableModels = getAvailableModelsForMode(state.activeMode, {
+    actionAnimatorPipeline: state.actionAnimator.pipeline,
+  })
   const selectedModelSupported =
     state.activeMode === 'uv-lab' || modeAvailableModels.includes(activeModel)
   const modePresentation = getModePresentation({
@@ -1127,7 +1130,9 @@ function App() {
   }, [refreshHealth])
 
   useEffect(() => {
-    const modeDefault = getModeDefaultModel(state.activeMode)
+    const modeDefault = getModeDefaultModel(state.activeMode, {
+      actionAnimatorPipeline: state.actionAnimator.pipeline,
+    })
     const modeOverride = modelOverridesByMode[state.activeMode]
     const nextModel =
       modeOverride && modeAvailableModels.includes(modeOverride)
@@ -1138,6 +1143,7 @@ function App() {
   }, [
     modeAvailableModels,
     modelOverridesByMode,
+    state.actionAnimator.pipeline,
     state.activeMode,
   ])
 
@@ -2831,9 +2837,12 @@ function App() {
           canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
           customActionPrompt={state.actionAnimator.customActionPrompt}
           fps={state.actionAnimator.fps}
+          firstFrameGuide={state.actionAnimator.firstFrameGuide}
           frameCount={state.actionAnimator.frameCount}
           keyColor={state.actionAnimator.keyColor}
+          lastFrameGuide={state.actionAnimator.lastFrameGuide}
           normalizedSize={state.actionAnimator.normalizedSize}
+          pipeline={state.actionAnimator.pipeline}
           onDownloadFrames={handleDownloadActionAnimatorFrames}
           onDownloadVideo={() => void handleDownloadActionAnimatorVideo()}
           onActionTypeChange={(actionType) =>
@@ -2848,6 +2857,9 @@ function App() {
           onFileSelect={(asset) =>
             dispatch({ type: 'set-action-animator-image', asset })
           }
+          onFirstFrameGuideChange={(asset) =>
+            dispatch({ type: 'set-action-animator-first-frame-guide', asset })
+          }
           onFpsChange={(fps) =>
             dispatch({ type: 'set-action-animator-fps', fps })
           }
@@ -2857,8 +2869,14 @@ function App() {
           onKeyColorChange={(keyColor) =>
             dispatch({ type: 'set-action-animator-key-color', keyColor })
           }
+          onLastFrameGuideChange={(asset) =>
+            dispatch({ type: 'set-action-animator-last-frame-guide', asset })
+          }
           onNormalizedSizeChange={(size) =>
             dispatch({ type: 'set-action-animator-normalized-size', size })
+          }
+          onPipelineChange={(pipeline) =>
+            dispatch({ type: 'set-action-animator-pipeline', pipeline })
           }
           onUseLatestCharacterSheet={() =>
             void hydrateLatestCharacterSheetInto({
@@ -4135,9 +4153,12 @@ function App() {
                     canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
                     customActionPrompt={state.actionAnimator.customActionPrompt}
                     fps={state.actionAnimator.fps}
+                    firstFrameGuide={state.actionAnimator.firstFrameGuide}
                     frameCount={state.actionAnimator.frameCount}
                     keyColor={state.actionAnimator.keyColor}
+                    lastFrameGuide={state.actionAnimator.lastFrameGuide}
                     normalizedSize={state.actionAnimator.normalizedSize}
+                    pipeline={state.actionAnimator.pipeline}
                     onDownloadFrames={handleDownloadActionAnimatorFrames}
                     onDownloadVideo={() => void handleDownloadActionAnimatorVideo()}
                     onActionTypeChange={(actionType) =>
@@ -4152,6 +4173,9 @@ function App() {
                     onFileSelect={(asset) =>
                       dispatch({ type: 'set-action-animator-image', asset })
                     }
+                    onFirstFrameGuideChange={(asset) =>
+                      dispatch({ type: 'set-action-animator-first-frame-guide', asset })
+                    }
                     onFpsChange={(fps) =>
                       dispatch({ type: 'set-action-animator-fps', fps })
                     }
@@ -4161,8 +4185,14 @@ function App() {
                     onKeyColorChange={(keyColor) =>
                       dispatch({ type: 'set-action-animator-key-color', keyColor })
                     }
+                    onLastFrameGuideChange={(asset) =>
+                      dispatch({ type: 'set-action-animator-last-frame-guide', asset })
+                    }
                     onNormalizedSizeChange={(size) =>
                       dispatch({ type: 'set-action-animator-normalized-size', size })
+                    }
+                    onPipelineChange={(pipeline) =>
+                      dispatch({ type: 'set-action-animator-pipeline', pipeline })
                     }
                     onUseLatestCharacterSheet={() =>
                       void hydrateLatestCharacterSheetInto({
@@ -5331,10 +5361,12 @@ function ModelSelector({
   mode,
   onSelect,
 }: ModelSelectorProps) {
-  const visibleModels =
-    mode === 'action-animator'
-      ? (['veo-3.1-fast'] satisfies ModelId[])
-      : availableModels
+  const modelOverrideLabel =
+    mode === 'uv-lab'
+      ? 'Built-in Only'
+      : availableModels.length <= 1
+        ? 'Locked for This Workflow'
+        : 'Smart Default + Manual'
 
   return (
     <section className="rounded-[22px] border border-white/10 bg-black/20 p-4">
@@ -5343,11 +5375,11 @@ function ModelSelector({
           Model Override
         </p>
         <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-400">
-          {mode === 'action-animator' ? 'Veo Only' : 'Smart Default + Manual'}
+          {modelOverrideLabel}
         </span>
       </div>
       <div className="mt-3 inline-flex w-full gap-2 rounded-full border border-white/10 bg-white/[0.02] p-1.5">
-        {visibleModels.map((model) => {
+        {availableModels.map((model) => {
           const isActive = activeModel === model
 
           return (
@@ -5990,18 +6022,24 @@ type ActionAnimatorPanelProps = {
   canUseLatestCharacterSheet: boolean
   customActionPrompt: string
   fps: number
+  firstFrameGuide: ReferenceAsset | null
   frameCount: number
   keyColor: ActionAnimatorKeyColor
+  lastFrameGuide: ReferenceAsset | null
   normalizedSize: ActionAnimatorNormalizedSize
+  pipeline: ActionAnimatorPipeline
   onActionTypeChange: (actionType: ActionAnimatorActionType) => void
   onCustomActionPromptChange: (prompt: string) => void
   onDownloadFrames: () => void
   onDownloadVideo: () => void
   onFileSelect: (asset: ReferenceAsset | null) => void
+  onFirstFrameGuideChange: (asset: ReferenceAsset | null) => void
   onFpsChange: (fps: number) => void
   onFrameCountChange: (frameCount: number) => void
   onKeyColorChange: (keyColor: ActionAnimatorKeyColor) => void
+  onLastFrameGuideChange: (asset: ReferenceAsset | null) => void
   onNormalizedSizeChange: (size: ActionAnimatorNormalizedSize) => void
+  onPipelineChange: (pipeline: ActionAnimatorPipeline) => void
   onUseLatestCharacterSheet: () => void
 }
 
@@ -6012,18 +6050,24 @@ function ActionAnimatorPanel({
   canUseLatestCharacterSheet,
   customActionPrompt,
   fps,
+  firstFrameGuide,
   frameCount,
   keyColor,
+  lastFrameGuide,
   normalizedSize,
+  pipeline,
   onActionTypeChange,
   onCustomActionPromptChange,
   onDownloadFrames,
   onDownloadVideo,
   onFileSelect,
+  onFirstFrameGuideChange,
   onFpsChange,
   onFrameCountChange,
   onKeyColorChange,
+  onLastFrameGuideChange,
   onNormalizedSizeChange,
+  onPipelineChange,
   onUseLatestCharacterSheet,
 }: ActionAnimatorPanelProps) {
   const [isPlaying, setIsPlaying] = useState(false)
@@ -6031,11 +6075,12 @@ function ActionAnimatorPanel({
   const frames = artifacts?.frames ?? []
   const currentFrame = frames[previewIndex] ?? null
   const normalizedSizeOptions = getActionAnimatorNormalizedSizeOptions()
+  const isImageStripPipeline = pipeline === 'image-strip'
 
   useEffect(() => {
     setPreviewIndex(0)
     setIsPlaying(false)
-  }, [artifacts?.spriteSheet.id, frameCount])
+  }, [artifacts?.spriteSheet.id, frameCount, pipeline])
 
   useEffect(() => {
     if (!isPlaying || frames.length <= 1) {
@@ -6071,17 +6116,48 @@ function ActionAnimatorPanel({
             Action Animator
           </p>
           <p className="mt-2 text-sm font-medium text-white">
-            Generate a Veo clip, extract keyed frames server-side, and review the normalized sprite output before export.
+            {isImageStripPipeline
+              ? 'Generate a guided sprite strip with image models, then split and normalize the returned frames for preview and export.'
+              : 'Generate a Veo clip, extract keyed frames server-side, and review the normalized sprite output before export.'}
           </p>
         </div>
         <div className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 font-mono text-xs text-cyan-100">
-          Veo video pipeline
+          {isImageStripPipeline ? 'Image strip pipeline' : 'Veo video pipeline'}
         </div>
+      </div>
+
+      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
+        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+          Generation Type
+        </label>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          <ModeToggleButton
+            icon={Play}
+            isActive={pipeline === 'veo-video'}
+            label="Video"
+            onClick={() => onPipelineChange('veo-video')}
+          />
+          <ModeToggleButton
+            icon={ImagePlus}
+            isActive={pipeline === 'image-strip'}
+            label="Image Strip"
+            onClick={() => onPipelineChange('image-strip')}
+          />
+        </div>
+        <p className="mt-3 text-sm leading-6 text-zinc-400">
+          {isImageStripPipeline
+            ? 'Use Gemini or ChatGPT image models to return a guided sprite strip. Optional first and last frame references help lock the endpoints.'
+            : 'Use Veo to animate the source character into a short keyed video before frame extraction.'}
+        </p>
       </div>
 
       <ImageUploadField
         label="Character Image"
-        helper="Upload the source character image Veo should preserve while generating motion."
+        helper={
+          isImageStripPipeline
+            ? 'Upload the source character image the sprite strip should preserve across every frame.'
+            : 'Upload the source character image Veo should preserve while generating motion.'
+        }
         asset={asset}
         icon={ImagePlus}
         isRequired
@@ -6096,6 +6172,25 @@ function ActionAnimatorPanel({
       >
         Use Latest Character Sheet Result
       </button>
+
+      {isImageStripPipeline ? (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <ImageUploadField
+            label="First Frame Guide"
+            helper="Optional. Helps lock the opening pose of the generated strip."
+            asset={firstFrameGuide}
+            icon={Play}
+            onFileSelect={onFirstFrameGuideChange}
+          />
+          <ImageUploadField
+            label="Last Frame Guide"
+            helper="Optional. Helps lock the ending pose of the generated strip."
+            asset={lastFrameGuide}
+            icon={Sparkles}
+            onFileSelect={onLastFrameGuideChange}
+          />
+        </div>
+      ) : null}
 
       <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
         <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
@@ -6120,7 +6215,9 @@ function ActionAnimatorPanel({
           onChange={(event) => onCustomActionPromptChange(event.target.value)}
           placeholder={
             actionType === 'custom'
-              ? 'Describe the exact motion you want Veo to animate.'
+              ? isImageStripPipeline
+                ? 'Describe the exact motion you want the image models to stage across the strip.'
+                : 'Describe the exact motion you want Veo to animate.'
               : 'Optional motion notes. Ex: heavier footfalls, stronger anticipation, aggressive lean.'
           }
           rows={4}
@@ -6128,7 +6225,9 @@ function ActionAnimatorPanel({
         />
         <p className="mt-3 text-xs leading-6 text-zinc-500">
           {actionType === 'custom'
-            ? 'Required for Custom. Describe the full motion arc you want extracted.'
+            ? isImageStripPipeline
+              ? 'Required for Custom. Describe the full motion arc you want staged across the strip.'
+              : 'Required for Custom. Describe the full motion arc you want extracted.'
             : 'Optional. Add pose and timing notes without changing the character identity.'}
         </p>
       </div>
@@ -6152,7 +6251,9 @@ function ActionAnimatorPanel({
             className="mt-3 w-full cursor-pointer accent-cyan-400"
           />
           <p className="mt-3 text-sm leading-6 text-zinc-400">
-            Sample this many frames evenly across the generated video.
+            {isImageStripPipeline
+              ? 'Request this many evenly spaced frames in the returned strip.'
+              : 'Sample this many frames evenly across the generated video.'}
           </p>
         </div>
 
@@ -6174,7 +6275,9 @@ function ActionAnimatorPanel({
             className="mt-3 w-full cursor-pointer accent-cyan-400"
           />
           <p className="mt-3 text-sm leading-6 text-zinc-400">
-            Controls the local preview speed and the target motion pacing.
+            {isImageStripPipeline
+              ? 'Controls the local preview speed and tells the model how the action should pace across the strip.'
+              : 'Controls the local preview speed and the target motion pacing.'}
           </p>
         </div>
 
@@ -6230,8 +6333,12 @@ function ActionAnimatorPanel({
             </p>
             <p className="mt-2 text-sm text-zinc-400">
               {artifacts
-                ? `${artifacts.metadata.frameCount} frames extracted with even sampling on a ${artifacts.metadata.keyColor} key.`
-                : 'Run Action Animator to preview the returned frames and download the source video.'}
+                ? artifacts.video
+                  ? `${artifacts.metadata.frameCount} frames extracted with even sampling on a ${artifacts.metadata.keyColor} key.`
+                  : `${artifacts.metadata.frameCount} strip frames prepared on a ${artifacts.metadata.keyColor} key.`
+                : isImageStripPipeline
+                  ? 'Run Action Animator to preview the returned sprite strip frames.'
+                  : 'Run Action Animator to preview the returned frames and download the source video.'}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -6251,14 +6358,16 @@ function ActionAnimatorPanel({
             >
               Download Frames
             </button>
-            <button
-              type="button"
-              disabled={!artifacts?.video}
-              onClick={onDownloadVideo}
-              className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-4 py-2 text-sm text-cyan-50 transition hover:border-cyan-300/35 hover:bg-cyan-400/16 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Download Video
-            </button>
+            {!isImageStripPipeline ? (
+              <button
+                type="button"
+                disabled={!artifacts?.video}
+                onClick={onDownloadVideo}
+                className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-4 py-2 text-sm text-cyan-50 transition hover:border-cyan-300/35 hover:bg-cyan-400/16 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Download Video
+              </button>
+            ) : null}
           </div>
         </div>
 

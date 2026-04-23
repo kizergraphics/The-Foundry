@@ -1,4 +1,5 @@
 import type { ForgeMode } from '../../shared/modeCatalog.js'
+import type { ActionAnimatorPipeline } from '../lib/forge'
 
 export const MODEL_LABELS = {
   'browser-uv-engine': 'Built-in UV Engine',
@@ -22,7 +23,7 @@ export const TELEMETRY_ROW_BY_MODEL_ID: Record<ModelId, string> = {
 
 const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
   armory: 'openai-gpt-image-2',
-  'action-animator': 'veo-3.1-fast',
+  'action-animator': 'openai-gpt-image-2',
   'character-sheet': 'openai-gpt-image-2',
   'portrait-studio': 'openai-gpt-image-2',
   'texture-lab': 'openai-gpt-image-2',
@@ -34,7 +35,12 @@ const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
 
 const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
   armory: ['openai-gpt-image-2', 'gemini-3-flash', 'gemini-2.5-flash-image'],
-  'action-animator': ['veo-3.1-fast'],
+  'action-animator': [
+    'openai-gpt-image-2',
+    'gemini-3-pro',
+    'gemini-3-flash',
+    'gemini-2.5-flash-image',
+  ],
   'character-sheet': ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash'],
   'portrait-studio': ['openai-gpt-image-2', 'gemini-3-pro'],
   'texture-lab': [
@@ -54,20 +60,34 @@ const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
   visualizer: ['openai-gpt-image-2', 'gemini-3-flash', 'gemini-2.5-flash-image'],
 }
 
-export function getActionAnimatorDefaultModel(): ModelId {
-  return 'veo-3.1-fast'
+export function getActionAnimatorDefaultModel(
+  pipeline: ActionAnimatorPipeline = 'veo-video',
+): ModelId {
+  return pipeline === 'veo-video' ? 'veo-3.1-fast' : 'openai-gpt-image-2'
 }
 
-export function getModeDefaultModel(mode: ForgeMode): ModelId {
+export function getModeDefaultModel(
+  mode: ForgeMode,
+  options?: {
+    actionAnimatorPipeline?: ActionAnimatorPipeline
+  },
+): ModelId {
   return mode === 'action-animator'
-    ? getActionAnimatorDefaultModel()
+    ? getActionAnimatorDefaultModel(options?.actionAnimatorPipeline)
     : smartDefaultModelByMode[mode]
 }
 
-export function getAvailableModelsForMode(mode: ForgeMode): ModelId[] {
+export function getAvailableModelsForMode(
+  mode: ForgeMode,
+  options?: {
+    actionAnimatorPipeline?: ActionAnimatorPipeline
+  },
+): ModelId[] {
   if (mode !== 'action-animator') {
     return availableModelsByMode[mode]
   }
 
-  return ['veo-3.1-fast']
+  return options?.actionAnimatorPipeline === 'veo-video'
+    ? ['veo-3.1-fast']
+    : availableModelsByMode[mode]
 }

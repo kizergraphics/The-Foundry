@@ -13,13 +13,42 @@ describe('mode model helpers', () => {
     expect(getModeDefaultModel('visualizer')).toBe('openai-gpt-image-2')
   })
 
-  it('uses Veo as the fixed action animator model', () => {
-    expect(getModeDefaultModel('action-animator')).toBe('veo-3.1-fast')
+  it('uses Veo by default for the animator video pipeline', () => {
+    expect(
+      getModeDefaultModel('action-animator', {
+        actionAnimatorPipeline: 'veo-video',
+      }),
+    ).toBe('veo-3.1-fast')
   })
 
-  it('returns only Veo for the action animator mode', () => {
-    expect(getAvailableModelsForMode('action-animator')).toEqual([
+  it('uses OpenAI by default for the animator image pipeline', () => {
+    expect(
+      getModeDefaultModel('action-animator', {
+        actionAnimatorPipeline: 'image-strip',
+      }),
+    ).toBe('openai-gpt-image-2')
+  })
+
+  it('returns only Veo for the animator video pipeline', () => {
+    expect(
+      getAvailableModelsForMode('action-animator', {
+        actionAnimatorPipeline: 'veo-video',
+      }),
+    ).toEqual([
       'veo-3.1-fast',
+    ])
+  })
+
+  it('returns OpenAI and Gemini models for the animator image pipeline', () => {
+    expect(
+      getAvailableModelsForMode('action-animator', {
+        actionAnimatorPipeline: 'image-strip',
+      }),
+    ).toEqual([
+      'openai-gpt-image-2',
+      'gemini-3-pro',
+      'gemini-3-flash',
+      'gemini-2.5-flash-image',
     ])
   })
 

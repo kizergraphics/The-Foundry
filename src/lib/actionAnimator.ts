@@ -2,6 +2,7 @@ import { createDataUrl, fileToBase64 } from './browser'
 import type {
   ActionAnimatorActionType,
   ActionAnimatorKeyColor,
+  ActionAnimatorPipeline,
   ActionAnimatorState,
   ForgeResult,
 } from './forge'
@@ -25,8 +26,9 @@ export type ActionAnimatorMetadata = {
   frameCount: number
   keyColor: ActionAnimatorKeyColor
   normalizedSize: ActionAnimatorState['normalizedSize']
+  pipeline: ActionAnimatorPipeline
   prompt: string
-  sampleStrategy: 'even'
+  sampleStrategy: 'even' | 'strip'
   sourceModel: string | null
 }
 
@@ -54,8 +56,9 @@ type ActionAnimatorApiResponse =
           frameCount?: number
           keyColor?: ActionAnimatorKeyColor
           normalizedSize?: ActionAnimatorState['normalizedSize']
+          pipeline?: ActionAnimatorPipeline
           prompt?: string
-          sampleStrategy?: 'even'
+          sampleStrategy?: 'even' | 'strip'
           sourceModel?: string | null
         }
         spriteSheet?: {
@@ -86,6 +89,11 @@ type ActionAnimatorApiResponse =
 type ActionAnimatorVideoRequestPayload = {
   actionType: ActionAnimatorActionType
   fps: number
+  firstFrame?: {
+    data: string
+    mimeType: string
+    name: string
+  }
   frameCount: number
   image: {
     data: string
@@ -93,6 +101,11 @@ type ActionAnimatorVideoRequestPayload = {
     name: string
   }
   keyColor: ActionAnimatorKeyColor
+  lastFrame?: {
+    data: string
+    mimeType: string
+    name: string
+  }
   modelId: string
   normalizedSize: ActionAnimatorState['normalizedSize']
   pipeline: ActionAnimatorState['pipeline']
@@ -104,15 +117,27 @@ export function buildActionAnimatorPrompt(state: ActionAnimatorState) {
   const actionLabel =
     state.actionType === 'custom' ? directionPrompt || 'custom action' : state.actionType
   const keyColorLabel = state.keyColor === 'blue' ? '#0000FF blue' : '#00FF00 green'
+  const isImageStripPipeline = state.pipeline === 'image-strip'
 
   return [
-    `Create a 2D game sprite ${actionLabel} animation cycle from the provided character image.`,
+    isImageStripPipeline
+      ? `Create a 2D game sprite ${actionLabel} strip from the provided character image.`
+      : `Create a 2D game sprite ${actionLabel} animation cycle from the provided character image.`,
     'Use a locked side-profile camera with no camera motion or angle changes.',
     'Keep the exact face, proportions, silhouette, outfit shapes, colors, and surface detail from the source image.',
     'Show the full body at a consistent scale with no cropping.',
-    `Sample target: ${state.frameCount} frames at ${state.fps} fps.`,
-    `Normalize the extracted frames to ${state.normalizedSize} x ${state.normalizedSize}.`,
+    `Target ${state.frameCount} frames at ${state.fps} fps.`,
+    isImageStripPipeline
+      ? `Return a single horizontal sprite strip with ${state.frameCount} evenly spaced square frames in one row.`
+      : null,
+    `Normalize the output frames to ${state.normalizedSize} x ${state.normalizedSize}.`,
     `Use a flat ${keyColorLabel} chroma background with no gradients, shadows, floor planes, props, or scenery.`,
+    state.firstFrameGuide
+      ? 'Use the supplied first-frame guide as the opening pose.'
+      : null,
+    state.lastFrameGuide
+      ? 'Use the supplied last-frame guide as the ending pose.'
+      : null,
     describeActionAnimatorMotion(state.actionType),
     directionPrompt ? `Additional direction: ${directionPrompt}.` : null,
   ]
@@ -152,8 +177,11 @@ export async function generateActionAnimator({
     frameCount: payload.artifacts?.metadata?.frameCount ?? state.frameCount,
     keyColor: payload.artifacts?.metadata?.keyColor ?? state.keyColor,
     normalizedSize: payload.artifacts?.metadata?.normalizedSize ?? state.normalizedSize,
+    pipeline: payload.artifacts?.metadata?.pipeline ?? state.pipeline,
     prompt: payload.artifacts?.metadata?.prompt ?? payload.prompt ?? request.prompt,
-    sampleStrategy: 'even' as const,
+    sampleStrategy:
+      payload.artifacts?.metadata?.sampleStrategy ??
+      (state.pipeline === 'image-strip' ? 'strip' : 'even'),
     sourceModel: payload.artifacts?.metadata?.sourceModel ?? payload.model ?? null,
   }
 
@@ -190,6 +218,13 @@ async function buildActionAnimatorVideoRequest(
   return {
     actionType: state.actionType,
     fps: state.fps,
+    firstFrame: state.firstFrameGuide
+      ? {
+          data: await fileToBase64(state.firstFrameGuide.file),
+          mimeType: state.firstFrameGuide.mimeType,
+          name: state.firstFrameGuide.name,
+        }
+      : undefined,
     frameCount: state.frameCount,
     image: {
       data: await fileToBase64(state.characterImage.file),
@@ -197,6 +232,13 @@ async function buildActionAnimatorVideoRequest(
       name: state.characterImage.name,
     },
     keyColor: state.keyColor,
+    lastFrame: state.lastFrameGuide
+      ? {
+          data: await fileToBase64(state.lastFrameGuide.file),
+          mimeType: state.lastFrameGuide.mimeType,
+          name: state.lastFrameGuide.name,
+        }
+      : undefined,
     modelId,
     normalizedSize: state.normalizedSize,
     pipeline: state.pipeline,

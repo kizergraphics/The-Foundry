@@ -155,7 +155,13 @@ const routeModelDefaults = {
   '/api/variant-forge-ideas': 'gemini-3-flash',
 }
 const routeModelAllowlist = {
-  '/api/action-animator': ['veo-3.1-fast'],
+  '/api/action-animator': [
+    'veo-3.1-fast',
+    'openai-gpt-image-2',
+    'gemini-3-pro',
+    'gemini-3-flash',
+    'gemini-2.5-flash-image',
+  ],
   '/api/character-sheet': ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': [
     'openai-gpt-image-2',
@@ -310,14 +316,6 @@ app.post(
   actionAnimatorConcurrencyLimit,
   parseActionAnimatorBody,
   async (request, response) => {
-    if (!apiKey) {
-      response.status(500).json({
-        error:
-          'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
-      })
-      return
-    }
-
     let validatedRequest
 
     try {
@@ -327,7 +325,10 @@ app.post(
       return
     }
 
-    const modelSelection = resolveModelForRoute('/api/action-animator', validatedRequest.modelId)
+    const modelSelection = resolveActionAnimatorModelSelection({
+      modelId: validatedRequest.modelId,
+      pipeline: validatedRequest.pipeline,
+    })
 
     if (!modelSelection.ok) {
       response.status(400).json({
@@ -341,18 +342,31 @@ app.post(
       return
     }
 
-    const ai = new GoogleGenAI({ apiKey })
+    if (!hasApiKeyForProvider(modelSelection.provider)) {
+      response.status(500).json({
+        error: buildMissingApiKeyMessage(modelSelection.provider),
+      })
+      return
+    }
+
+    const ai =
+      modelSelection.provider === 'google' && apiKey
+        ? new GoogleGenAI({ apiKey })
+        : null
 
     try {
       const animatorResult = await generateAnimatorArtifacts({
         actionType: validatedRequest.actionType,
         ai,
         fps: validatedRequest.fps,
+        firstFrame: validatedRequest.firstFrame,
         frameCount: validatedRequest.frameCount,
         frameSize: validatedRequest.normalizedSize,
         image: validatedRequest.image,
         keyColor: validatedRequest.keyColor,
+        lastFrame: validatedRequest.lastFrame,
         modelSelection,
+        pipeline: validatedRequest.pipeline,
         prompt: validatedRequest.prompt,
       })
 
@@ -363,6 +377,7 @@ app.post(
           modelSelection.modelId,
           '/api/action-animator',
         ),
+        tokenCount: animatorResult.tokenCount,
       }).catch((logError) => {
         console.warn('Telemetry logging failed for /api/action-animator:', logError)
       })
@@ -2829,11 +2844,14 @@ async function generateAnimatorArtifacts({
   actionType,
   ai,
   fps,
+  firstFrame,
   frameCount,
   frameSize,
   image,
   keyColor,
+  lastFrame,
   modelSelection,
+  pipeline,
   prompt,
 }) {
   const normalizedFrameSize = normalizeActionAnimatorFrameSize(frameSize)
@@ -2843,10 +2861,86 @@ async function generateAnimatorArtifacts({
   const normalizedPrompt = buildAnimatorPrompt({
     actionType,
     fps: normalizedFps,
+    hasFirstFrameGuide: Boolean(firstFrame),
     frameCount: normalizedFrameCount,
     keyColor: normalizedKeyColor,
+    hasLastFrameGuide: Boolean(lastFrame),
+    pipeline,
     prompt,
   })
+  if (pipeline === 'image-strip') {
+    const generation = await generateImagesWithModel({
+      candidateCount: 1,
+      googleConfig: {
+        aspectRatio: '16:9',
+      },
+      modelSelection,
+      prompt: normalizedPrompt,
+      references: [
+        {
+          data: image.data,
+          mimeType: image.mimeType,
+          name: image.name || 'character-reference.png',
+        },
+        ...(firstFrame
+          ? [
+              {
+                data: firstFrame.data,
+                mimeType: firstFrame.mimeType,
+                name: firstFrame.name || 'first-frame-guide.png',
+              },
+            ]
+          : []),
+        ...(lastFrame
+          ? [
+              {
+                data: lastFrame.data,
+                mimeType: lastFrame.mimeType,
+                name: lastFrame.name || 'last-frame-guide.png',
+              },
+            ]
+          : []),
+      ],
+      routeKey: '/api/action-animator',
+      size: '1536x1024',
+      systemInstruction:
+        'Return exactly one polished horizontal sprite strip image. ' +
+        'Do not add text, labels, borders, UI, or extra panels outside the requested animation frames.',
+      timeoutMs: forgeGenerationTimeoutMs,
+    })
+    const spriteSheetImage = generation.images[0]
+
+    if (!spriteSheetImage?.data) {
+      const noImageError = buildNoImageResponseError(
+        '/api/action-animator',
+        modelSelection,
+        generation.text,
+        [],
+        getActionAnimatorAllowedModelIds('image-strip'),
+      )
+      const error = new Error(noImageError.error.message)
+      error.status = 422
+      error.payload = noImageError
+      throw error
+    }
+
+    const artifactPayload = await createActionAnimatorArtifactsFromImageStrip({
+      frameCount: normalizedFrameCount,
+      frameSize: normalizedFrameSize,
+      fps: normalizedFps,
+      keyColor: normalizedKeyColor,
+      prompt: normalizedPrompt,
+      sourceImageBuffer: Buffer.from(spriteSheetImage.data, 'base64'),
+      sourceModel: modelSelection.modelId,
+    })
+
+    return {
+      artifacts: artifactPayload,
+      prompt: normalizedPrompt,
+      tokenCount: extractTotalTokenCount(generation.raw),
+    }
+  }
+
   const sourceImage = {
     imageBytes: image.data,
     mimeType: image.mimeType,
@@ -2880,6 +2974,7 @@ async function generateAnimatorArtifacts({
   return {
     artifacts: artifactPayload,
     prompt: normalizedPrompt,
+    tokenCount: 0,
   }
 }
 
@@ -3025,6 +3120,7 @@ async function createActionAnimatorArtifactsFromVideo({
         frameCount: safeFrameCount,
         keyColor: normalizedKeyColor,
         normalizedSize: safeFrameSize,
+        pipeline: 'veo-video',
         prompt,
         sampleStrategy: 'even',
         sourceModel,
@@ -3044,6 +3140,82 @@ async function createActionAnimatorArtifactsFromVideo({
     }
   } finally {
     await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
+  }
+}
+
+async function createActionAnimatorArtifactsFromImageStrip({
+  frameCount,
+  frameSize,
+  fps,
+  keyColor,
+  prompt,
+  sourceImageBuffer,
+  sourceModel,
+}) {
+  const safeFrameCount = clampAnimatorFrameCount(frameCount)
+  const safeFrameSize = normalizeActionAnimatorFrameSize(frameSize)
+  const normalizedKeyColor = resolveActionAnimatorKeyColor(keyColor)
+  const background = actionAnimatorKeyColorCssById[normalizedKeyColor]
+  const targetSpriteWidth = safeFrameCount * safeFrameSize
+  const fittedSpriteSheet = await sharp(sourceImageBuffer)
+    .resize(targetSpriteWidth, safeFrameSize, {
+      background,
+      fit: 'contain',
+      kernel: sharp.kernel.nearest,
+      position: 'center',
+    })
+    .png()
+    .toBuffer()
+
+  const rawFrames = await Promise.all(
+    Array.from({ length: safeFrameCount }, (_, index) =>
+      sharp(fittedSpriteSheet)
+        .extract({
+          height: safeFrameSize,
+          left: index * safeFrameSize,
+          top: 0,
+          width: safeFrameSize,
+        })
+        .png()
+        .toBuffer(),
+    ),
+  )
+  const normalizedFrames = await normalizeAnimatorFrameBuffers(rawFrames, {
+    keyColor: normalizedKeyColor,
+    targetSize: safeFrameSize,
+  })
+  const spriteSheetBuffer = await composeHorizontalSpriteSheet(
+    normalizedFrames,
+    safeFrameSize,
+    normalizedKeyColor,
+  )
+
+  return {
+    frames: normalizedFrames.map((frameBuffer, index) => ({
+      data: frameBuffer.toString('base64'),
+      id: `action-animator-frame-${String(index + 1).padStart(2, '0')}`,
+      mimeType: 'image/png',
+      text: `Frame ${index + 1} of ${safeFrameCount}.`,
+    })),
+    metadata: {
+      fps,
+      frameCount: safeFrameCount,
+      keyColor: normalizedKeyColor,
+      normalizedSize: safeFrameSize,
+      pipeline: 'image-strip',
+      prompt,
+      sampleStrategy: 'strip',
+      sourceModel,
+    },
+    spriteSheet: {
+      data: spriteSheetBuffer.toString('base64'),
+      id: 'action-animator-sprite-sheet',
+      mimeType: 'image/png',
+      text:
+        `Generated ${safeFrameCount} sprite frames from an image-model strip at ${safeFrameSize} x ${safeFrameSize}. ` +
+        'Frames were split from the returned strip and normalized onto a flat chroma background.',
+    },
+    video: null,
   }
 }
 
@@ -3417,7 +3589,16 @@ async function composeHorizontalSpriteSheet(frameBuffers, targetSize, keyColor) 
     .toBuffer()
 }
 
-function buildAnimatorPrompt({ actionType, fps, frameCount, keyColor, prompt }) {
+function buildAnimatorPrompt({
+  actionType,
+  fps,
+  frameCount,
+  hasFirstFrameGuide = false,
+  hasLastFrameGuide = false,
+  keyColor,
+  pipeline = 'veo-video',
+  prompt,
+}) {
   const keyColorLabel = resolveActionAnimatorKeyColor(keyColor) === 'blue'
     ? '#0000FF blue'
     : '#00FF00 green'
@@ -3435,6 +3616,15 @@ function buildAnimatorPrompt({ actionType, fps, frameCount, keyColor, prompt }) 
     'Preserve the exact character identity, proportions, colors, clothing shapes, and silhouette from the reference image.',
     'Keep the full body visible at a consistent scale with no floor plane, scenery, props, or extra characters.',
     `Use a solid ${keyColorLabel} background that stays flat and consistent in every frame.`,
+    pipeline === 'image-strip'
+      ? `Return a single horizontal sprite strip with exactly ${frameCount} equal square frames in one row.`
+      : null,
+    hasFirstFrameGuide
+      ? 'The second attached image is a first-frame guide. Match that opening pose closely.'
+      : null,
+    hasLastFrameGuide
+      ? `The ${hasFirstFrameGuide ? 'third' : 'second'} attached image is a last-frame guide. Match that ending pose closely.`
+      : null,
     describeAnimatorMotion(actionType),
   ]
     .filter(Boolean)
@@ -3594,6 +3784,37 @@ function resolveModelForRoute(routeKey, requestedModelId) {
   }
 }
 
+function getActionAnimatorAllowedModelIds(pipeline = 'veo-video') {
+  return pipeline === 'image-strip'
+    ? ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image']
+    : ['veo-3.1-fast']
+}
+
+function getActionAnimatorDefaultModelId(pipeline = 'veo-video') {
+  return pipeline === 'image-strip' ? 'openai-gpt-image-2' : 'veo-3.1-fast'
+}
+
+function resolveActionAnimatorModelSelection({ modelId, pipeline }) {
+  const allowedModels = getActionAnimatorAllowedModelIds(pipeline)
+  const normalizedRequestedModel =
+    typeof modelId === 'string' && modelId.trim().length > 0
+      ? modelId.trim()
+      : getActionAnimatorDefaultModelId(pipeline)
+
+  if (!allowedModels.includes(normalizedRequestedModel)) {
+    return {
+      ok: false,
+      details: [
+        `Allowed models for this animator pipeline: ${allowedModels.join(', ')}`,
+      ],
+      message:
+        `The selected model "${normalizedRequestedModel}" is not available for this action animator pipeline.`,
+    }
+  }
+
+  return resolveModelForRoute('/api/action-animator', normalizedRequestedModel)
+}
+
 function buildRouteModelFallbackSequence(routeKey, preferredModelId) {
   const allowedModels = routeModelAllowlist[routeKey] ?? []
 
@@ -3661,10 +3882,16 @@ function buildMissingApiKeyMessage(provider) {
     : 'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.'
 }
 
-function buildNoImageResponseError(routeKey, modelSelection, generationText, extraDetails = []) {
+function buildNoImageResponseError(
+  routeKey,
+  modelSelection,
+  generationText,
+  extraDetails = [],
+  recommendedModelIds,
+) {
   const incompatibleSignal = looksLikeToolDelegation(generationText)
-  const recommendedModelIds = routeModelAllowlist[routeKey] ?? []
-  const recommendations = recommendedModelIds
+  const routeRecommendations = recommendedModelIds ?? routeModelAllowlist[routeKey] ?? []
+  const recommendations = routeRecommendations
     .filter((modelId) => modelId !== modelSelection.modelId)
     .map((modelId) => `"${modelId}"`)
 
@@ -3749,6 +3976,18 @@ function normalizeGenerationError(
     error && typeof error === 'object' && 'payload' in error ? error.payload : null
   const statusFromError =
     error && typeof error === 'object' && 'status' in error ? Number(error.status) : null
+
+  if (
+    payloadFromError?.error &&
+    typeof payloadFromError.error.title === 'string' &&
+    typeof payloadFromError.error.message === 'string'
+  ) {
+    return {
+      status: Number.isFinite(statusFromError) && statusFromError > 0 ? statusFromError : 500,
+      body: payloadFromError,
+    }
+  }
+
   const fallbackMessage =
     error instanceof Error ? error.message : `${providerLabel} request failed unexpectedly.`
   const parsedPayload = tryParseErrorPayload(fallbackMessage)
