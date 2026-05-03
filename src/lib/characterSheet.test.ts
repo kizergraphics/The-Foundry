@@ -35,6 +35,7 @@ describe('buildCharacterSheetPrompt', () => {
         parentId: 'sheet-1',
       },
       'gemini-3-pro',
+      'low',
       'studio-default',
       {
         dataUrl: createDataUrl('Zm9yZ2U=', 'image/png'),
@@ -49,5 +50,6 @@ describe('buildCharacterSheetPrompt', () => {
       data: 'Zm9yZ2U=',
       mimeType: 'image/png',
     })
+    expect(request.quality).toBe('low')
   })
 })

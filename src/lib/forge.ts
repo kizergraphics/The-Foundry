@@ -55,6 +55,7 @@ export type ModelFormat = 'obj' | 'fbx'
 export type ActionAnimatorPipeline = 'veo-video' | 'image-strip'
 export type ActionAnimatorKeyColor = 'green' | 'blue'
 export type ActionAnimatorNormalizedSize = 512 | 1080
+export type OpenAiImageQuality = 'auto' | 'low' | 'medium' | 'high'
 export type ActionAnimatorActionType =
   | 'idle'
   | 'walk'
@@ -403,6 +404,17 @@ export const defaultTextureMaterialMapDefaults: TextureMaterialMapDefaults = {
 }
 
 export const actionAnimatorVideoFrameSizes = [512, 1080] as const
+export const openAiImageQualityOptions = ['auto', 'low', 'medium', 'high'] as const
+
+export function isOpenAiImageQuality(value: unknown): value is OpenAiImageQuality {
+  return typeof value === 'string' && openAiImageQualityOptions.includes(value as OpenAiImageQuality)
+}
+
+export function getDefaultOpenAiImageQualityForMode(
+  mode: ForgeMode,
+): OpenAiImageQuality {
+  return mode === 'character-sheet' ? 'low' : 'auto'
+}
 
 function buildVariantForgeOptionState(enabled = false, customSetting = ''): VariantForgeOptionState {
   return {

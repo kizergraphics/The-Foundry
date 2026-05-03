@@ -39,6 +39,7 @@ const allowedCharacterReferenceSlots = new Set(['face', 'outfit', 'art-style'])
 const allowedResponseModalities = new Set(['IMAGE', 'TEXT'])
 const allowedActionAnimatorKeyColors = new Set(['green', 'blue'])
 const allowedActionAnimatorPipelines = new Set(['veo-video', 'image-strip'])
+const allowedOpenAiImageQualities = new Set(['auto', 'low', 'medium', 'high'])
 
 function buildValidationError(message, details) {
   return {
@@ -92,6 +93,10 @@ function readOptionalEnum(value, fieldName, allowedValues) {
   }
 
   return value
+}
+
+function readOptionalOpenAiImageQuality(value, fieldName = 'quality') {
+  return readOptionalEnum(value, fieldName, allowedOpenAiImageQualities)
 }
 
 function readInteger(value, fieldName, { min, max, fallback }) {
@@ -461,6 +466,7 @@ export function validateForgeRequest(body) {
         : undefined,
     mode,
     modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
+    quality: readOptionalOpenAiImageQuality(body?.quality),
     preservePalette:
       body?.preservePalette !== undefined || mode === 'variant-forge'
         ? readBoolean(body?.preservePalette, 'preservePalette', false)
@@ -612,12 +618,14 @@ export function validateMaterialMapsRequest(body) {
       max: 100,
       min: 0,
     }),
+    modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
     normalStrength: readClampedInteger(body?.normalStrength, 'normalStrength', {
       fallback: 60,
       max: 100,
       min: 0,
     }),
     prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
+    quality: readOptionalOpenAiImageQuality(body?.quality),
     roughnessStrength: readClampedInteger(body?.roughnessStrength, 'roughnessStrength', {
       fallback: 60,
       max: 100,
@@ -652,6 +660,7 @@ export function validateCharacterSheetRequest(body) {
       : null,
     generationMode,
     modelId: readOptionalTrimmedString(body?.modelId, 'modelId', 80),
+    quality: readOptionalOpenAiImageQuality(body?.quality),
     parentId: readOptionalTrimmedString(body?.parentId, 'parentId', 200) || null,
     prompt: readTrimmedString(body?.prompt, 'prompt', {
       maxLength: maxPromptLength,
@@ -701,6 +710,7 @@ export function validateActionAnimatorRequest(body) {
       readOptionalEnum(body?.pipeline, 'pipeline', allowedActionAnimatorPipelines) ??
       'veo-video',
     prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
+    quality: readOptionalOpenAiImageQuality(body?.quality),
   }
 }
 

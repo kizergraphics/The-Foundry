@@ -60,10 +60,12 @@ describe('validateForgeRequest', () => {
     expect(
       validateForgeRequest({
         mode: 'variant-forge',
+        quality: 'high',
         variantFamily: 'damage',
         variantPreset: 'no-damage',
       }),
     ).toMatchObject({
+      quality: 'high',
       variantFamily: 'damage',
       variantPreset: 'no-damage',
     })
@@ -218,6 +220,7 @@ describe('validateActionAnimatorRequest', () => {
           name: 'last-frame.png',
         },
         pipeline: 'image-strip',
+        quality: 'medium',
       }),
     ).toMatchObject({
       firstFrame: {
@@ -229,6 +232,7 @@ describe('validateActionAnimatorRequest', () => {
         name: 'last-frame.png',
       },
       pipeline: 'image-strip',
+      quality: 'medium',
     })
   })
 
@@ -251,6 +255,8 @@ describe('validateMaterialMapsRequest', () => {
       validateMaterialMapsRequest({
         heightStrength: 164,
         metallicStrength: -14,
+        modelId: 'openai-gpt-image-2',
+        quality: 'low',
         sourceImage: {
           data: validPngBase64,
           mimeType: 'image/png',
@@ -259,7 +265,9 @@ describe('validateMaterialMapsRequest', () => {
     ).toMatchObject({
       heightStrength: 100,
       metallicStrength: 0,
+      modelId: 'openai-gpt-image-2',
       normalStrength: 60,
+      quality: 'low',
       roughnessStrength: 60,
       sourceImage: {
         mimeType: 'image/png',

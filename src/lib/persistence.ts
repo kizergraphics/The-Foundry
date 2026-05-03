@@ -6,6 +6,7 @@ import type {
   CharacterSheetGenerationMode,
   ForgeMode,
   GenerationCount,
+  OpenAiImageQuality,
   TextureMaterialMapDefaults,
   TextureExpansionTargetSize,
   TextureLabWorkflow,
@@ -23,6 +24,8 @@ import {
   clampActionAnimatorNormalizedSize,
   clampFrameCount,
   clampIntensity,
+  getDefaultOpenAiImageQualityForMode,
+  isOpenAiImageQuality,
   clampTextureLabOutputSize,
   clampUvAtlasSize,
   clampUvPaddingPx,
@@ -89,6 +92,7 @@ type StoredSettings = {
   actionAnimator: StoredActionAnimatorSettings
   characterSheet: StoredCharacterSheetSettings
   generationCount: GenerationCount
+  openAiImageQualityByMode: Partial<Record<ForgeMode, OpenAiImageQuality>>
   portraitStudio: StoredPortraitStudioSettings
   prompt: string
   textureLab: {
@@ -238,6 +242,29 @@ function readStoredVfxTextureOutputs(
   return normalizedKinds.length > 0
     ? normalizedKinds
     : getDefaultVfxTextureOutputs()
+}
+
+function readStoredOpenAiImageQualityByMode(
+  value: unknown,
+): Partial<Record<ForgeMode, OpenAiImageQuality>> {
+  if (!value || typeof value !== 'object') {
+    return {}
+  }
+
+  const normalized = {} as Partial<Record<ForgeMode, OpenAiImageQuality>>
+  const rawValue = value as Record<string, unknown>
+
+  for (const [mode, quality] of Object.entries(rawValue)) {
+    if (!isForgeMode(mode) || !isOpenAiImageQuality(quality)) {
+      continue
+    }
+
+    if (quality !== getDefaultOpenAiImageQualityForMode(mode)) {
+      normalized[mode] = quality
+    }
+  }
+
+  return normalized
 }
 
 export function loadStoredState(): StoredState | null {
@@ -401,6 +428,9 @@ export function loadStoredState(): StoredState | null {
           parsed.settings?.generationCount === 4
             ? parsed.settings.generationCount
             : 3,
+        openAiImageQualityByMode: readStoredOpenAiImageQualityByMode(
+          parsed.settings?.openAiImageQualityByMode,
+        ),
         portraitStudio: {
           prompt:
             typeof parsed.settings?.portraitStudio?.prompt === 'string'

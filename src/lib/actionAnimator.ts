@@ -2,6 +2,7 @@ import { createDataUrl, fileToBase64 } from './browser'
 import type {
   ActionAnimatorActionType,
   ActionAnimatorKeyColor,
+  OpenAiImageQuality,
   ActionAnimatorPipeline,
   ActionAnimatorState,
   ForgeResult,
@@ -110,6 +111,7 @@ type ActionAnimatorVideoRequestPayload = {
   normalizedSize: ActionAnimatorState['normalizedSize']
   pipeline: ActionAnimatorState['pipeline']
   prompt: string
+  quality: OpenAiImageQuality
 }
 
 export function buildActionAnimatorPrompt(state: ActionAnimatorState) {
@@ -147,16 +149,18 @@ export function buildActionAnimatorPrompt(state: ActionAnimatorState) {
 
 export async function generateActionAnimator({
   modelId,
+  quality,
   state,
 }: {
   modelId: string
+  quality: OpenAiImageQuality
   state: ActionAnimatorState
 }) {
   if (!state.characterImage) {
     throw new Error('A character image is required before generating animation.')
   }
 
-  const request = await buildActionAnimatorVideoRequest(state, modelId)
+  const request = await buildActionAnimatorVideoRequest(state, modelId, quality)
   const payload = await postActionAnimatorRequest(request)
   const spriteSheet = normalizeForgeResult(
     payload.artifacts?.spriteSheet,
@@ -210,6 +214,7 @@ export async function generateActionAnimator({
 async function buildActionAnimatorVideoRequest(
   state: ActionAnimatorState,
   modelId: string,
+  quality: OpenAiImageQuality,
 ): Promise<ActionAnimatorVideoRequestPayload> {
   if (!state.characterImage) {
     throw new Error('A character image is required before generating animation.')
@@ -243,6 +248,7 @@ async function buildActionAnimatorVideoRequest(
     normalizedSize: state.normalizedSize,
     pipeline: state.pipeline,
     prompt: buildActionAnimatorPrompt(state),
+    quality,
   }
 }
 

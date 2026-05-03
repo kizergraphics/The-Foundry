@@ -22,6 +22,9 @@ const baseStoredSettings = {
     referencePrompt: '',
   },
   generationCount: 3 as const,
+  openAiImageQualityByMode: {
+    'character-sheet': 'low' as const,
+  },
   portraitStudio: {
     prompt: '',
   },

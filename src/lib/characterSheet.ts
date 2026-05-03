@@ -4,6 +4,7 @@ import type {
   CharacterSheetReferenceSlot,
   CharacterSheetState,
   ForgeResult,
+  OpenAiImageQuality,
 } from './forge'
 
 export const defaultCharacterSheetModel = 'openai-gpt-image-2'
@@ -35,6 +36,7 @@ export type CharacterSheetRequestPayload = {
   modelId: string
   parentId: string | null
   prompt: string
+  quality: OpenAiImageQuality
   references: CharacterSheetEncodedReference[]
   responseModalities: ['IMAGE', 'TEXT']
   styleId: string
@@ -88,6 +90,7 @@ export function buildCharacterSheetPrompt(state: CharacterSheetState) {
 export async function buildCharacterSheetRequest(
   state: CharacterSheetState,
   modelId: string,
+  quality: OpenAiImageQuality,
   styleId: string,
   consistencySource: ForgeResult | null = null,
 ): Promise<CharacterSheetRequestPayload> {
@@ -131,6 +134,7 @@ export async function buildCharacterSheetRequest(
     modelId,
     parentId: state.consistencyEnabled ? state.parentId : null,
     prompt: buildCharacterSheetPrompt(state),
+    quality,
     references,
     responseModalities: ['IMAGE', 'TEXT'],
     styleId,
@@ -141,17 +145,20 @@ export async function buildCharacterSheetRequest(
 export async function generateCharacterSheet({
   consistencySource,
   modelId,
+  quality,
   state,
   styleId,
 }: {
   consistencySource?: ForgeResult | null
   modelId: string
+  quality: OpenAiImageQuality
   state: CharacterSheetState
   styleId: string
 }) {
   const request = await buildCharacterSheetRequest(
     state,
     modelId,
+    quality,
     styleId,
     consistencySource ?? null,
   )

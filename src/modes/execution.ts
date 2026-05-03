@@ -8,6 +8,7 @@ import type {
   ForgeMode,
   ForgeResult,
   ForgeState,
+  OpenAiImageQuality,
   ReferenceAsset,
   ReferenceSlot,
   TextureMaterialMapDefaults,
@@ -184,12 +185,14 @@ export async function buildStandardForgeRequest({
   generationCount,
   mode,
   modelId,
+  quality,
   state,
   styleText,
 }: {
   generationCount?: number
   mode: ForgeMode
   modelId: string
+  quality: OpenAiImageQuality
   state: ForgeState
   styleText: string
 }) {
@@ -209,6 +212,7 @@ export async function buildStandardForgeRequest({
     modelId,
     mode,
     prompt: state.prompt.trim(),
+    quality,
     references,
     seamlessMode: mode === 'texture-lab' && state.textureLab.workflow === 'generate'
       ? state.textureLab.seamlessMode
@@ -222,12 +226,16 @@ export async function buildStandardForgeRequest({
 }
 
 export async function buildMaterialMapsRequest({
+  modelId,
   prompt,
+  quality,
   result,
   strengths,
   styleText,
 }: {
+  modelId: string
   prompt: string
+  quality: OpenAiImageQuality
   result: ForgeResult
   strengths: TextureMaterialMapDefaults
   styleText: string
@@ -236,7 +244,9 @@ export async function buildMaterialMapsRequest({
 
   return {
     ...strengths,
+    modelId,
     prompt: prompt.trim(),
+    quality,
     sourceImage: {
       data: await fileToBase64(sourceBlob),
       mimeType: sourceBlob.type || result.mimeType,
@@ -250,6 +260,7 @@ export async function buildVariantForgeRequest({
   activeVariantOptions,
   customDirection,
   modelId,
+  quality,
   state,
   styleText,
 }: {
@@ -259,6 +270,7 @@ export async function buildVariantForgeRequest({
   }>
   customDirection: string
   modelId: string
+  quality: OpenAiImageQuality
   state: ForgeState['variantForge']
   styleText: string
 }) {
@@ -271,6 +283,7 @@ export async function buildVariantForgeRequest({
     mode: 'variant-forge',
     modelId,
     prompt: '',
+    quality,
     customDirection: customDirection.trim(),
     preservePalette: state.preservePalette,
     preserveSilhouette: state.preserveSilhouette,
@@ -294,11 +307,13 @@ export async function buildPortraitStudioRequest({
   heroImage,
   modelId,
   prompt,
+  quality,
   styleText,
 }: {
   heroImage: NonNullable<ForgeState['portraitStudio']['heroImage']>
   modelId: string
   prompt: string
+  quality: OpenAiImageQuality
   styleText: string
 }) {
   return {
@@ -306,6 +321,7 @@ export async function buildPortraitStudioRequest({
     mode: 'portrait-studio',
     modelId,
     prompt,
+    quality,
     references: [
       {
         data: await fileToBase64(heroImage.file),
@@ -320,11 +336,13 @@ export async function buildPortraitStudioRequest({
 
 export async function buildTextureExpansionRequest({
   modelId,
+  quality,
   sourceAsset,
   state,
   styleText,
 }: {
   modelId: string
+  quality: OpenAiImageQuality
   sourceAsset: NonNullable<ForgeState['textureLab']['expansionSource']>
   state: ForgeState
   styleText: string
@@ -341,6 +359,7 @@ export async function buildTextureExpansionRequest({
     mode: state.activeMode,
     modelId,
     prompt: state.prompt.trim(),
+    quality,
     styleText,
     textureExpansion: {
       canvasImage: {
@@ -364,11 +383,13 @@ export async function buildTextureExpansionRequest({
 
 export async function buildVfxForgeRequest({
   modelId,
+  quality,
   textureKind,
   state,
   styleText,
 }: {
   modelId: string
+  quality: OpenAiImageQuality
   textureKind: VfxTextureKind
   state: ForgeState
   styleText: string
@@ -396,6 +417,7 @@ export async function buildVfxForgeRequest({
     mode: 'vfx-forge',
     modelId,
     prompt: state.vfxForge.prompt.trim(),
+    quality,
     references,
     styleText,
     textureKind,

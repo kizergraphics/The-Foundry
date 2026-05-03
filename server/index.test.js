@@ -408,6 +408,7 @@ describe('API hardening', () => {
         mode: 'armory',
         modelId: 'openai-gpt-image-2',
         prompt: 'bronze gauntlet concept',
+        quality: 'high',
         workflow: 'generate',
       })
 
@@ -425,6 +426,11 @@ describe('API hardening', () => {
         method: 'POST',
       }),
     )
+    const [, requestOptions] = fetchMock.mock.calls[0]
+    expect(JSON.parse(requestOptions.body)).toMatchObject({
+      model: 'gpt-image-2',
+      quality: 'high',
+    })
     expect(__mock.generateContent).not.toHaveBeenCalled()
   })
 
@@ -471,6 +477,102 @@ describe('API hardening', () => {
         }),
       }),
     )
+  })
+
+  it('uses low-quality OpenAI edits and downscales oversized character-sheet references', async () => {
+    const generatedBase64 = await createPngBase64(1, 1, [120, 80, 160])
+    const largeReferenceBase64 = await sharp({
+      create: {
+        background: { b: 180, g: 90, r: 30 },
+        channels: 3,
+        height: 512,
+        width: 2048,
+      },
+    })
+      .png()
+      .toBuffer()
+      .then((buffer) => buffer.toString('base64'))
+    const fetchMock = vi.fn().mockResolvedValue({
+      headers: new Headers(),
+      json: async () => ({
+        data: [
+          {
+            b64_json: generatedBase64,
+            revised_prompt: 'Three-view turnaround sheet',
+          },
+        ],
+        usage: {
+          input_tokens: 48,
+          output_tokens: 620,
+          total_tokens: 668,
+        },
+      }),
+      ok: true,
+      status: 200,
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    const app = await loadApp({
+      OPENAI_API_KEY: 'openai-test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/character-sheet')
+      .send({
+        aspectRatio: '16:9',
+        generationMode: 'reference',
+        modelId: 'openai-gpt-image-2',
+        prompt: 'Build a cel-shaded turnaround.',
+        references: [
+          {
+            data: largeReferenceBase64,
+            mimeType: 'image/png',
+            role: 'Identity_Reference',
+            slot: 'face',
+          },
+          {
+            data: largeReferenceBase64,
+            mimeType: 'image/png',
+            role: 'Clothing_Reference',
+            slot: 'outfit',
+          },
+          {
+            data: largeReferenceBase64,
+            mimeType: 'image/png',
+            role: 'Style_Reference',
+            slot: 'art-style',
+          },
+        ],
+        responseModalities: ['IMAGE', 'TEXT'],
+      })
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    const [, requestOptions] = fetchMock.mock.calls[0]
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.openai.com/v1/images/edits',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer openai-test-key',
+        }),
+        method: 'POST',
+      }),
+    )
+
+    const formData = requestOptions.body
+    expect(formData.get('quality')).toBe('low')
+    expect(formData.get('size')).toBe('1536x1024')
+
+    const uploadedImages = formData.getAll('image[]')
+    expect(uploadedImages).toHaveLength(3)
+
+    const resizedMetadata = await sharp(
+      Buffer.from(await uploadedImages[0].arrayBuffer()),
+    ).metadata()
+
+    expect(Math.max(resizedMetadata.width ?? 0, resizedMetadata.height ?? 0)).toBe(1024)
   })
 
   it('requires the internal token for usage telemetry when configured', async () => {

@@ -107,11 +107,13 @@ import {
 import {
   forgeReducer,
   getActionAnimatorNormalizedSizeOptions,
+  getDefaultOpenAiImageQualityForMode,
   getVariantForgeEnabledPresets,
   getVariantForgeFamilyCustomDirection,
   getVariantForgeOptionState,
   initialState,
   modeDefinitions,
+  openAiImageQualityOptions,
   variantForgeFamilies,
   variantForgePresetCatalog,
 } from './lib/forge'
@@ -128,6 +130,7 @@ import type {
   ForgeStatus,
   ModelAsset,
   ModeDefinition,
+  OpenAiImageQuality,
   ReferenceAsset,
   TextureExpansionTargetSize,
   TextureMaterialMapDefaults,
@@ -732,6 +735,7 @@ function buildHydratedForgeState(
 
 function buildStoredStateSnapshot(
   state: typeof initialState,
+  openAiImageQualityByMode: Partial<Record<ForgeMode, OpenAiImageQuality>>,
   uiLayout: UiLayoutState,
   recentPrompts: string[],
   lastSavedAt: string | null,
@@ -760,6 +764,7 @@ function buildStoredStateSnapshot(
         referencePrompt: state.characterSheet.referencePrompt,
       },
       generationCount: state.generationCount,
+      openAiImageQualityByMode,
       portraitStudio: {
         prompt: state.portraitStudio.prompt,
       },
@@ -846,6 +851,9 @@ function App() {
   const [styleInputByMode, setStyleInputByMode] = useState<
     Partial<Record<ForgeMode, string>>
   >({})
+  const [openAiImageQualityByMode, setOpenAiImageQualityByMode] = useState<
+    Partial<Record<ForgeMode, OpenAiImageQuality>>
+  >({})
   const [uiLayout, setUiLayout] = useState<UiLayoutState>(() => getDefaultUiLayout())
   const [activeDragState, setActiveDragState] = useState<ActiveDragState>(null)
   const [activeModel, setActiveModel] = useState<ModelId>(
@@ -874,6 +882,9 @@ function App() {
   )
   const isForging = status === 'loading'
   const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
+  const activeOpenAiImageQuality =
+    openAiImageQualityByMode[state.activeMode] ??
+    getDefaultOpenAiImageQualityForMode(state.activeMode)
   const refreshVariantForgeIdeas = useEffectEvent(async () => {
     const family = state.variantForge.variantFamily
     const nextRequestVersion =
@@ -1111,6 +1122,7 @@ function App() {
       setServerPrompt(storedState.session?.serverPrompt ?? null)
       setLastSavedAt(storedState.session?.savedAt ?? null)
       setUiLayout(sanitizeUiLayout(storedState.settings.uiLayout))
+      setOpenAiImageQualityByMode(storedState.settings.openAiImageQualityByMode ?? {})
       if (storedState.session) {
         setLastResultMode(storedState.session.mode ?? null)
         setNotice('Restored the latest forge settings from this browser.')
@@ -1270,6 +1282,26 @@ function App() {
     }))
   }, [state.activeMode])
 
+  const handleOpenAiImageQualityChange = useCallback((nextQuality: OpenAiImageQuality) => {
+    setOpenAiImageQualityByMode((previousState) => {
+      const defaultQuality = getDefaultOpenAiImageQualityForMode(state.activeMode)
+
+      if (nextQuality === defaultQuality) {
+        const nextQualities = { ...previousState }
+        delete nextQualities[state.activeMode]
+        return nextQualities
+      }
+
+      return {
+        ...previousState,
+        [state.activeMode]: nextQuality,
+      }
+    })
+    setNotice(
+      `GPT Image 2 quality set to ${nextQuality} for ${activeMode.label}.`,
+    )
+  }, [activeMode.label, state.activeMode])
+
   const handleShellDragStart = useCallback((event: DragStartEvent) => {
     const itemId = String(event.active.id) as LayoutShellItemId
     setActiveDragState({
@@ -1411,6 +1443,7 @@ function App() {
 
     pendingPersistStateRef.current = buildStoredStateSnapshot(
       state,
+      openAiImageQualityByMode,
       uiLayout,
       recentPrompts,
       lastSavedAt,
@@ -1430,6 +1463,7 @@ function App() {
     flushPendingPersist,
     hasRestoredState,
     lastSavedAt,
+    openAiImageQualityByMode,
     recentPrompts,
     serverModel,
     serverPrompt,
@@ -1864,6 +1898,7 @@ function App() {
       if (isActionAnimatorMode) {
         const payload = await generateActionAnimator({
           modelId: activeModel,
+          quality: activeOpenAiImageQuality,
           state: state.actionAnimator,
         })
 
@@ -1887,6 +1922,7 @@ function App() {
           consistencySource:
             state.characterSheet.consistencyEnabled ? lastCharacterSheetResult : null,
           modelId: activeModel,
+          quality: activeOpenAiImageQuality,
           state: state.characterSheet,
           styleId: activeStyleInput.trim() || 'studio-default',
         })
@@ -1917,6 +1953,7 @@ function App() {
             activeVariantOptions,
             customDirection: activeFamilyCustomDirection,
             modelId: activeModel,
+            quality: activeOpenAiImageQuality,
             state: state.variantForge,
             styleText: activeStyleInput.trim(),
           }),
@@ -1954,6 +1991,7 @@ function App() {
             heroImage,
             modelId: activeModel,
             prompt: state.portraitStudio.prompt.trim(),
+            quality: activeOpenAiImageQuality,
             styleText: activeStyleInput.trim(),
           }),
         )
@@ -1986,6 +2024,7 @@ function App() {
         const { ok, payload } = await postForgeRequest(
           await buildTextureExpansionRequest({
             modelId: activeModel,
+            quality: activeOpenAiImageQuality,
             sourceAsset,
             state,
             styleText: activeStyleInput.trim(),
@@ -2027,6 +2066,7 @@ function App() {
             const { ok, payload } = await postForgeRequest(
               await buildVfxForgeRequest({
                 modelId: activeModel,
+                quality: activeOpenAiImageQuality,
                 state,
                 styleText: activeStyleInput.trim(),
                 textureKind,
@@ -2077,6 +2117,7 @@ function App() {
       const standardRequest = await buildStandardForgeRequest({
         mode: state.activeMode,
         modelId: activeModel,
+        quality: activeOpenAiImageQuality,
         state,
         styleText: activeStyleInput.trim(),
       })
@@ -2374,7 +2415,9 @@ function App() {
     try {
       const { ok, payload } = await postMaterialMapsRequest(
         await buildMaterialMapsRequest({
+          modelId: activeModel,
           prompt: lastTextureLabRun?.prompt ?? state.prompt.trim(),
+          quality: activeOpenAiImageQuality,
           result,
           strengths,
           styleText: lastTextureLabRun?.styleText ?? activeStyleInput,
@@ -2429,6 +2472,7 @@ function App() {
     }
   }, [
     activeModel,
+    activeOpenAiImageQuality,
     activeStyleInput,
     lastTextureLabRun?.prompt,
     lastTextureLabRun?.styleText,
@@ -2762,6 +2806,8 @@ function App() {
           activeModel={activeModel}
           availableModels={modeAvailableModels}
           mode={state.activeMode}
+          openAiImageQuality={activeOpenAiImageQuality}
+          onOpenAiImageQualityChange={handleOpenAiImageQualityChange}
           onSelect={handleModelSelect}
         />
       ),
@@ -4078,12 +4124,14 @@ function App() {
               <div className={controlPanelLayoutClassName}>
                 {!isUvLabMode ? (
                   <div className={controlPanelFullSpanClassName}>
-                    <ModelSelector
-                      activeModel={activeModel}
-                      availableModels={modeAvailableModels}
-                      mode={state.activeMode}
-                      onSelect={handleModelSelect}
-                    />
+                      <ModelSelector
+                        activeModel={activeModel}
+                        availableModels={modeAvailableModels}
+                        mode={state.activeMode}
+                        openAiImageQuality={activeOpenAiImageQuality}
+                        onOpenAiImageQualityChange={handleOpenAiImageQualityChange}
+                        onSelect={handleModelSelect}
+                      />
                   </div>
                 ) : null}
 
@@ -5352,14 +5400,18 @@ type ModelSelectorProps = {
   activeModel: ModelId
   availableModels: ModelId[]
   mode: ForgeMode
+  onOpenAiImageQualityChange: (quality: OpenAiImageQuality) => void
   onSelect: (model: ModelId) => void
+  openAiImageQuality: OpenAiImageQuality
 }
 
 function ModelSelector({
   activeModel,
   availableModels,
   mode,
+  onOpenAiImageQualityChange,
   onSelect,
+  openAiImageQuality,
 }: ModelSelectorProps) {
   const modelOverrideLabel =
     mode === 'uv-lab'
@@ -5367,6 +5419,7 @@ function ModelSelector({
       : availableModels.length <= 1
         ? 'Locked for This Workflow'
         : 'Smart Default + Manual'
+  const showOpenAiImageQuality = activeModel === 'openai-gpt-image-2'
 
   return (
     <section className="rounded-[22px] border border-white/10 bg-black/20 p-4">
@@ -5398,6 +5451,41 @@ function ModelSelector({
           )
         })}
       </div>
+      {showOpenAiImageQuality ? (
+        <div className="mt-4 space-y-2 rounded-[16px] border border-white/10 bg-white/[0.03] p-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+              GPT Image 2 Quality
+            </p>
+            <span className="text-[11px] text-zinc-400">
+              Per-tab output cost and detail
+            </span>
+          </div>
+          <div className="grid grid-cols-4 gap-2">
+            {openAiImageQualityOptions.map((quality) => {
+              const isActive = openAiImageQuality === quality
+
+              return (
+                <button
+                  key={quality}
+                  type="button"
+                  onClick={() => onOpenAiImageQualityChange(quality)}
+                  className={`rounded-[12px] px-3 py-2 text-xs font-medium capitalize transition ${
+                    isActive
+                      ? 'border border-amber-300/35 bg-amber-300/12 text-amber-100'
+                      : 'border border-white/10 bg-black/20 text-zinc-400 hover:border-white/20 hover:bg-white/[0.04] hover:text-zinc-200'
+                  }`}
+                >
+                  {quality}
+                </button>
+              )
+            })}
+          </div>
+          <p className="text-xs text-zinc-400">
+            Low is cheapest, high is slowest and most expensive, and auto lets OpenAI choose.
+          </p>
+        </div>
+      ) : null}
     </section>
   )
 }

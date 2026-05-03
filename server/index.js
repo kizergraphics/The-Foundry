@@ -121,6 +121,18 @@ const apiKey =
 const openAiApiKey = process.env.OPENAI_API_KEY
 const openAiOrganizationId = process.env.OPENAI_ORGANIZATION_ID
 const openAiProjectId = process.env.OPENAI_PROJECT_ID
+const openAiImageQuality = normalizeOpenAiImageQuality(
+  process.env.OPENAI_IMAGE_QUALITY,
+  'auto',
+)
+const openAiCharacterSheetQuality = normalizeOpenAiImageQuality(
+  process.env.OPENAI_CHARACTER_SHEET_QUALITY,
+  'low',
+)
+const openAiCharacterSheetReferenceMaxEdgePx = clampOpenAiReferenceMaxEdgePx(
+  process.env.OPENAI_CHARACTER_SHEET_REFERENCE_MAX_EDGE_PX,
+  1024,
+)
 const allowedCorsOrigin = process.env.CORS_ORIGIN
 const generationApiToken = process.env.FORGE_API_TOKEN
 const internalApiToken = process.env.INTERNAL_API_TOKEN
@@ -368,6 +380,7 @@ app.post(
         modelSelection,
         pipeline: validatedRequest.pipeline,
         prompt: validatedRequest.prompt,
+        quality: validatedRequest.quality,
       })
 
       await recordUsageEvent({
@@ -504,6 +517,7 @@ app.post(
     mode,
     modelId,
     prompt,
+    quality,
     preservePalette,
     preserveSilhouette,
     generationCount,
@@ -706,6 +720,7 @@ app.post(
         candidateCount: 1,
         modelSelection,
         prompt: finalPrompt,
+        quality,
         references: [validExpansion.canvasImage, validExpansion.sourceImage],
         routeKey: '/api/forge',
         size: '1024x1024',
@@ -755,6 +770,7 @@ app.post(
         candidateCount: 1,
         modelSelection,
         prompt: finalPrompt,
+        quality,
         references: [validRepair.offsetImage, validRepair.originalImage],
         routeKey: '/api/forge',
         size: '1024x1024',
@@ -804,6 +820,7 @@ app.post(
         candidateCount,
         modelSelection,
         prompt: finalPrompt,
+        quality,
         references: validReferences,
         routeKey: '/api/forge',
         size: resolveOpenAiForgeImageSize(mode),
@@ -1314,14 +1331,16 @@ app.post(
   const {
     heightStrength,
     metallicStrength,
+    modelId,
     normalStrength,
     prompt,
+    quality,
     roughnessStrength,
     sourceImage,
     sourceText,
     styleText,
   } = validatedRequest
-  const modelSelection = resolveModelForRoute('/api/material-maps')
+  const modelSelection = resolveModelForRoute('/api/material-maps', modelId)
 
   if (!modelSelection.ok) {
     response.status(500).json({
@@ -1358,6 +1377,7 @@ app.post(
         mapKind,
         preferredModelId: modelSelection.modelId,
         promptContext,
+        quality,
         requestId,
         sourceImage,
       }),
@@ -1458,7 +1478,7 @@ app.post(
           width: finalizedMaps.roughness.width,
         },
       },
-      model: modelSelection.modelId,
+      model: generatedMaps[0]?.modelSelection.modelId ?? modelSelection.modelId,
     })
     logServerEvent(requestId, 'material map generation finished', {
       sourceHeight,
@@ -1499,6 +1519,7 @@ app.post(
     modelId,
     parentId,
     prompt,
+    quality,
     references = [],
     styleId,
     systemInstruction,
@@ -1574,6 +1595,7 @@ app.post(
       prompt: consistencyReference
         ? `${promptForGeneration}\n\nMaintain character identity, outfit structure, and palette continuity with the staged prior sheet reference.`
         : promptForGeneration,
+      quality,
       references: [
         ...(consistencyReference ? [consistencyReference] : []),
         ...validReferences,
@@ -2853,6 +2875,7 @@ async function generateAnimatorArtifacts({
   modelSelection,
   pipeline,
   prompt,
+  quality,
 }) {
   const normalizedFrameSize = normalizeActionAnimatorFrameSize(frameSize)
   const normalizedFps = clampActionAnimatorFps(fps)
@@ -2876,6 +2899,7 @@ async function generateAnimatorArtifacts({
       },
       modelSelection,
       prompt: normalizedPrompt,
+      quality,
       references: [
         {
           data: image.data,
@@ -3308,6 +3332,7 @@ async function generateImagesWithModel({
   googleConfig = {},
   modelSelection,
   prompt,
+  quality,
   references = [],
   routeKey,
   size = 'auto',
@@ -3319,6 +3344,7 @@ async function generateImagesWithModel({
       candidateCount,
       modelSelection,
       prompt,
+      quality,
       references,
       routeKey,
       size,
@@ -3384,6 +3410,7 @@ async function generateImagesWithOpenAiModel({
   candidateCount,
   modelSelection,
   prompt,
+  quality,
   references,
   routeKey,
   size,
@@ -3396,6 +3423,11 @@ async function generateImagesWithOpenAiModel({
   }, timeoutMs)
   const telemetryModel = resolveTelemetryModelId(modelSelection.modelId, routeKey)
   const combinedPrompt = buildOpenAiImagePrompt(prompt, systemInstruction)
+  const resolvedQuality = quality ?? resolveOpenAiImageQuality(routeKey)
+  const preparedReferences = await prepareOpenAiReferencesForRoute({
+    references,
+    routeKey,
+  })
   const editHeaders = buildOpenAiRequestHeaders({
     requestId: buildRequestId('openai-edit'),
   })
@@ -3406,7 +3438,7 @@ async function generateImagesWithOpenAiModel({
 
   try {
     const response =
-      references.length > 0
+      preparedReferences.length > 0
         ? await fetch('https://api.openai.com/v1/images/edits', {
             method: 'POST',
             headers: editHeaders,
@@ -3414,7 +3446,8 @@ async function generateImagesWithOpenAiModel({
               candidateCount,
               model: modelSelection.providerModel,
               prompt: combinedPrompt,
-              references,
+              quality: resolvedQuality,
+              references: preparedReferences,
               size,
             }),
             signal: controller.signal,
@@ -3428,7 +3461,7 @@ async function generateImagesWithOpenAiModel({
               n: candidateCount,
               output_format: 'png',
               prompt: combinedPrompt,
-              quality: 'auto',
+              quality: resolvedQuality,
               size,
             }),
             signal: controller.signal,
@@ -3516,10 +3549,106 @@ function resolveOpenAiCharacterSheetSize(aspectRatio) {
   return aspectRatio === '16:9' ? '1536x1024' : '1024x1024'
 }
 
+function resolveOpenAiImageQuality(routeKey) {
+  return routeKey === '/api/character-sheet'
+    ? openAiCharacterSheetQuality
+    : openAiImageQuality
+}
+
+function normalizeOpenAiImageQuality(value, fallback) {
+  const normalizedValue = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return ['auto', 'low', 'medium', 'high'].includes(normalizedValue)
+    ? normalizedValue
+    : fallback
+}
+
+function clampOpenAiReferenceMaxEdgePx(value, fallback) {
+  const normalized = Math.round(Number(value))
+  if (!Number.isFinite(normalized)) {
+    return fallback
+  }
+
+  return Math.max(256, Math.min(normalized, 2048))
+}
+
+function resolveOpenAiReferenceMaxEdgePx(routeKey) {
+  return routeKey === '/api/character-sheet'
+    ? openAiCharacterSheetReferenceMaxEdgePx
+    : null
+}
+
+async function prepareOpenAiReferencesForRoute({ references, routeKey }) {
+  const maxEdgePx = resolveOpenAiReferenceMaxEdgePx(routeKey)
+
+  if (!Array.isArray(references) || references.length === 0 || maxEdgePx === null) {
+    return references
+  }
+
+  return Promise.all(
+    references.map((reference) => downscaleOpenAiReferenceImage(reference, maxEdgePx)),
+  )
+}
+
+async function downscaleOpenAiReferenceImage(reference, maxEdgePx) {
+  if (
+    !reference ||
+    typeof reference.data !== 'string' ||
+    typeof reference.mimeType !== 'string' ||
+    !reference.data ||
+    !reference.mimeType
+  ) {
+    return reference
+  }
+
+  try {
+    const inputBuffer = Buffer.from(reference.data, 'base64')
+    const metadata = await sharp(inputBuffer).metadata()
+    const width = Number(metadata.width)
+    const height = Number(metadata.height)
+
+    if (!Number.isFinite(width) || !Number.isFinite(height)) {
+      return reference
+    }
+
+    if (Math.max(width, height) <= maxEdgePx) {
+      return reference
+    }
+
+    const resized = sharp(inputBuffer).rotate().resize({
+      fit: 'inside',
+      height: maxEdgePx,
+      width: maxEdgePx,
+      withoutEnlargement: true,
+    })
+
+    const normalizedMimeType =
+      reference.mimeType === 'image/jpeg' || reference.mimeType === 'image/jpg'
+        ? 'image/jpeg'
+        : reference.mimeType === 'image/webp'
+          ? 'image/webp'
+          : 'image/png'
+    const resizedBuffer =
+      normalizedMimeType === 'image/jpeg'
+        ? await resized.jpeg({ mozjpeg: true, quality: 90 }).toBuffer()
+        : normalizedMimeType === 'image/webp'
+          ? await resized.webp({ quality: 90 }).toBuffer()
+          : await resized.png().toBuffer()
+
+    return {
+      ...reference,
+      data: resizedBuffer.toString('base64'),
+      mimeType: normalizedMimeType,
+    }
+  } catch {
+    return reference
+  }
+}
+
 function buildOpenAiImageEditFormData({
   candidateCount,
   model,
   prompt,
+  quality,
   references,
   size,
 }) {
@@ -3528,7 +3657,7 @@ function buildOpenAiImageEditFormData({
   formData.set('prompt', prompt)
   formData.set('n', String(candidateCount))
   formData.set('output_format', 'png')
-  formData.set('quality', 'auto')
+  formData.set('quality', quality)
   formData.set('size', size)
 
   references.forEach((reference, index) => {
@@ -4248,6 +4377,7 @@ async function generateMaterialMapImageWithFallback({
   mapKind,
   preferredModelId,
   promptContext,
+  quality,
   requestId,
   sourceImage,
 }) {
@@ -4273,6 +4403,7 @@ async function generateMaterialMapImageWithFallback({
         candidateCount: 1,
         modelSelection,
         prompt: buildMaterialMapPrompt(mapKind, promptContext),
+        quality,
         references: [sourceImage],
         routeKey: '/api/material-maps',
         size: '1024x1024',
