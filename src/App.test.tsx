@@ -178,6 +178,188 @@ describe('App variant forge ideas', () => {
   })
 })
 
+describe('App model selection', () => {
+  const fetchMock = vi.fn<typeof fetch>()
+  const imageBase64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9sXl16sAAAAASUVORK5CYII='
+
+  beforeEach(() => {
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+
+      if (url === '/api/health') {
+        return buildJsonResponse({ ok: true })
+      }
+
+      if (url === '/api/usage/telemetry') {
+        return buildJsonResponse({
+          generatedAt: new Date('2026-03-19T12:00:00.000Z').toISOString(),
+          rows: [],
+          source: 'local',
+          timeZone: 'America/Los_Angeles',
+        })
+      }
+
+      if (url === '/api/variant-forge-ideas') {
+        return buildJsonResponse({
+          ideas: ['idea-a', 'idea-b', 'idea-c', 'idea-d'],
+          source: 'ai',
+        })
+      }
+
+      if (url === '/api/forge') {
+        const requestBody = JSON.parse(String(init?.body ?? '{}'))
+
+        return buildJsonResponse({
+          images: [
+            {
+              data: imageBase64,
+              id: 'armory-result-1',
+              mimeType: 'image/png',
+              text: 'hero sword',
+            },
+          ],
+          model: requestBody.modelId,
+          prompt: requestBody.prompt,
+        })
+      }
+
+      return buildJsonResponse({})
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+    window.localStorage.clear()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    fetchMock.mockReset()
+    window.localStorage.clear()
+  })
+
+  it('keeps the selected Gemini armory model for the forge request and stream label', async () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          activeMode: 'armory',
+          generationCount: 1,
+          prompt: 'hero sword',
+        },
+        session: {
+          mode: 'armory',
+          savedAt: '2026-03-10T00:00:00.000Z',
+          serverModel: 'openai-gpt-image-2',
+          serverPrompt: 'old openai run',
+        },
+      }),
+    )
+
+    render(<App />)
+
+    fireEvent.click((await screen.findAllByRole('button', { name: /Gemini 3\.1 Flash/i }))[0])
+
+    expect(screen.getByText('gemini-3-flash response stream')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /^FORGE/i }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => url === '/api/forge')).toHaveLength(1)
+    })
+
+    const forgeRequest = JSON.parse(
+      String(fetchMock.mock.calls.find(([url]) => url === '/api/forge')?.[1]?.body ?? '{}'),
+    )
+
+    expect(forgeRequest.modelId).toBe('gemini-3-flash')
+    expect(await screen.findByText('gemini-3-flash response stream')).toBeInTheDocument()
+  })
+
+  it('retries a failed standard multi-generation slot and completes the batch', async () => {
+    let forgeRequestCount = 0
+
+    fetchMock.mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+
+      if (url === '/api/health') {
+        return buildJsonResponse({ ok: true })
+      }
+
+      if (url === '/api/usage/telemetry') {
+        return buildJsonResponse({
+          generatedAt: new Date('2026-03-19T12:00:00.000Z').toISOString(),
+          rows: [],
+          source: 'local',
+          timeZone: 'America/Los_Angeles',
+        })
+      }
+
+      if (url === '/api/variant-forge-ideas') {
+        return buildJsonResponse({
+          ideas: ['idea-a', 'idea-b', 'idea-c', 'idea-d'],
+          source: 'ai',
+        })
+      }
+
+      if (url === '/api/forge') {
+        forgeRequestCount += 1
+
+        if (forgeRequestCount === 2) {
+          return buildJsonResponse(
+            {
+              error: {
+                code: 'model_output_incompatible',
+                message: 'The selected model returned no image candidates.',
+                title: 'No Image Output Returned',
+              },
+            },
+            false,
+          )
+        }
+
+        return buildJsonResponse({
+          images: [
+            {
+              data: imageBase64,
+              id: `armory-result-${forgeRequestCount}`,
+              mimeType: 'image/png',
+              text: 'hero sword',
+            },
+          ],
+          model: 'gemini-3-flash',
+          prompt: 'hero sword',
+        })
+      }
+
+      return buildJsonResponse({})
+    })
+
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /Gemini 3\.1 Flash/i }))
+    fireEvent.change(screen.getByPlaceholderText(/Ornate steel longsword/i), {
+      target: {
+        value: 'hero sword',
+      },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^2$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^FORGE/i }))
+
+    await waitFor(
+      () => {
+        expect(fetchMock.mock.calls.filter(([url]) => url === '/api/forge')).toHaveLength(3)
+      },
+      {
+        timeout: 3500,
+      },
+    )
+
+    expect(await screen.findByText(/Forge pass completed with 2 candidate outputs/i)).toBeInTheDocument()
+  })
+})
+
 describe('App Texture Lab material packs', () => {
   const fetchMock = vi.fn<typeof fetch>()
   const textureBase64 =

@@ -324,6 +324,9 @@ const textureLabClientBatchMaxParallelSlots = 1
 const textureLabClientInterSlotDelayMs = 250
 const textureLabClientRetryDelayMs = 1200
 const textureLabClientMaxRetryDelayMs = 10000
+const standardForgeClientBatchMaxAttempts = 2
+const standardForgeClientBatchRequestTimeoutMs = 105000
+const textureLabClientBatchRequestTimeoutMs = 45000
 const shellZoneKeyPrefix = 'shell:'
 const controlZoneKeyPrefix = 'control:'
 const workspaceZoneKeyPrefix = 'workspace:'
@@ -735,6 +738,7 @@ function buildHydratedForgeState(
 
 function buildStoredStateSnapshot(
   state: typeof initialState,
+  modelOverridesByMode: Partial<Record<ForgeMode, ModelId>>,
   openAiImageQualityByMode: Partial<Record<ForgeMode, OpenAiImageQuality>>,
   uiLayout: UiLayoutState,
   recentPrompts: string[],
@@ -764,6 +768,7 @@ function buildStoredStateSnapshot(
         referencePrompt: state.characterSheet.referencePrompt,
       },
       generationCount: state.generationCount,
+      modelOverridesByMode,
       openAiImageQualityByMode,
       portraitStudio: {
         prompt: state.portraitStudio.prompt,
@@ -1080,7 +1085,8 @@ function App() {
     (_, index) => index,
   )
   const effectiveModel = activeModel
-  const activeModelName = serverModel ?? effectiveModel
+  const activeModelName =
+    isForging || serverModel !== effectiveModel ? effectiveModel : serverModel ?? effectiveModel
   const selectedTelemetryModel = effectiveModel
   const highlightedTelemetryRowId =
     TELEMETRY_ROW_BY_MODEL_ID[selectedTelemetryModel ?? activeModel] ?? null
@@ -1122,6 +1128,7 @@ function App() {
       setServerPrompt(storedState.session?.serverPrompt ?? null)
       setLastSavedAt(storedState.session?.savedAt ?? null)
       setUiLayout(sanitizeUiLayout(storedState.settings.uiLayout))
+      setModelOverridesByMode(storedState.settings.modelOverridesByMode ?? {})
       setOpenAiImageQualityByMode(storedState.settings.openAiImageQualityByMode ?? {})
       if (storedState.session) {
         setLastResultMode(storedState.session.mode ?? null)
@@ -1265,6 +1272,7 @@ function App() {
     }
 
     setActiveModel(nextModel)
+    setServerModel(null)
     setError(null)
     setModelOverridesByMode((previousOverrides) => ({
       ...previousOverrides,
@@ -1443,6 +1451,7 @@ function App() {
 
     pendingPersistStateRef.current = buildStoredStateSnapshot(
       state,
+      modelOverridesByMode,
       openAiImageQualityByMode,
       uiLayout,
       recentPrompts,
@@ -1463,6 +1472,7 @@ function App() {
     flushPendingPersist,
     hasRestoredState,
     lastSavedAt,
+    modelOverridesByMode,
     openAiImageQualityByMode,
     recentPrompts,
     serverModel,
@@ -1602,7 +1612,12 @@ function App() {
     totalCount: number
   }) {
     const isTextureLabBatch = isTextureLabMode && isTextureGenerateMode
-    const maxAttempts = isTextureLabBatch ? textureLabClientBatchMaxAttempts : 1
+    const maxAttempts = isTextureLabBatch
+      ? textureLabClientBatchMaxAttempts
+      : standardForgeClientBatchMaxAttempts
+    const slotRequestTimeoutMs = isTextureLabBatch
+      ? textureLabClientBatchRequestTimeoutMs
+      : standardForgeClientBatchRequestTimeoutMs
     const nextRecentPrompts = buildRecentPrompts(activePromptValue, recentPrompts)
     let latestServerModel: string | null = null
     let latestServerPrompt: string | null = null
@@ -1637,10 +1652,15 @@ function App() {
         }))
 
         try {
-          const { ok, payload } = await postForgeRequest({
-            ...baseRequest,
-            generationCount: 1,
-          })
+          const { ok, payload } = await postForgeRequest(
+            {
+              ...baseRequest,
+              generationCount: 1,
+            },
+            {
+              timeoutMs: slotRequestTimeoutMs,
+            },
+          )
 
           if (!ok || !payload?.images?.length) {
             throw toForgeError(payload?.error)
@@ -1690,7 +1710,8 @@ function App() {
             attempt < maxAttempts &&
             (normalizedError.code === 'quota_exceeded' ||
               normalizedError.code === 'request_timeout' ||
-              (isTextureLabBatch && normalizedError.code === 'model_output_incompatible'))
+              normalizedError.code === 'model_output_incompatible' ||
+              normalizedError.code === 'batch_incomplete')
 
           if (!canRetry) {
             updateForgeSlot(slotIndex, (slot) => ({

@@ -18,6 +18,7 @@ import type {
   VfxExportTarget,
   VfxTextureKind,
 } from './forge'
+import type { ModelId } from '../modes/models'
 import { isForgeMode } from '../../shared/modeCatalog.js'
 import {
   clampActionAnimatorFps,
@@ -92,6 +93,7 @@ type StoredSettings = {
   actionAnimator: StoredActionAnimatorSettings
   characterSheet: StoredCharacterSheetSettings
   generationCount: GenerationCount
+  modelOverridesByMode: Partial<Record<ForgeMode, ModelId>>
   openAiImageQualityByMode: Partial<Record<ForgeMode, OpenAiImageQuality>>
   portraitStudio: StoredPortraitStudioSettings
   prompt: string
@@ -133,6 +135,14 @@ type StoredState = {
 
 const storageKey = 'kizer-forge-state'
 const maxRecentPrompts = 6
+const storedModelIds: ModelId[] = [
+  'browser-uv-engine',
+  'gemini-2.5-flash-image',
+  'gemini-3-flash',
+  'gemini-3-pro',
+  'openai-gpt-image-2',
+  'veo-3.1-fast',
+]
 
 function normalizeStoredMode(value: unknown): ForgeMode {
   if (value === 'loot-leveler') {
@@ -262,6 +272,31 @@ function readStoredOpenAiImageQualityByMode(
     if (quality !== getDefaultOpenAiImageQualityForMode(mode)) {
       normalized[mode] = quality
     }
+  }
+
+  return normalized
+}
+
+function readStoredModelOverridesByMode(
+  value: unknown,
+): Partial<Record<ForgeMode, ModelId>> {
+  if (!value || typeof value !== 'object') {
+    return {}
+  }
+
+  const normalized = {} as Partial<Record<ForgeMode, ModelId>>
+  const rawValue = value as Record<string, unknown>
+
+  for (const [mode, modelId] of Object.entries(rawValue)) {
+    if (
+      !isForgeMode(mode) ||
+      typeof modelId !== 'string' ||
+      !storedModelIds.includes(modelId as ModelId)
+    ) {
+      continue
+    }
+
+    normalized[mode] = modelId as ModelId
   }
 
   return normalized
@@ -428,6 +463,9 @@ export function loadStoredState(): StoredState | null {
           parsed.settings?.generationCount === 4
             ? parsed.settings.generationCount
             : 3,
+        modelOverridesByMode: readStoredModelOverridesByMode(
+          parsed.settings?.modelOverridesByMode,
+        ),
         openAiImageQualityByMode: readStoredOpenAiImageQualityByMode(
           parsed.settings?.openAiImageQualityByMode,
         ),

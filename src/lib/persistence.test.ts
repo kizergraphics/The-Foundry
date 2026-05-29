@@ -22,6 +22,7 @@ const baseStoredSettings = {
     referencePrompt: '',
   },
   generationCount: 3 as const,
+  modelOverridesByMode: {},
   openAiImageQualityByMode: {
     'character-sheet': 'low' as const,
   },
@@ -118,6 +119,26 @@ describe('persistStoredState', () => {
       savedAt: '2026-03-10T00:00:00.000Z',
       serverModel: 'gemini-3-flash',
       serverPrompt: 'hero sword',
+    })
+  })
+
+  it('stores and restores per-mode model overrides', () => {
+    persistStoredState({
+      recentPrompts: [],
+      settings: {
+        ...baseStoredSettings,
+        activeMode: 'armory',
+        modelOverridesByMode: {
+          armory: 'gemini-3-flash',
+          'texture-lab': 'openai-gpt-image-2',
+        },
+      },
+      session: null,
+    })
+
+    expect(loadStoredState()?.settings.modelOverridesByMode).toEqual({
+      armory: 'gemini-3-flash',
+      'texture-lab': 'openai-gpt-image-2',
     })
   })
 

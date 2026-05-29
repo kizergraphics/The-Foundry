@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -9,7 +10,7 @@ import {
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-const dataDir = path.join(__dirname, 'data')
+const dataDir = resolveUsageDataDir()
 const usageFilePath = path.join(dataDir, 'usage-log.json')
 const usageEventLogPath = path.join(dataDir, 'usage-events.ndjson')
 const pacificTimeZone = 'America/Los_Angeles'
@@ -38,6 +39,28 @@ const dateKeyFormatter = new Intl.DateTimeFormat('en-CA', {
 })
 
 let writeQueue = Promise.resolve()
+
+function resolveUsageDataDir() {
+  if (
+    typeof process.env.FOUNDRY_USAGE_DATA_DIR === 'string' &&
+    process.env.FOUNDRY_USAGE_DATA_DIR.trim()
+  ) {
+    return process.env.FOUNDRY_USAGE_DATA_DIR.trim()
+  }
+
+  if (
+    typeof process.env.FOUNDRY_USER_DATA_DIR === 'string' &&
+    process.env.FOUNDRY_USER_DATA_DIR.trim()
+  ) {
+    return path.join(process.env.FOUNDRY_USER_DATA_DIR.trim(), 'server-data')
+  }
+
+  if (process.env.NODE_ENV === 'test') {
+    return path.join(os.tmpdir(), 'the-foundry-test-usage', String(process.pid))
+  }
+
+  return path.join(__dirname, 'data')
+}
 
 export async function recordUsageEvent({
   model,

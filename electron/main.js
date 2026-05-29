@@ -68,6 +68,7 @@ app.on('before-quit', async (event) => {
 
 app.whenReady().then(async () => {
   try {
+    process.env.FOUNDRY_USER_DATA_DIR = app.getPath('userData')
     await cleanupAppServices()
     await ensureLocalServer()
     createMainWindow()

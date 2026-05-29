@@ -28,6 +28,7 @@ export default {
     'dist/**/*',
     'electron/**/*',
     'server/**/*',
+    '!server/data/**/*',
     'shared/**/*',
     'package.json',
   ],

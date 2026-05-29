@@ -91,14 +91,69 @@ export type VfxTexturePayload = {
   result: ForgeResult
 }
 
-export async function postForgeRequest(body: Record<string, unknown>) {
-  const response = await fetch('/api/forge', {
+export type ForgeRequestOptions = {
+  timeoutMs?: number
+}
+
+function buildForgeRequestTimeoutError(timeoutMs: number) {
+  return {
+    code: 'request_timeout',
+    details: [
+      `Client waited ${Math.round(timeoutMs / 1000)}s for this output slot.`,
+      'The stalled slot was stopped so the forge pass can finish with completed outputs visible.',
+    ],
+    message:
+      'One output slot did not finish before the client timeout. The app will retry it when possible.',
+    title: 'Output Slot Timed Out',
+  }
+}
+
+export async function postForgeRequest(
+  body: Record<string, unknown>,
+  options: ForgeRequestOptions = {},
+) {
+  const controller =
+    typeof AbortController !== 'undefined' ? new AbortController() : null
+  let timeoutId: ReturnType<typeof setTimeout> | null = null
+  let didTimeout = false
+  const request = fetch('/api/forge', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal: controller?.signal,
   })
+
+  let response: Response
+
+  try {
+    response = await (
+      typeof options.timeoutMs === 'number' && options.timeoutMs > 0
+        ? Promise.race([
+            request,
+            new Promise<never>((_, reject) => {
+              timeoutId = setTimeout(() => {
+                didTimeout = true
+                controller?.abort()
+                reject(buildForgeRequestTimeoutError(options.timeoutMs as number))
+              }, options.timeoutMs)
+            }),
+          ])
+        : request
+    )
+  } catch (error) {
+    if (didTimeout) {
+      throw buildForgeRequestTimeoutError(options.timeoutMs as number)
+    }
+
+    throw error
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId)
+    }
+  }
+
   const payload = (await response.json()) as ForgeApiResponse | undefined
 
   return {
