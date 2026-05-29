@@ -134,16 +134,6 @@ npm run test
 npm run lint
 ```
 
-## Public Repo Safety
-
-Before making this repository public:
-
-- Make sure `.env` is not tracked.
-- Rotate any API key that was ever committed, shared, pasted into docs, or included in local notes.
-- Keep `.env.example` as placeholders only.
-- Keep `release/`, `dist/`, `node_modules/`, `.agent-collab/`, `.codex-logs/`, and `server/data/*.ndjson` out of git.
-- Review new files before committing, especially screenshots, documents, logs, and exported builds.
-
 ## Contributing
 
 Issues and pull requests are welcome. The best places to help right now are Texture Lab, the 3D viewer, the Visualizer tab, drag-and-drop polish, tests around rough workflows, and clearer setup documentation.
