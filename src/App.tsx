@@ -5846,9 +5846,10 @@ function TextureLabWorkflowPanel({
             Expansion Strategy
           </p>
           <p className="mt-2 text-sm leading-6 text-emerald-50">
-            The source texture is centered on a larger transparent canvas, then the selected
-            image model fills the outer space while keeping the final map tile-safe. This
-            workflow uses the active model for the edit pass at the selected output size.
+            The source texture is centered on a larger guided canvas, then the selected
+            image model synthesizes fresh surrounding material while keeping the final map
+            tile-safe. This workflow uses the active model for the edit pass at the selected
+            output size.
           </p>
         </div>
       ) : null}
@@ -5871,7 +5872,7 @@ function TextureExpansionPanel({
     <section className="space-y-4 rounded-[24px] border border-white/10 bg-black/20 p-4">
       <ImageUploadField
         label="Source Texture"
-        helper="Required. This image is centered on a larger transparent canvas before the selected image model expands the surrounding material."
+        helper="Required. This image is centered on a larger context canvas before the selected image model expands the surrounding material."
         asset={asset}
         icon={ImagePlus}
         isRequired
@@ -5883,9 +5884,9 @@ function TextureExpansionPanel({
           Outpaint Notes
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-300">
-          <li>The source is shrunk into the center 25% of the canvas area.</li>
-          <li>The selected image model receives both the centered canvas and the original texture as reference.</li>
-          <li>New edges are instructed to match opposite sides so the expanded result still tiles cleanly.</li>
+          <li>The source is shrunk into the center of the canvas as the crisp anchor.</li>
+          <li>The selected image model receives the centered context canvas as the expansion reference.</li>
+          <li>New edges are instructed to use fresh detail, avoid stamped repeats, and still tile cleanly.</li>
           <li>Target canvas: {targetSize} x {targetSize}.</li>
         </ul>
       </div>

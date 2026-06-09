@@ -575,6 +575,121 @@ describe('API hardening', () => {
     expect(Math.max(resizedMetadata.width ?? 0, resizedMetadata.height ?? 0)).toBe(1024)
   })
 
+  it('sends only the centered expansion canvas to Gemini texture expansion requests', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateContent.mockReset()
+    const canvasImageBase64 = await createPngBase64(1, 1, [20, 80, 140])
+    const sourceImageBase64 = await createPngBase64(1, 1, [220, 180, 40])
+    const generatedBase64 = await createPngBase64(1, 1, [60, 120, 180])
+    __mock.generateContent.mockResolvedValue(buildImageGeneration(generatedBase64))
+
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/forge')
+      .send({
+        mode: 'texture-lab',
+        modelId: 'gemini-3-flash',
+        prompt: 'weathered basalt floor tile',
+        textureExpansion: {
+          canvasImage: {
+            data: canvasImageBase64,
+            mimeType: 'image/png',
+          },
+          sourceImage: {
+            data: sourceImageBase64,
+            mimeType: 'image/png',
+          },
+        },
+        workflow: 'expand-texture',
+      })
+
+    expect(response.status).toBe(200)
+    expect(__mock.generateContent).toHaveBeenCalledTimes(1)
+
+    const [requestBody] = __mock.generateContent.mock.calls[0]
+    const inlineParts = requestBody.contents.filter((part) => part.inlineData)
+    expect(inlineParts).toEqual([
+      {
+        inlineData: {
+          data: canvasImageBase64,
+          mimeType: 'image/png',
+        },
+      },
+    ])
+    expect(requestBody.contents[0].text).toContain('Texture outpainting task')
+    expect(requestBody.contents[0].text).toContain('centered source texture')
+    expect(requestBody.contents[0].text).not.toContain(sourceImageBase64)
+  })
+
+  it('sends only the centered expansion canvas to OpenAI texture expansion edits', async () => {
+    const canvasImageBase64 = await createPngBase64(1, 1, [30, 90, 150])
+    const sourceImageBase64 = await createPngBase64(1, 1, [230, 190, 50])
+    const generatedBase64 = await createPngBase64(1, 1, [70, 130, 190])
+    const fetchMock = vi.fn().mockResolvedValue({
+      headers: new Headers(),
+      json: async () => ({
+        data: [
+          {
+            b64_json: generatedBase64,
+            revised_prompt: 'Expanded basalt texture',
+          },
+        ],
+      }),
+      ok: true,
+      status: 200,
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    const app = await loadApp({
+      OPENAI_API_KEY: 'openai-test-key',
+    })
+
+    const response = await request(app)
+      .post('/api/forge')
+      .send({
+        mode: 'texture-lab',
+        modelId: 'openai-gpt-image-2',
+        prompt: 'weathered basalt floor tile',
+        textureExpansion: {
+          canvasImage: {
+            data: canvasImageBase64,
+            mimeType: 'image/png',
+          },
+          sourceImage: {
+            data: sourceImageBase64,
+            mimeType: 'image/png',
+          },
+        },
+        workflow: 'expand-texture',
+      })
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.openai.com/v1/images/edits',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer openai-test-key',
+        }),
+        method: 'POST',
+      }),
+    )
+
+    const [, requestOptions] = fetchMock.mock.calls[0]
+    const formData = requestOptions.body
+    const uploadedImages = formData.getAll('image[]')
+    expect(uploadedImages).toHaveLength(1)
+    expect(Buffer.from(await uploadedImages[0].arrayBuffer()).toString('base64')).toBe(
+      canvasImageBase64,
+    )
+    expect(formData.get('prompt')).toContain('Texture outpainting task')
+    expect(formData.get('size')).toBe('1024x1024')
+  })
+
   it('requires the internal token for usage telemetry when configured', async () => {
     const app = await loadApp({
       INTERNAL_API_TOKEN: 'top-secret',

@@ -721,7 +721,7 @@ app.post(
         modelSelection,
         prompt: finalPrompt,
         quality,
-        references: [validExpansion.canvasImage, validExpansion.sourceImage],
+        references: [validExpansion.canvasImage],
         routeKey: '/api/forge',
         size: '1024x1024',
         systemInstruction: resolvedSystemInstruction,
@@ -2115,9 +2115,13 @@ function buildTextureExpansionPrompt({ prompt, styleText, textureExpansion }) {
   return [
     'Texture outpainting task.',
     `Expand the centered texture into a seamless ${targetSize} x ${targetSize} square material map.`,
+    'The provided reference image already contains the smaller centered source texture on a larger context canvas.',
     'Fill the entire canvas with texture detail. Do not leave any flat backdrop, blank border, or studio background visible.',
     'Use the central pattern as the authority for material identity, texel density, grain, roughness, lighting, and color.',
-    'Generate fresh surrounding detail instead of copy-pasting the center. Avoid obvious repetition.',
+    'The outer area of the input canvas is only a soft color and scale guide; replace it with freshly synthesized material detail.',
+    'Do not reconstruct the original source texture as the full-frame output.',
+    'Do not copy, stamp, mirror, or tile the center texture into the new border. Avoid recognizable repeated motifs.',
+    'Vary cracks, fibers, stones, grain, stains, wear, and other medium-scale features while keeping the same material family.',
     'Preserve a clean top-down texture read suitable for game tiling.',
     'Ensure the new edges match their opposite sides so the final image tiles seamlessly after expansion.',
     sourceWidth && sourceHeight
@@ -2516,10 +2520,14 @@ function resolveSystemInstruction(customInstruction) {
 function resolveTextureExpansionSystemInstruction(customInstruction) {
   const textureExpansionRules = [
     'This request is a texture outpainting task.',
+    'The input reference is the expansion canvas: a smaller source texture centered inside surrounding context.',
     'The full output must be covered by texture detail from edge to edge.',
     'Do not leave any flat background color, blank border, transparent area, or studio backdrop visible.',
     'Do not introduce perspective, camera tilt, or directional shadows.',
     'Preserve the centered source texture as the visual anchor for the full material.',
+    'Do not return the original source image as a full-frame copy.',
+    'Treat any blurred or noisy outer canvas content as disposable context, not final texture detail.',
+    'Synthesize new border detail instead of duplicating, mirroring, or stamping the center image.',
     'Keep texel density stable from center to edge.',
     'The final full canvas must be tile-safe: top must match bottom and left must match right.',
   ]
