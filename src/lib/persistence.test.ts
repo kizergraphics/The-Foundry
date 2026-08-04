@@ -32,14 +32,8 @@ const baseStoredSettings = {
   prompt: 'hero sword',
   textureLab: {
     expansionTargetSize: 1024 as const,
-    materialMapDefaults: {
-      heightStrength: 60,
-      metallicStrength: 60,
-      normalStrength: 60,
-      roughnessStrength: 60,
-    },
     seamlessMode: false,
-    workflow: 'generate' as const,
+    workflow: 'expand' as const,
   },
   uiLayout: getDefaultUiLayout(),
   uvLab: {
@@ -546,7 +540,7 @@ describe('persistStoredState', () => {
     })
   })
 
-  it('restores persisted texture material-map defaults', () => {
+  it('migrates legacy Texture Lab generation settings to expansion', () => {
     window.localStorage.setItem(
       'kizer-forge-state',
       JSON.stringify({
@@ -555,37 +549,7 @@ describe('persistStoredState', () => {
           ...baseStoredSettings,
           activeMode: 'texture-lab',
           textureLab: {
-            ...baseStoredSettings.textureLab,
-            materialMapDefaults: {
-              heightStrength: 72,
-              metallicStrength: 18,
-              normalStrength: 91,
-              roughnessStrength: 44,
-            },
-          },
-        },
-        session: null,
-      }),
-    )
-
-    expect(loadStoredState()?.settings.textureLab.materialMapDefaults).toEqual({
-      heightStrength: 72,
-      metallicStrength: 18,
-      normalStrength: 91,
-      roughnessStrength: 44,
-    })
-  })
-
-  it('falls back missing texture material-map defaults to the app defaults', () => {
-    window.localStorage.setItem(
-      'kizer-forge-state',
-      JSON.stringify({
-        recentPrompts: [],
-        settings: {
-          ...baseStoredSettings,
-          activeMode: 'texture-lab',
-          textureLab: {
-            expansionTargetSize: 1024,
+            expansionTargetSize: 512,
             seamlessMode: true,
             workflow: 'generate',
           },
@@ -594,11 +558,10 @@ describe('persistStoredState', () => {
       }),
     )
 
-    expect(loadStoredState()?.settings.textureLab.materialMapDefaults).toEqual({
-      heightStrength: 60,
-      metallicStrength: 60,
-      normalStrength: 60,
-      roughnessStrength: 60,
+    expect(loadStoredState()?.settings.textureLab).toEqual({
+      expansionTargetSize: 512,
+      seamlessMode: true,
+      workflow: 'expand',
     })
   })
 })

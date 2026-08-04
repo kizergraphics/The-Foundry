@@ -57,7 +57,6 @@ import {
 import { ImageUploadField } from './components/ImageUploadField'
 import { ModelUploadField } from './components/ModelUploadField'
 import { GeneratedResultCard, PlaceholderCard } from './components/ResultCards'
-import { TextureMaterialPack } from './components/TextureMaterialPack'
 import {
   actionAnimatorActionOptions,
   generateActionAnimator,
@@ -67,9 +66,7 @@ import {
   generateCharacterSheet,
 } from './lib/characterSheet'
 import {
-  buildTextureSeamRepairInput,
   copyResultToClipboard,
-  createDataUrl,
   dataUrlToBlob,
   dataUrlToFile,
   downloadBlob,
@@ -133,10 +130,6 @@ import type {
   OpenAiImageQuality,
   ReferenceAsset,
   TextureExpansionTargetSize,
-  TextureMaterialMapDefaults,
-  TextureMaterialMapKey,
-  TextureMaterialMapStrengthKey,
-  TextureLabWorkflow,
   UvLabAtlasSize,
   VariantForgeFamily,
   VariantForgeOptionStateMap,
@@ -187,21 +180,16 @@ import {
   type VariantForgeIdeaState,
 } from './lib/variantForgeIdeas'
 import {
-  buildMaterialMapsRequest,
   buildPortraitStudioRequest,
   buildStandardForgeRequest,
   buildTextureExpansionRequest,
   buildVfxRecipeRequest,
   buildVariantForgeRequest,
   buildVfxForgeRequest,
-  normalizeMaterialMapsApiResults,
   normalizeForgeApiResults,
-  postMaterialMapsRequest,
-  type MaterialMapResult,
   postForgeRequest,
   postVfxExportRequest,
   postVfxRecipeRequest,
-  type ForgeApiResponse,
   type VfxTexturePayload,
 } from './modes/execution'
 
@@ -250,24 +238,6 @@ type TelemetrySnapshot = {
   timeZone: string
 }
 
-type TextureLabRunContext = {
-  prompt: string
-  seamlessMode: boolean
-  styleText: string
-  targetSize: TextureExpansionTargetSize
-  workflow: 'expand' | 'generate'
-}
-
-type TextureMaterialPackState = {
-  dirty: boolean
-  error: ForgeErrorInfo | null
-  isVisible: boolean
-  lastBakedStrengths: TextureMaterialMapDefaults | null
-  maps: Partial<Record<TextureMaterialMapKey, MaterialMapResult>>
-  status: 'idle' | 'loading' | 'ready' | 'error'
-  strengths: TextureMaterialMapDefaults
-}
-
 type VfxTextureResultMap = Partial<Record<VfxTextureKind, ForgeResult>>
 type ActionAnimatorRunArtifacts = ActionAnimatorArtifacts
 
@@ -307,26 +277,10 @@ const portraitStudioExpressionLabels = [
   'joy',
   'surprised',
 ] as const
-const textureMaterialMapOrder: TextureMaterialMapKey[] = [
-  'height',
-  'normal',
-  'roughness',
-  'metallic',
-]
-const textureMaterialMapLabels: Record<TextureMaterialMapKey, string> = {
-  height: 'Height',
-  metallic: 'Metallic',
-  normal: 'Normal',
-  roughness: 'Roughness',
-}
-const textureLabClientBatchMaxAttempts = 2
-const textureLabClientBatchMaxParallelSlots = 1
-const textureLabClientInterSlotDelayMs = 250
-const textureLabClientRetryDelayMs = 1200
-const textureLabClientMaxRetryDelayMs = 10000
 const standardForgeClientBatchMaxAttempts = 2
 const standardForgeClientBatchRequestTimeoutMs = 105000
-const textureLabClientBatchRequestTimeoutMs = 45000
+const standardForgeClientRetryDelayMs = 1200
+const standardForgeClientMaxRetryDelayMs = 10000
 const shellZoneKeyPrefix = 'shell:'
 const controlZoneKeyPrefix = 'control:'
 const workspaceZoneKeyPrefix = 'workspace:'
@@ -608,20 +562,6 @@ function persistTelemetryWindowState(state: TelemetryWindowState) {
   window.localStorage.setItem(telemetryWindowStorageKey, JSON.stringify(state))
 }
 
-function buildTextureMaterialPackState(
-  defaults: TextureMaterialMapDefaults,
-): TextureMaterialPackState {
-  return {
-    dirty: false,
-    error: null,
-    isVisible: true,
-    lastBakedStrengths: null,
-    maps: {},
-    status: 'idle',
-    strengths: cloneTextureMaterialStrengths(defaults),
-  }
-}
-
 function buildForgeBatchSlots(count: number): ForgeBatchSlotState[] {
   return Array.from({ length: count }, () => ({
     attempt: 1,
@@ -658,41 +598,6 @@ function sleep(delayMs: number) {
   })
 }
 
-function hasGeneratedTextureMaterialMaps(pack: TextureMaterialPackState | undefined) {
-  return textureMaterialMapOrder.some((mapKey) => Boolean(pack?.maps[mapKey]))
-}
-
-function cloneTextureMaterialStrengths(
-  strengths: TextureMaterialMapDefaults,
-): TextureMaterialMapDefaults {
-  return {
-    ...strengths,
-  }
-}
-
-function areTextureMaterialStrengthsEqual(
-  left: TextureMaterialMapDefaults,
-  right: TextureMaterialMapDefaults | null,
-) {
-  if (!right) {
-    return false
-  }
-
-  return (
-    left.heightStrength === right.heightStrength &&
-    left.normalStrength === right.normalStrength &&
-    left.roughnessStrength === right.roughnessStrength &&
-    left.metallicStrength === right.metallicStrength
-  )
-}
-
-function getTextureMaterialPackDirty(
-  strengths: TextureMaterialMapDefaults,
-  lastBakedStrengths: TextureMaterialMapDefaults | null,
-) {
-  return Boolean(lastBakedStrengths) && !areTextureMaterialStrengthsEqual(strengths, lastBakedStrengths)
-}
-
 function buildHydratedForgeState(
   storedState: NonNullable<ReturnType<typeof loadStoredState>>,
 ) {
@@ -716,10 +621,7 @@ function buildHydratedForgeState(
     textureLab: {
       ...initialState.textureLab,
       ...storedState.settings.textureLab,
-      materialMapDefaults: {
-        ...initialState.textureLab.materialMapDefaults,
-        ...storedState.settings.textureLab.materialMapDefaults,
-      },
+      workflow: 'expand' as const,
     },
     uvLab: {
       ...initialState.uvLab,
@@ -776,9 +678,8 @@ function buildStoredStateSnapshot(
       prompt: state.prompt,
       textureLab: {
         expansionTargetSize: state.textureLab.expansionTargetSize,
-        materialMapDefaults: state.textureLab.materialMapDefaults,
         seamlessMode: state.textureLab.seamlessMode,
-        workflow: state.textureLab.workflow,
+        workflow: 'expand',
       },
       uiLayout,
       uvLab: {
@@ -836,10 +737,6 @@ function App() {
   const [lastCharacterSheetResult, setLastCharacterSheetResult] =
     useState<ForgeResult | null>(null)
   const [lastResultMode, setLastResultMode] = useState<ForgeMode | null>(null)
-  const [materialPacksByResultId, setMaterialPacksByResultId] = useState<
-    Record<string, TextureMaterialPackState>
-  >({})
-  const [repairingResultId, setRepairingResultId] = useState<string | null>(null)
   const [vfxRecipeManifest, setVfxRecipeManifest] = useState<VfxRecipeManifest | null>(null)
   const [vfxTextureResults, setVfxTextureResults] = useState<VfxTextureResultMap>({})
   const [actionAnimatorArtifacts, setActionAnimatorArtifacts] =
@@ -847,8 +744,6 @@ function App() {
   const [isBuildingVfxRecipe, setIsBuildingVfxRecipe] = useState(false)
   const [isDownloadingVfxBundle, setIsDownloadingVfxBundle] = useState(false)
   const [hasRestoredState, setHasRestoredState] = useState(false)
-  const [lastTextureLabRun, setLastTextureLabRun] =
-    useState<TextureLabRunContext | null>(null)
   const [serviceHealth, setServiceHealth] = useState<ServiceHealth | null>(null)
   const [modelOverridesByMode, setModelOverridesByMode] = useState<
     Partial<Record<ForgeMode, ModelId>>
@@ -967,7 +862,6 @@ function App() {
       isCharacterSheetMode,
       isPortraitStudioMode,
       isTextureExpansionMode,
-      isTextureGenerateMode,
       isTextureLabMode,
       isUvLabMode,
       isVariantForgeMode,
@@ -1489,9 +1383,7 @@ function App() {
     state.portraitStudio.prompt,
     state.prompt,
     state.textureLab.expansionTargetSize,
-    state.textureLab.materialMapDefaults,
     state.textureLab.seamlessMode,
-    state.textureLab.workflow,
     state.uvLab.atlasSize,
     state.uvLab.paddingPx,
     state.variantForge.familyCustomDirections,
@@ -1534,7 +1426,6 @@ function App() {
     nextNotice: string,
     options?: {
       actionAnimatorArtifacts?: ActionAnimatorRunArtifacts | null
-      runContext?: TextureLabRunContext | null
       telemetryModel?: string | null
       trackTelemetry?: boolean
     },
@@ -1544,7 +1435,6 @@ function App() {
 
     setForgeSlots([])
     setResults(nextResults)
-    setMaterialPacksByResultId({})
     setServerModel(nextServerModel)
     setServerPrompt(nextServerPrompt)
     setStatus('success')
@@ -1553,12 +1443,7 @@ function App() {
     setLastSavedAt(savedAt)
     setLastResultMode(state.activeMode)
     setRecentPrompts(nextRecentPrompts)
-    setRepairingResultId(null)
     setActionAnimatorArtifacts(options?.actionAnimatorArtifacts ?? null)
-
-    if (options?.runContext !== undefined) {
-      setLastTextureLabRun(options.runContext)
-    }
 
     if (options?.trackTelemetry) {
       registerSuccessfulApiCall(options.telemetryModel ?? nextServerModel)
@@ -1602,22 +1487,14 @@ function App() {
     baseRequest,
     nextServerPromptFallback,
     noticeLabel,
-    runContext,
     totalCount,
   }: {
     baseRequest: Awaited<ReturnType<typeof buildStandardForgeRequest>>
     nextServerPromptFallback: string
     noticeLabel: string
-    runContext: TextureLabRunContext | null
     totalCount: number
   }) {
-    const isTextureLabBatch = isTextureLabMode && isTextureGenerateMode
-    const maxAttempts = isTextureLabBatch
-      ? textureLabClientBatchMaxAttempts
-      : standardForgeClientBatchMaxAttempts
-    const slotRequestTimeoutMs = isTextureLabBatch
-      ? textureLabClientBatchRequestTimeoutMs
-      : standardForgeClientBatchRequestTimeoutMs
+    const maxAttempts = standardForgeClientBatchMaxAttempts
     const nextRecentPrompts = buildRecentPrompts(activePromptValue, recentPrompts)
     let latestServerModel: string | null = null
     let latestServerPrompt: string | null = null
@@ -1625,18 +1502,10 @@ function App() {
     setForgeSlots(buildForgeBatchSlots(totalCount))
     setResults([])
     setActionAnimatorArtifacts(null)
-    setMaterialPacksByResultId({})
-    setRepairingResultId(null)
     setNotice(
-      isTextureLabBatch
-        ? `Starting ${noticeLabel.toLowerCase()} for ${totalCount} output slots. Texture Lab batches are queued conservatively so each slot behaves more like a stable single render.`
-        : `Starting ${noticeLabel.toLowerCase()} for ${totalCount} output slots. Finished slots will appear immediately.`,
+      `Starting ${noticeLabel.toLowerCase()} for ${totalCount} output slots. Finished slots will appear immediately.`,
     )
     setLastResultMode(null)
-
-    if (runContext) {
-      setLastTextureLabRun(runContext)
-    }
 
     const runSlotGeneration = async (slotIndex: number) => {
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -1658,7 +1527,7 @@ function App() {
               generationCount: 1,
             },
             {
-              timeoutMs: slotRequestTimeoutMs,
+              timeoutMs: standardForgeClientBatchRequestTimeoutMs,
             },
           )
 
@@ -1671,21 +1540,11 @@ function App() {
 
           updateForgeSlot(slotIndex, (slot) => ({
             ...slot,
-            detail:
-              isTextureLabBatch
-                ? 'Normalizing the texture into the final square output.'
-                : 'Finalizing the image candidate.',
+            detail: 'Finalizing the image candidate.',
             status: 'finalizing',
           }))
 
-          const [rawResult] = normalizeForgeApiResults(payload)
-          const [nextResult] =
-            isTextureLabBatch
-              ? await normalizeTextureLabResults(
-                  [rawResult],
-                  state.textureLab.expansionTargetSize,
-                )
-              : [rawResult]
+          const [nextResult] = normalizeForgeApiResults(payload)
           const nextSlotResult = {
             ...nextResult,
             id: `slot-${slotIndex + 1}-${nextResult.id}`,
@@ -1732,11 +1591,11 @@ function App() {
               ? Math.min(
                   Math.max(
                     (normalizedError.retryAfterSeconds ?? 1) * 1000,
-                    textureLabClientRetryDelayMs,
+                    standardForgeClientRetryDelayMs,
                   ),
-                  textureLabClientMaxRetryDelayMs,
+                  standardForgeClientMaxRetryDelayMs,
                 )
-              : textureLabClientRetryDelayMs
+              : standardForgeClientRetryDelayMs
 
           updateForgeSlot(slotIndex, (slot) => ({
             ...slot,
@@ -1766,38 +1625,17 @@ function App() {
       }
     }
 
-    const runTextureLabBatch = async () => {
-      const slotEntries = []
-
-      for (let slotIndex = 0; slotIndex < totalCount; slotIndex += 1) {
-        slotEntries.push(await runSlotGeneration(slotIndex))
-
-        const shouldPauseBetweenSlots =
-          slotIndex < totalCount - 1 &&
-          (slotIndex + 1) % textureLabClientBatchMaxParallelSlots === 0
-
-        if (shouldPauseBetweenSlots) {
-          await sleep(textureLabClientInterSlotDelayMs)
-        }
-      }
-
-      return slotEntries
-    }
-
-    const slotEntries = isTextureLabBatch
-      ? await runTextureLabBatch()
-      : await Promise.all(
-          Array.from({ length: totalCount }, async (_, slotIndex) =>
-            runSlotGeneration(slotIndex),
-          ),
-        )
+    const slotEntries = await Promise.all(
+      Array.from({ length: totalCount }, async (_, slotIndex) =>
+        runSlotGeneration(slotIndex),
+      ),
+    )
 
     const completedResults = slotEntries.flatMap((entry) => (entry.result ? [entry.result] : []))
     const failedEntries = slotEntries.filter((entry) => entry.error)
     const savedAt = new Date().toISOString()
 
     setResults(completedResults)
-    setRepairingResultId(null)
 
     if (completedResults.length > 0) {
       setServerModel(latestServerModel)
@@ -1930,7 +1768,6 @@ function App() {
           `Action Animator extracted ${payload.artifacts.frames.length} keyed frame${payload.artifacts.frames.length === 1 ? '' : 's'} from Veo video output.`,
           {
             actionAnimatorArtifacts: payload.artifacts,
-            runContext: null,
             telemetryModel: payload.model,
             trackTelemetry: true,
           },
@@ -1954,7 +1791,6 @@ function App() {
           activePromptValue.trim(),
           'Character sheet generated with palette extraction enabled.',
           {
-            runContext: null,
             telemetryModel: payload.model,
             trackTelemetry: true,
           },
@@ -1992,7 +1828,6 @@ function App() {
             ? `Variant Forge created a ${formatVariantForgeLabel(state.variantForge.variantPreset)} variant.`
             : `Variant Forge created a ${formatVariantForgeLabel(state.variantForge.variantFamily)} family variant with no preset toggles enabled.`,
           {
-            runContext: null,
             telemetryModel: payload.model,
             trackTelemetry: true,
           },
@@ -2027,7 +1862,6 @@ function App() {
           payload.prompt ?? promptPreview,
           'Portrait Studio generated a five-expression contact sheet.',
           {
-            runContext: null,
             telemetryModel: payload.model,
             trackTelemetry: true,
           },
@@ -2067,13 +1901,6 @@ function App() {
           payload.prompt ?? promptPreview,
           'Texture expansion completed with a centered outpaint pass.',
           {
-            runContext: {
-              prompt: state.prompt.trim(),
-              seamlessMode: state.textureLab.seamlessMode,
-              styleText: activeStyleInput.trim(),
-              targetSize: state.textureLab.expansionTargetSize,
-              workflow: 'expand',
-            },
             telemetryModel: payload.model,
             trackTelemetry: true,
           },
@@ -2127,7 +1954,6 @@ function App() {
           generatedTextures[0]?.prompt ?? promptPreview,
           `VFX Forge generated ${generatedTextures.length} texture output${generatedTextures.length === 1 ? '' : 's'} for ${activeVfxEffectLabel}.`,
           {
-            runContext: null,
             telemetryModel: generatedTextures[0]?.model ?? null,
             trackTelemetry: true,
           },
@@ -2148,15 +1974,6 @@ function App() {
           baseRequest: standardRequest,
           nextServerPromptFallback: activePromptValue.trim(),
           noticeLabel: activeMode.label,
-          runContext: isTextureLabMode
-            ? {
-                prompt: state.prompt.trim(),
-                seamlessMode: state.textureLab.seamlessMode,
-                styleText: activeStyleInput.trim(),
-                targetSize: state.textureLab.expansionTargetSize,
-                workflow: 'generate',
-              }
-            : null,
           totalCount: standardRequest.generationCount,
         })
         return
@@ -2168,13 +1985,7 @@ function App() {
         throw toForgeError(payload?.error)
       }
 
-      const finalizedResults =
-        isTextureLabMode && isTextureGenerateMode
-          ? await normalizeTextureLabResults(
-              normalizeForgeApiResults(payload),
-              state.textureLab.expansionTargetSize,
-            )
-          : normalizeForgeApiResults(payload)
+      const finalizedResults = normalizeForgeApiResults(payload)
 
       finalizeForgeRun(
         finalizedResults,
@@ -2182,15 +1993,6 @@ function App() {
         activePromptValue.trim(),
         `Forge pass completed with ${payload.images.length} candidate outputs.`,
         {
-          runContext: isTextureLabMode
-            ? {
-                prompt: state.prompt.trim(),
-                seamlessMode: state.textureLab.seamlessMode,
-                styleText: activeStyleInput.trim(),
-                targetSize: state.textureLab.expansionTargetSize,
-                workflow: 'generate',
-              }
-            : null,
           telemetryModel: payload.model,
           trackTelemetry: true,
         },
@@ -2379,204 +2181,6 @@ function App() {
     }
   }, [canBuildVfxRecipe, isDownloadingVfxBundle, state.vfxForge, vfxTextureResults])
 
-  const handleTextureMaterialStrengthChange = useCallback((
-    resultId: string,
-    key: TextureMaterialMapStrengthKey,
-    value: number,
-  ) => {
-    dispatch({
-      type: 'set-texture-material-map-default',
-      key,
-      value,
-    })
-    setMaterialPacksByResultId((previousPacks) => {
-      const existingPack =
-        previousPacks[resultId] ??
-        buildTextureMaterialPackState(state.textureLab.materialMapDefaults)
-      const nextStrengths = {
-        ...existingPack.strengths,
-        [key]: Math.max(0, Math.min(100, Math.round(value))),
-      }
-
-      return {
-        ...previousPacks,
-        [resultId]: {
-          ...existingPack,
-          dirty: getTextureMaterialPackDirty(nextStrengths, existingPack.lastBakedStrengths),
-          isVisible: true,
-          strengths: nextStrengths,
-        },
-      }
-    })
-  }, [state.textureLab.materialMapDefaults])
-
-  const runTextureMaterialMapGeneration = useCallback(async (
-    result: ForgeResult,
-    strengths: TextureMaterialMapDefaults,
-  ) => {
-    setMaterialPacksByResultId((previousPacks) => {
-      const existingPack =
-        previousPacks[result.id] ??
-        buildTextureMaterialPackState(state.textureLab.materialMapDefaults)
-
-      return {
-        ...previousPacks,
-        [result.id]: {
-          ...existingPack,
-          error: null,
-          isVisible: true,
-          status: 'loading',
-          strengths: cloneTextureMaterialStrengths(strengths),
-        },
-      }
-    })
-    setError(null)
-    setNotice('Generating material maps for the selected texture.')
-
-    try {
-      const { ok, payload } = await postMaterialMapsRequest(
-        await buildMaterialMapsRequest({
-          modelId: activeModel,
-          prompt: lastTextureLabRun?.prompt ?? state.prompt.trim(),
-          quality: activeOpenAiImageQuality,
-          result,
-          strengths,
-          styleText: lastTextureLabRun?.styleText ?? activeStyleInput,
-        }),
-      )
-
-      if (!ok || !payload?.maps) {
-        throw toForgeError(payload?.error, 'Material Maps Failed')
-      }
-
-      const normalizedMaps = normalizeMaterialMapsApiResults(payload)
-
-      if (!textureMaterialMapOrder.every((mapKey) => normalizedMaps[mapKey])) {
-        throw new Error('The material map response was incomplete.')
-      }
-
-      setMaterialPacksByResultId((previousPacks) => ({
-        ...previousPacks,
-        [result.id]: {
-          dirty: false,
-          error: null,
-          isVisible: true,
-          lastBakedStrengths: cloneTextureMaterialStrengths(strengths),
-          maps: normalizedMaps,
-          status: 'ready',
-          strengths: cloneTextureMaterialStrengths(strengths),
-        },
-      }))
-      setNotice('Material maps are ready below the selected texture.')
-      registerSuccessfulApiCall(payload.model ?? activeModel)
-    } catch (materialMapError) {
-      const nextError = toForgeError(materialMapError, 'Material Maps Failed')
-
-      setMaterialPacksByResultId((previousPacks) => {
-        const existingPack =
-          previousPacks[result.id] ??
-          buildTextureMaterialPackState(state.textureLab.materialMapDefaults)
-
-        return {
-          ...previousPacks,
-          [result.id]: {
-            ...existingPack,
-            dirty: getTextureMaterialPackDirty(strengths, existingPack.lastBakedStrengths),
-            error: nextError,
-            isVisible: true,
-            status: 'error',
-            strengths: cloneTextureMaterialStrengths(strengths),
-          },
-        }
-      })
-      setError(nextError)
-    }
-  }, [
-    activeModel,
-    activeOpenAiImageQuality,
-    activeStyleInput,
-    lastTextureLabRun?.prompt,
-    lastTextureLabRun?.styleText,
-    registerSuccessfulApiCall,
-    state.prompt,
-    state.textureLab.materialMapDefaults,
-  ])
-
-  const handleGenerateMaterialMaps = useCallback(async (result: ForgeResult) => {
-    const existingPack = materialPacksByResultId[result.id]
-
-    setMaterialPacksByResultId((previousPacks) => ({
-      ...previousPacks,
-      [result.id]: {
-        ...(previousPacks[result.id] ??
-          buildTextureMaterialPackState(state.textureLab.materialMapDefaults)),
-        isVisible: true,
-      },
-    }))
-
-    if (existingPack?.status === 'loading') {
-      return
-    }
-
-    if (existingPack && !existingPack.dirty && !existingPack.error && hasGeneratedTextureMaterialMaps(existingPack)) {
-      setNotice('Material maps are already generated for this texture.')
-      return
-    }
-
-    await runTextureMaterialMapGeneration(
-      result,
-      existingPack?.strengths ?? state.textureLab.materialMapDefaults,
-    )
-  }, [materialPacksByResultId, runTextureMaterialMapGeneration, state.textureLab.materialMapDefaults])
-
-  const handleDownloadTextureMaterialMap = useCallback((
-    result: ForgeResult,
-    mapKey: TextureMaterialMapKey,
-  ) => {
-    const map = materialPacksByResultId[result.id]?.maps[mapKey]
-
-    if (!map) {
-      return
-    }
-
-    downloadDataUrl(
-      map.dataUrl,
-      `kizer-forge-texture-lab-${result.id}-${mapKey}.png`,
-    )
-    setNotice(`Downloaded the ${textureMaterialMapLabels[mapKey].toLowerCase()} map.`)
-  }, [materialPacksByResultId])
-
-  const handleDownloadAllTextureMaterialMaps = useCallback((result: ForgeResult) => {
-    const materialPack = materialPacksByResultId[result.id]
-    const availableMaps = textureMaterialMapOrder.flatMap((mapKey) => {
-      const map = materialPack?.maps[mapKey]
-
-      return map
-        ? [
-            {
-              key: mapKey,
-              map,
-            },
-          ]
-        : []
-    })
-
-    if (availableMaps.length === 0) {
-      return
-    }
-
-    availableMaps.forEach((entry, index) => {
-      window.setTimeout(() => {
-        downloadDataUrl(
-          entry.map.dataUrl,
-          `kizer-forge-texture-lab-${result.id}-${entry.key}.png`,
-        )
-      }, index * 120)
-    })
-
-    setNotice(`Queued ${availableMaps.length} material map downloads.`)
-  }, [materialPacksByResultId])
-
   const handleDownloadPortraitFaces = useCallback(async (
     result: ForgeResult,
     index: number,
@@ -2667,99 +2271,6 @@ function App() {
     }
   }
 
-  const handleRepairSeams = useCallback(async (result: ForgeResult) => {
-    const repairContext = lastTextureLabRun
-
-    if (!repairContext || repairContext.workflow !== 'generate' || !repairContext.seamlessMode) {
-      setError({
-        message: 'Seam repair is only available for seamless Texture Lab generation results.',
-        title: 'Seam Repair Unavailable',
-      })
-      return
-    }
-
-    setRepairingResultId(result.id)
-    setError(null)
-    setNotice('Preparing offset seam repair pass.')
-
-    try {
-      const sourceBlob = await fetch(result.dataUrl).then((response) => response.blob())
-      const repairInput = await buildTextureSeamRepairInput(sourceBlob)
-      const response = await fetch('/api/forge', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          mode: 'texture-lab',
-          modelId: activeModel,
-          prompt: repairContext.prompt,
-          seamRepair: {
-            offsetImage: {
-              data: repairInput.offsetBase64,
-              mimeType: repairInput.mimeType,
-            },
-            originalImage: {
-              data: repairInput.originalBase64,
-              mimeType: repairInput.mimeType,
-            },
-            sourceHeight: repairInput.sourceHeight,
-            sourceWidth: repairInput.sourceWidth,
-          },
-          styleText: repairContext.styleText,
-          workflow: 'repair-seams',
-        }),
-      })
-
-      const payload = (await response.json()) as ForgeApiResponse | undefined
-
-      if (!response.ok || !payload?.images?.length) {
-        throw toForgeError(payload?.error)
-      }
-
-      const repairedImage = payload.images[0]
-      const [nextResult] = await normalizeTextureLabResults(
-        [
-          {
-            dataUrl: createDataUrl(repairedImage.data, repairedImage.mimeType),
-            id: `${result.id}-repaired`,
-            mimeType: repairedImage.mimeType,
-            text: repairedImage.text,
-          },
-        ],
-        repairContext.targetSize,
-      )
-      const normalizedResult: ForgeResult = nextResult ?? {
-        dataUrl: createDataUrl(repairedImage.data, repairedImage.mimeType),
-        id: `${result.id}-repaired`,
-        mimeType: repairedImage.mimeType,
-        text: repairedImage.text,
-      }
-
-      setResults((previousResults) =>
-        previousResults.map((entry) =>
-          entry.id === result.id ? normalizedResult : entry,
-        ),
-      )
-      setMaterialPacksByResultId((previousPacks) => {
-        const nextPacks = { ...previousPacks }
-        delete nextPacks[result.id]
-        return nextPacks
-      })
-      setServerModel(payload.model ?? serverModel)
-      setServerPrompt(payload.prompt ?? serverPrompt)
-      setStatus('success')
-      setNotice('Seam repair pass completed for the selected texture.')
-      setLastSavedAt(new Date().toISOString())
-      setLastResultMode('texture-lab')
-      registerSuccessfulApiCall(payload.model ?? activeModel)
-    } catch (repairError) {
-      setError(toForgeError(repairError, 'Seam Repair Failed'))
-    } finally {
-      setRepairingResultId(null)
-    }
-  }, [activeModel, lastTextureLabRun, registerSuccessfulApiCall, serverModel, serverPrompt])
-
   async function handleMockForge() {
     const rawMockResults = buildMockResults({
       count: activeGenerationCount,
@@ -2792,29 +2303,14 @@ function App() {
       isCharacterSheetMode
         ? 'Showing local mock character-sheet results so you can keep iterating on layout, palette, and review flow.'
         : 'Showing local mock results so you can continue product work without live provider access.',
-      {
-        runContext: isTextureLabMode
-          ? {
-              prompt: state.prompt.trim(),
-              seamlessMode: state.textureLab.seamlessMode,
-              styleText: activeStyleInput.trim(),
-              targetSize: state.textureLab.expansionTargetSize,
-              workflow: isTextureExpansionMode ? 'expand' : 'generate',
-            }
-          : null,
-      },
+      undefined,
     )
   }
 
   const controlZoneClassName = useWideControlGrid ? 'space-y-5' : 'space-y-4'
-  const promptPanelDescription =
-    isTextureExpansionMode
-      ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
-      : isTextureGenerateMode && state.textureLab.seamlessMode
-        ? 'Describe the material. Seamless Mode converts this into a tile-safe semantic tiling prompt at the selected texture size.'
-        : isTextureGenerateMode
-          ? 'Describe the material texture to generate at the selected texture size.'
-          : 'Describe the asset or scene you want generated'
+  const promptPanelDescription = isTextureLabMode
+    ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
+    : 'Describe the asset or scene you want generated'
 
   const controlPanelItems: Partial<
     Record<LayoutPanelItemId, LayoutItemDescriptor<LayoutPanelItemId>>
@@ -3183,11 +2679,7 @@ function App() {
             onTargetSizeChange={(size) =>
               dispatch({ type: 'set-texture-expansion-target-size', size })
             }
-            onWorkflowChange={(workflow) =>
-              dispatch({ type: 'set-texture-lab-workflow', workflow })
-            }
             seamlessMode={state.textureLab.seamlessMode}
-            workflow={state.textureLab.workflow}
           />
         ),
         id: 'texture-workflow',
@@ -3425,11 +2917,6 @@ function App() {
                   return (
                     <GeneratedResultCard
                       key={result.id}
-                      canRepairSeams={
-                        isTextureLabMode &&
-                        lastTextureLabRun?.seamlessMode === true &&
-                        lastTextureLabRun.workflow === 'generate'
-                      }
                       extraActionLabel={
                         isActionAnimatorMode
                           ? 'Download Frames'
@@ -3437,20 +2924,9 @@ function App() {
                           ? 'Download Faces'
                           : isVfxForgeMode && vfxTextureKind === 'flipbook'
                             ? 'Download Frames'
-                            : isTextureLabMode
-                              ? 'Generate Maps'
-                              : undefined
+                            : undefined
                       }
                       index={index}
-                      isExpanded={
-                        isTextureLabMode &&
-                        materialPacksByResultId[result.id]?.isVisible === true
-                      }
-                      isExtraActionPending={
-                        isTextureLabMode &&
-                        materialPacksByResultId[result.id]?.status === 'loading'
-                      }
-                      isRepairing={repairingResultId === result.id}
                       mode={activeMode}
                       result={result}
                       onCopy={handleCopy}
@@ -3462,34 +2938,9 @@ function App() {
                           ? handleDownloadPortraitFaces
                           : isVfxForgeMode && vfxTextureKind === 'flipbook'
                             ? handleDownloadVfxFrames
-                            : isTextureLabMode
-                              ? handleGenerateMaterialMaps
-                              : undefined
+                            : undefined
                       }
-                      onRepairSeams={handleRepairSeams}
-                    >
-                      {isTextureLabMode && materialPacksByResultId[result.id]?.isVisible ? (
-                        <TextureMaterialPack
-                          error={materialPacksByResultId[result.id]?.error ?? null}
-                          isDirty={Boolean(materialPacksByResultId[result.id]?.dirty)}
-                          isLoading={materialPacksByResultId[result.id]?.status === 'loading'}
-                          maps={materialPacksByResultId[result.id]?.maps ?? {}}
-                          onDownloadAll={() => handleDownloadAllTextureMaterialMaps(result)}
-                          onDownloadMap={(mapKey) =>
-                            handleDownloadTextureMaterialMap(result, mapKey)
-                          }
-                          onRegenerate={() => void handleGenerateMaterialMaps(result)}
-                          onStrengthChange={(key, value) =>
-                            handleTextureMaterialStrengthChange(result.id, key, value)
-                          }
-                          sourceResult={result}
-                          strengths={
-                            materialPacksByResultId[result.id]?.strengths ??
-                            state.textureLab.materialMapDefaults
-                          }
-                        />
-                      ) : null}
-                    </GeneratedResultCard>
+                    />
                   )
                 }
 
@@ -3526,11 +2977,6 @@ function App() {
                   return (
                     <GeneratedResultCard
                       key={result.id}
-                      canRepairSeams={
-                        isTextureLabMode &&
-                        lastTextureLabRun?.seamlessMode === true &&
-                        lastTextureLabRun.workflow === 'generate'
-                      }
                       extraActionLabel={
                         isActionAnimatorMode
                           ? 'Download Frames'
@@ -3538,20 +2984,9 @@ function App() {
                           ? 'Download Faces'
                           : isVfxForgeMode && vfxTextureKind === 'flipbook'
                             ? 'Download Frames'
-                            : isTextureLabMode
-                              ? 'Generate Maps'
-                              : undefined
+                            : undefined
                       }
                       index={index}
-                      isExpanded={
-                        isTextureLabMode &&
-                        materialPacksByResultId[result.id]?.isVisible === true
-                      }
-                      isExtraActionPending={
-                        isTextureLabMode &&
-                        materialPacksByResultId[result.id]?.status === 'loading'
-                      }
-                      isRepairing={repairingResultId === result.id}
                       mode={activeMode}
                       result={result}
                       onCopy={handleCopy}
@@ -3563,34 +2998,9 @@ function App() {
                           ? handleDownloadPortraitFaces
                           : isVfxForgeMode && vfxTextureKind === 'flipbook'
                             ? handleDownloadVfxFrames
-                            : isTextureLabMode
-                              ? handleGenerateMaterialMaps
-                              : undefined
+                            : undefined
                       }
-                      onRepairSeams={handleRepairSeams}
-                    >
-                      {isTextureLabMode && materialPacksByResultId[result.id]?.isVisible ? (
-                        <TextureMaterialPack
-                          error={materialPacksByResultId[result.id]?.error ?? null}
-                          isDirty={Boolean(materialPacksByResultId[result.id]?.dirty)}
-                          isLoading={materialPacksByResultId[result.id]?.status === 'loading'}
-                          maps={materialPacksByResultId[result.id]?.maps ?? {}}
-                          onDownloadAll={() => handleDownloadAllTextureMaterialMaps(result)}
-                          onDownloadMap={(mapKey) =>
-                            handleDownloadTextureMaterialMap(result, mapKey)
-                          }
-                          onRegenerate={() => void handleGenerateMaterialMaps(result)}
-                          onStrengthChange={(key, value) =>
-                            handleTextureMaterialStrengthChange(result.id, key, value)
-                          }
-                          sourceResult={result}
-                          strengths={
-                            materialPacksByResultId[result.id]?.strengths ??
-                            state.textureLab.materialMapDefaults
-                          }
-                        />
-                      ) : null}
-                    </GeneratedResultCard>
+                    />
                   )
                 })
               : reservedOutputs.map((index) => (
@@ -5744,48 +5154,29 @@ type TextureLabWorkflowPanelProps = {
   expansionTargetSize: TextureExpansionTargetSize
   onSeamlessModeChange: (enabled: boolean) => void
   onTargetSizeChange: (size: TextureExpansionTargetSize) => void
-  onWorkflowChange: (workflow: TextureLabWorkflow) => void
   seamlessMode: boolean
-  workflow: TextureLabWorkflow
 }
 
 function TextureLabWorkflowPanel({
   expansionTargetSize,
   onSeamlessModeChange,
   onTargetSizeChange,
-  onWorkflowChange,
   seamlessMode,
-  workflow,
 }: TextureLabWorkflowPanelProps) {
   return (
     <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
       <div className="flex items-center justify-between">
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-            Texture Workflow
+            Expansion Workflow
           </p>
           <p className="mt-2 text-sm font-medium text-white">
-            Switch between fresh texture generation and outpaint expansion.
+            Expand an existing texture into a larger, seamless surface.
           </p>
         </div>
         <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-xs text-zinc-400">
           Texture Lab
         </div>
-      </div>
-
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        <ModeToggleButton
-          icon={Sparkles}
-          isActive={workflow === 'generate'}
-          label="Generate"
-          onClick={() => onWorkflowChange('generate')}
-        />
-        <ModeToggleButton
-          icon={ImagePlus}
-          isActive={workflow === 'expand'}
-          label="Expand"
-          onClick={() => onWorkflowChange('expand')}
-        />
       </div>
 
       <button
@@ -5800,7 +5191,7 @@ function TextureLabWorkflowPanel({
         <span>
           <span className="block text-sm font-medium">Seamless Mode</span>
           <span className="mt-1 block text-xs leading-5 text-current/70">
-            Adds tile-safe texture tags and enables seam repair while keeping the original texture preview in view.
+            Adds tile-safe guidance while preserving the source texture as the expansion anchor.
           </span>
         </span>
         <span className="rounded-full border border-current/20 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.28em]">
@@ -5813,8 +5204,7 @@ function TextureLabWorkflowPanel({
           Texture Size
         </p>
         <p className="mt-2 text-sm leading-6 text-zinc-300">
-          Choose the final square texture size for both fresh generations and
-          expansion output.
+          Choose the final square size for the expanded texture.
         </p>
 
         <div className="mt-4 grid grid-cols-2 gap-2">
@@ -5840,19 +5230,17 @@ function TextureLabWorkflowPanel({
         </div>
       </div>
 
-      {workflow === 'expand' ? (
-        <div className="mt-4 rounded-[22px] border border-emerald-300/20 bg-emerald-500/10 p-4">
-          <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-emerald-100/70">
-            Expansion Strategy
-          </p>
-          <p className="mt-2 text-sm leading-6 text-emerald-50">
-            The source texture is centered on a larger guided canvas, then the selected
-            image model synthesizes fresh surrounding material while keeping the final map
-            tile-safe. This workflow uses the active model for the edit pass at the selected
-            output size.
-          </p>
-        </div>
-      ) : null}
+      <div className="mt-4 rounded-[22px] border border-emerald-300/20 bg-emerald-500/10 p-4">
+        <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-emerald-100/70">
+          Expansion Strategy
+        </p>
+        <p className="mt-2 text-sm leading-6 text-emerald-50">
+          The source texture is centered on a larger guided canvas, then the selected
+          image model synthesizes fresh surrounding material while keeping the final map
+          tile-safe. This workflow uses the active model for the edit pass at the selected
+          output size.
+        </p>
+      </div>
     </section>
   )
 }

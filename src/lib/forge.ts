@@ -46,7 +46,7 @@ export type {
 export type ReferenceSlot = 'style' | 'subject'
 export type CharacterSheetReferenceSlot = 'face' | 'outfit' | 'art-style'
 export type CharacterSheetGenerationMode = 'reference' | 'manifest'
-export type TextureLabWorkflow = 'generate' | 'expand'
+export type TextureLabWorkflow = 'expand'
 export type TextureExpansionTargetSize = 512 | 1024
 export type UvLabAtlasSize = 1024 | 2048 | 4096
 export type GenerationCount = 1 | 2 | 3 | 4
@@ -116,19 +116,9 @@ export type CharacterSheetState = {
   referencePrompt: string
 }
 
-export type TextureMaterialMapKey = 'height' | 'normal' | 'roughness' | 'metallic'
-export type TextureMaterialMapStrengthKey =
-  | 'heightStrength'
-  | 'normalStrength'
-  | 'roughnessStrength'
-  | 'metallicStrength'
-
-export type TextureMaterialMapDefaults = Record<TextureMaterialMapStrengthKey, number>
-
 export type TextureLabState = {
   expansionSource: ReferenceAsset | null
   expansionTargetSize: TextureExpansionTargetSize
-  materialMapDefaults: TextureMaterialMapDefaults
   seamlessMode: boolean
   workflow: TextureLabWorkflow
 }
@@ -205,17 +195,11 @@ export type ForgeAction =
     }
   | { type: 'set-character-sheet-consistency'; enabled: boolean }
   | { type: 'set-character-sheet-parent-id'; parentId: string | null }
-  | { type: 'set-texture-lab-workflow'; workflow: TextureLabWorkflow }
   | { type: 'set-texture-expansion-source'; asset: ReferenceAsset | null }
   | { type: 'set-texture-lab-seamless-mode'; enabled: boolean }
   | {
       type: 'set-texture-expansion-target-size'
       size: TextureExpansionTargetSize
-    }
-  | {
-      type: 'set-texture-material-map-default'
-      key: TextureMaterialMapStrengthKey
-      value: number
     }
   | { type: 'set-variant-forge-asset'; asset: ReferenceAsset | null }
   | { type: 'set-variant-forge-family'; family: VariantForgeFamily }
@@ -396,13 +380,6 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
   },
 }
 
-export const defaultTextureMaterialMapDefaults: TextureMaterialMapDefaults = {
-  heightStrength: 60,
-  normalStrength: 60,
-  roughnessStrength: 60,
-  metallicStrength: 60,
-}
-
 export const actionAnimatorVideoFrameSizes = [512, 1080] as const
 export const openAiImageQualityOptions = ['auto', 'low', 'medium', 'high'] as const
 
@@ -502,9 +479,8 @@ export const initialState: ForgeState = {
   textureLab: {
     expansionSource: null,
     expansionTargetSize: 1024,
-    materialMapDefaults: defaultTextureMaterialMapDefaults,
     seamlessMode: false,
-    workflow: 'generate',
+    workflow: 'expand',
   },
   uvLab: {
     atlasSize: 2048,
@@ -654,14 +630,6 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           pipeline: action.pipeline,
         },
       }
-    case 'set-texture-lab-workflow':
-      return {
-        ...state,
-        textureLab: {
-          ...state.textureLab,
-          workflow: action.workflow,
-        },
-      }
     case 'set-texture-expansion-source':
       return {
         ...state,
@@ -684,17 +652,6 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
         textureLab: {
           ...state.textureLab,
           expansionTargetSize: clampTextureLabOutputSize(action.size),
-        },
-      }
-    case 'set-texture-material-map-default':
-      return {
-        ...state,
-        textureLab: {
-          ...state.textureLab,
-          materialMapDefaults: {
-            ...state.textureLab.materialMapDefaults,
-            [action.key]: clampIntensity(action.value),
-          },
         },
       }
     case 'set-variant-forge-asset':

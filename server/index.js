@@ -21,15 +21,10 @@ import {
   toValidationResponse,
   validateCharacterSheetRequest,
   validateForgeRequest,
-  validateMaterialMapsRequest,
   validateVariantForgeIdeaRequest,
   validateVfxExportRequest,
   validateVfxRecipeRequest,
 } from './requestValidation.js'
-import {
-  buildMaterialMapsFromGeneratedImages,
-  readMaterialMapSourceMetadata,
-} from './materialMaps.js'
 import {
   buildVfxExportBundle,
   buildVfxForgePrompt as buildVfxForgePromptForRequest,
@@ -163,7 +158,6 @@ const routeModelDefaults = {
   '/api/action-animator': 'veo-3.1-fast',
   '/api/character-sheet': 'openai-gpt-image-2',
   '/api/forge': 'openai-gpt-image-2',
-  '/api/material-maps': 'gemini-3-pro',
   '/api/variant-forge-ideas': 'gemini-3-flash',
 }
 const routeModelAllowlist = {
@@ -180,12 +174,6 @@ const routeModelAllowlist = {
     'gemini-3-pro',
     'gemini-3-flash',
     'gemini-2.5-flash-image',
-  ],
-  '/api/material-maps': [
-    'openai-gpt-image-2',
-    'gemini-3-pro',
-    'gemini-2.5-flash-image',
-    'gemini-3-flash',
   ],
   '/api/variant-forge-ideas': ['gemini-3-flash'],
 }
@@ -1313,190 +1301,6 @@ app.post(
 )
 
 app.post(
-  '/api/material-maps',
-  optionalGenerationAuth,
-  forgeRateLimit,
-  forgeConcurrencyLimit,
-  parseForgeBody,
-  async (request, response) => {
-  let validatedRequest
-
-  try {
-    validatedRequest = validateMaterialMapsRequest(request.body ?? {})
-  } catch (error) {
-    response.status(400).json(toValidationResponse(error))
-    return
-  }
-
-  const {
-    heightStrength,
-    metallicStrength,
-    modelId,
-    normalStrength,
-    prompt,
-    quality,
-    roughnessStrength,
-    sourceImage,
-    sourceText,
-    styleText,
-  } = validatedRequest
-  const modelSelection = resolveModelForRoute('/api/material-maps', modelId)
-
-  if (!modelSelection.ok) {
-    response.status(500).json({
-      error: {
-        code: 'model_unavailable',
-        details: modelSelection.details,
-        message: modelSelection.message,
-        title: 'Material Maps Are Unavailable',
-      },
-    })
-    return
-  }
-
-  if (!hasApiKeyForProvider(modelSelection.provider)) {
-    response.status(500).json({
-      error: buildMissingApiKeyMessage(modelSelection.provider),
-    })
-    return
-  }
-
-  const sourceImageBuffer = Buffer.from(sourceImage.data, 'base64')
-  const requestId = buildRequestId('material-maps')
-
-  try {
-    const { height: sourceHeight, width: sourceWidth } =
-      await readMaterialMapSourceMetadata(sourceImageBuffer)
-    const promptContext = buildMaterialMapContext({
-      prompt,
-      sourceText,
-      styleText,
-    })
-    const generationRequests = ['height', 'roughness', 'metallic'].map((mapKind) =>
-      generateMaterialMapImageWithFallback({
-        mapKind,
-        preferredModelId: modelSelection.modelId,
-        promptContext,
-        quality,
-        requestId,
-        sourceImage,
-      }),
-    )
-
-    logServerEvent(requestId, 'material map generation started', {
-      sourceHeight,
-      sourceWidth,
-    })
-
-    const generatedMaps = await Promise.all(generationRequests)
-    const imageBuffers = {}
-
-    for (const generatedMap of generatedMaps) {
-      if (!generatedMap.ok) {
-        if (generatedMap.failureKind === 'no-image') {
-          response
-            .status(422)
-            .json(
-              buildNoImageResponseError(
-                '/api/material-maps',
-                generatedMap.modelSelection,
-                generatedMap.generationText,
-                [`Attempted models: ${generatedMap.attemptedModelIds.join(', ')}`],
-              ),
-            )
-          return
-        }
-
-        const normalizedError = normalizeGenerationError(
-          generatedMap.error,
-          generatedMap.modelSelection.modelId,
-          generatedMap.modelSelection.provider,
-        )
-        response.status(normalizedError.status).json(normalizedError.body)
-        return
-      }
-
-      imageBuffers[generatedMap.mapKind] = Buffer.from(generatedMap.generatedImage.data, 'base64')
-    }
-
-    const finalizedMaps = await buildMaterialMapsFromGeneratedImages({
-      heightImageBuffer: imageBuffers.height,
-      heightStrength,
-      metallicImageBuffer: imageBuffers.metallic,
-      metallicStrength,
-      normalStrength,
-      roughnessImageBuffer: imageBuffers.roughness,
-      roughnessStrength,
-      sourceHeight,
-      sourceWidth,
-    })
-
-    await Promise.all(
-      generatedMaps.map(({ generation, modelSelection: successfulModelSelection }) =>
-        recordUsageEvent({
-          model: successfulModelSelection.modelId,
-          route: '/api/material-maps',
-          telemetryModel: resolveTelemetryModelId(
-            successfulModelSelection.modelId,
-            '/api/material-maps',
-          ),
-          tokenCount: extractTotalTokenCount(generation),
-        }).catch((logError) => {
-          console.warn('Telemetry logging failed for /api/material-maps:', logError)
-        }),
-      ),
-    )
-
-    response.json({
-      maps: {
-        height: {
-          data: finalizedMaps.height.buffer.toString('base64'),
-          height: finalizedMaps.height.height,
-          id: 'material-height',
-          mimeType: finalizedMaps.height.mimeType,
-          width: finalizedMaps.height.width,
-        },
-        metallic: {
-          data: finalizedMaps.metallic.buffer.toString('base64'),
-          height: finalizedMaps.metallic.height,
-          id: 'material-metallic',
-          mimeType: finalizedMaps.metallic.mimeType,
-          width: finalizedMaps.metallic.width,
-        },
-        normal: {
-          data: finalizedMaps.normal.buffer.toString('base64'),
-          height: finalizedMaps.normal.height,
-          id: 'material-normal',
-          mimeType: finalizedMaps.normal.mimeType,
-          width: finalizedMaps.normal.width,
-        },
-        roughness: {
-          data: finalizedMaps.roughness.buffer.toString('base64'),
-          height: finalizedMaps.roughness.height,
-          id: 'material-roughness',
-          mimeType: finalizedMaps.roughness.mimeType,
-          width: finalizedMaps.roughness.width,
-        },
-      },
-      model: generatedMaps[0]?.modelSelection.modelId ?? modelSelection.modelId,
-    })
-    logServerEvent(requestId, 'material map generation finished', {
-      sourceHeight,
-      sourceWidth,
-    })
-  } catch (error) {
-    const normalizedError = normalizeGenerationError(
-      error,
-      modelSelection.modelId,
-      modelSelection.provider,
-    )
-
-    response.status(normalizedError.status).json(normalizedError.body)
-  }
-  },
-)
-
-app.post(
   '/api/character-sheet',
   optionalGenerationAuth,
   characterSheetRateLimit,
@@ -2150,58 +1954,6 @@ function buildSeamRepairPrompt({ prompt, styleText }) {
   ]
     .filter(Boolean)
     .join(' ')
-}
-
-function buildMaterialMapContext({ prompt, sourceText, styleText }) {
-  return [
-    typeof sourceText === 'string' && sourceText.trim()
-      ? `Source generation notes: ${sourceText.trim()}.`
-      : null,
-    typeof prompt === 'string' && prompt.trim()
-      ? `Texture direction: ${prompt.trim()}.`
-      : null,
-    typeof styleText === 'string' && styleText.trim()
-      ? `Style guidance: ${styleText.trim()}.`
-      : null,
-  ]
-    .filter(Boolean)
-    .join(' ')
-}
-
-function buildMaterialMapPrompt(mapKind, promptContext) {
-  const mapDescription =
-    mapKind === 'height'
-      ? 'Generate a clean height map where brighter values are raised and darker values are recessed.'
-      : mapKind === 'roughness'
-        ? 'Generate a clean roughness map where brighter values are rougher and darker values are smoother.'
-        : 'Generate a clean metallic map where metallic surfaces are bright and non-metal surfaces stay dark.'
-
-  return [
-    `Material analysis task for the ${mapKind} map.`,
-    mapDescription,
-    'Use the supplied texture as the single source of truth for pattern placement, scale, and material breakup.',
-    'Do not add color coding, legends, labels, borders, lighting, or decorative overlays.',
-    'Return one production-ready map image only.',
-    promptContext || null,
-  ]
-    .filter(Boolean)
-    .join(' ')
-}
-
-function buildMaterialMapSystemInstruction(mapKind) {
-  const outputRule =
-    mapKind === 'metallic'
-      ? 'Favor dark values for non-metals and reserve bright values for truly metallic regions.'
-      : mapKind === 'roughness'
-        ? 'Keep the output physically plausible and free of color tinting.'
-        : 'Keep height detail readable without introducing color tinting.'
-
-  return [
-    'You convert source textures into single-channel PBR utility maps.',
-    'Return exactly one grayscale material map image with no extra commentary.',
-    'Preserve the original material layout, texel density, and tile continuity.',
-    outputRule,
-  ].join(' ')
 }
 
 export function buildVariantForgePrompt({
@@ -4379,109 +4131,6 @@ function buildOpenAiAuthDetails(payload) {
   }
 
   return details
-}
-
-async function generateMaterialMapImageWithFallback({
-  mapKind,
-  preferredModelId,
-  promptContext,
-  quality,
-  requestId,
-  sourceImage,
-}) {
-  const attemptedModelIds = []
-  let lastGenerationText = ''
-  let lastNoImageSelection = null
-  let lastError = null
-
-  for (const candidateModelId of buildRouteModelFallbackSequence(
-    '/api/material-maps',
-    preferredModelId,
-  )) {
-    const modelSelection = resolveModelForRoute('/api/material-maps', candidateModelId)
-
-    if (!modelSelection.ok || !hasApiKeyForProvider(modelSelection.provider)) {
-      continue
-    }
-
-    attemptedModelIds.push(modelSelection.modelId)
-
-    try {
-      const generation = await generateImagesWithModel({
-        candidateCount: 1,
-        modelSelection,
-        prompt: buildMaterialMapPrompt(mapKind, promptContext),
-        quality,
-        references: [sourceImage],
-        routeKey: '/api/material-maps',
-        size: '1024x1024',
-        systemInstruction: buildMaterialMapSystemInstruction(mapKind),
-        timeoutMs: forgeGenerationTimeoutMs,
-      })
-      const [generatedImage] = generation.images
-
-      if (generatedImage) {
-        if (attemptedModelIds.length > 1) {
-          logServerEvent(requestId, 'material map fallback succeeded', {
-            attemptedModels: attemptedModelIds,
-            mapKind,
-            resolvedModel: modelSelection.modelId,
-          })
-        }
-
-        return {
-          attemptedModelIds,
-          generatedImage,
-          generation: generation.raw,
-          mapKind,
-          modelSelection,
-          ok: true,
-        }
-      }
-
-      lastGenerationText = generation.text ?? lastGenerationText
-      lastNoImageSelection = modelSelection
-      logServerEvent(requestId, 'material map generation returned no image', {
-        attemptedModels: attemptedModelIds,
-        mapKind,
-        model: modelSelection.modelId,
-        providerModel: modelSelection.providerModel,
-      })
-    } catch (error) {
-      lastError = {
-        error,
-        modelSelection,
-      }
-      logServerEvent(requestId, 'material map generation attempt failed', {
-        attemptedModels: attemptedModelIds,
-        mapKind,
-        model: modelSelection.modelId,
-        providerModel: modelSelection.providerModel,
-      })
-    }
-  }
-
-  if (lastNoImageSelection) {
-    return {
-      attemptedModelIds,
-      failureKind: 'no-image',
-      generationText: lastGenerationText,
-      mapKind,
-      modelSelection: lastNoImageSelection,
-      ok: false,
-    }
-  }
-
-  return {
-    attemptedModelIds,
-    error: lastError?.error ?? new Error(`Material ${mapKind} map generation failed.`),
-    failureKind: 'error',
-    mapKind,
-    modelSelection:
-      lastError?.modelSelection ??
-      resolveModelForRoute('/api/material-maps', preferredModelId),
-    ok: false,
-  }
 }
 
 function normalizeLootRarity(rarity) {

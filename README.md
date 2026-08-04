@@ -4,11 +4,19 @@ The Foundry is a local Vite + React asset tool backed by an Express API and an o
 
 This project is still early and very much open to improvement. If you try it, break it, fix it, or have ideas for making the workflows smoother, contributions are welcome.
 
+## Screenshots
+
+![The Foundry workspace overview](assets/screenshots/foundry-overview.jpg)
+
+![Texture Lab controls and output workspace](assets/screenshots/texture-lab-workflow.jpg)
+
+![Texture Lab expansion input and output slot](assets/screenshots/texture-lab-expansion.jpg)
+
 ## Current Status
 
 The main generation flows work, but a few areas need extra attention:
 
-- The 3D viewer and Texture Lab material/preview workflow need a lot of work before that tab feels reliable and polished.
+- The 3D viewer still needs work before that workflow feels reliable and polished.
 - The Visualizer tab has not been thoroughly checked yet.
 - Drag and drop works, but the implementation is not as clean or smooth as it should be.
 

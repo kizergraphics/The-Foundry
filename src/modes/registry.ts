@@ -9,7 +9,6 @@ import {
   type ForgeMode,
   type ForgeState,
   type ModeDefinition,
-  type TextureExpansionTargetSize,
 } from '../lib/forge'
 import { formatVariantForgeLabel } from '../../shared/variantForgeCatalog.js'
 import {
@@ -29,7 +28,6 @@ export type ModeFlags = {
   isCharacterSheetMode: boolean
   isPortraitStudioMode: boolean
   isTextureExpansionMode: boolean
-  isTextureGenerateMode: boolean
   isTextureLabMode: boolean
   isUvLabMode: boolean
   isVariantForgeMode: boolean
@@ -61,7 +59,6 @@ export function getModePresentation({
   isForging,
   selectedModelSupported,
   state,
-  styleText,
 }: {
   isForging: boolean
   selectedModelSupported: boolean
@@ -70,7 +67,7 @@ export function getModePresentation({
 }): ModePresentation {
   const flags = getModeFlags(state.activeMode, state)
   const activeMode = modeDefinitions[state.activeMode]
-  const promptPreview = getModePromptPreview(state, styleText, flags)
+  const promptPreview = getModePromptPreview(state, flags)
   const activePromptValue = getModeActivePromptValue(state, promptPreview, flags)
   const referenceCount = getReferenceCount(state, flags)
   const isReadyForApi = getIsReadyForApi(state, flags)
@@ -148,8 +145,6 @@ export function getModeFlags(activeMode: ForgeMode, state: ForgeState): ModeFlag
   const isVariantForgeMode = activeMode === 'variant-forge'
   const isTextureExpansionMode =
     isTextureLabMode && state.textureLab.workflow === 'expand'
-  const isTextureGenerateMode =
-    isTextureLabMode && state.textureLab.workflow === 'generate'
   const isVfxForgeMode = activeMode === 'vfx-forge'
 
   return {
@@ -157,7 +152,6 @@ export function getModeFlags(activeMode: ForgeMode, state: ForgeState): ModeFlag
     isCharacterSheetMode,
     isPortraitStudioMode,
     isTextureExpansionMode,
-    isTextureGenerateMode,
     isTextureLabMode,
     isUvLabMode,
     isVariantForgeMode,
@@ -219,27 +213,6 @@ export function buildPortraitStudioPromptPreview(prompt: string) {
     .join(' ')
 }
 
-export function buildTextureLabPromptPreview(
-  prompt: string,
-  styleText: string,
-  options: {
-    seamlessMode: boolean
-    targetSize: TextureExpansionTargetSize
-  },
-) {
-  const subject = prompt.trim() || 'weathered stone floor tile'
-  const styleSegment = styleText.trim() ? styleText.trim() : 'neutral production texture'
-
-  return [
-    `Generate a ${options.targetSize} x ${options.targetSize} square top-down material texture of ${subject}.`,
-    options.seamlessMode
-      ? 'Ensure opposite edges tile cleanly on both axes.'
-      : 'Keep the full frame filled with material detail and avoid scene-style composition.',
-    `Style: ${styleSegment}.`,
-    'Use flat lighting with production-safe surface scale.',
-  ].join(' ')
-}
-
 export function buildVfxForgePromptPreview(
   effectLabel: string,
   textureOutputs: VfxTextureKind[],
@@ -275,7 +248,6 @@ export function buildVfxForgePromptPreview(
 
 function getModePromptPreview(
   state: ForgeState,
-  styleText: string,
   flags: ModeFlags,
 ) {
   if (flags.isCharacterSheetMode) {
@@ -300,13 +272,6 @@ function getModePromptPreview(
 
   if (flags.isTextureExpansionMode) {
     return state.prompt.trim() || defaultTextureExpansionPrompt
-  }
-
-  if (flags.isTextureGenerateMode) {
-    return buildTextureLabPromptPreview(state.prompt, styleText, {
-      seamlessMode: state.textureLab.seamlessMode,
-      targetSize: state.textureLab.expansionTargetSize,
-    })
   }
 
   if (flags.isVfxForgeMode) {
@@ -561,27 +526,6 @@ function getBriefItems(state: ForgeState, flags: ModeFlags): ForgeBriefItem[] {
       {
         label: 'Format',
         value: state.uvLab.mesh?.format.toUpperCase() ?? 'N/A',
-      },
-    ]
-  }
-
-  if (flags.isTextureGenerateMode) {
-    return [
-      {
-        label: 'Style Ref',
-        value: state.references.style?.name ?? 'Not attached',
-      },
-      {
-        label: 'Subject Ref',
-        value: state.references.subject?.name ?? 'Not attached',
-      },
-      {
-        label: 'Seamless',
-        value: state.textureLab.seamlessMode ? 'Enabled' : 'Disabled',
-      },
-      {
-        label: 'Size',
-        value: `${state.textureLab.expansionTargetSize} x ${state.textureLab.expansionTargetSize}`,
       },
     ]
   }

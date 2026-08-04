@@ -360,14 +360,10 @@ describe('App model selection', () => {
   })
 })
 
-describe('App Texture Lab material packs', () => {
+describe('App Texture Lab expansion flow', () => {
   const fetchMock = vi.fn<typeof fetch>()
-  const textureBase64 =
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9sXl16sAAAAASUVORK5CYII='
 
   beforeEach(() => {
-    let materialMapRequestCount = 0
-
     fetchMock.mockImplementation(async (input) => {
       const url = typeof input === 'string' ? input : String(input)
 
@@ -388,59 +384,6 @@ describe('App Texture Lab material packs', () => {
         return buildJsonResponse({
           ideas: ['idea-a', 'idea-b', 'idea-c', 'idea-d'],
           source: 'ai',
-        })
-      }
-
-      if (url === '/api/forge') {
-        return buildJsonResponse({
-          images: [
-            {
-              data: textureBase64,
-              id: 'texture-result-1',
-              mimeType: 'image/png',
-              text: 'weathered stone floor',
-            },
-          ],
-          model: 'gemini-3-pro',
-          prompt: 'weathered stone floor',
-        })
-      }
-
-      if (url === '/api/material-maps') {
-        materialMapRequestCount += 1
-
-        return buildJsonResponse({
-          maps: {
-            height: {
-              data: textureBase64,
-              height: 1,
-              id: `height-${materialMapRequestCount}`,
-              mimeType: 'image/png',
-              width: 1,
-            },
-            metallic: {
-              data: textureBase64,
-              height: 1,
-              id: `metallic-${materialMapRequestCount}`,
-              mimeType: 'image/png',
-              width: 1,
-            },
-            normal: {
-              data: textureBase64,
-              height: 1,
-              id: `normal-${materialMapRequestCount}`,
-              mimeType: 'image/png',
-              width: 1,
-            },
-            roughness: {
-              data: textureBase64,
-              height: 1,
-              id: `roughness-${materialMapRequestCount}`,
-              mimeType: 'image/png',
-              width: 1,
-            },
-          },
-          model: 'gemini-3-pro',
         })
       }
 
@@ -449,150 +392,26 @@ describe('App Texture Lab material packs', () => {
 
     vi.stubGlobal('fetch', fetchMock)
     window.localStorage.clear()
-    downloadBlobMock.mockReset()
-    downloadDataUrlMock.mockReset()
-    normalizeSquareTextureDataUrlMock.mockClear()
   })
 
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
-    downloadBlobMock.mockReset()
     fetchMock.mockReset()
-    downloadDataUrlMock.mockReset()
-    normalizeSquareTextureDataUrlMock.mockClear()
     window.localStorage.clear()
   })
 
-  it('shows Generate Maps for Texture Lab results and supports initial bake and download flows', async () => {
+  it('shows only the expansion workflow and no material preview or map generation actions', async () => {
     render(<App />)
 
     fireEvent.click(screen.getByTestId('mode-tab-button-texture-lab'))
-    fireEvent.change(
-      screen.getByPlaceholderText(/Ornate steel longsword/i),
-      { target: { value: 'weathered stone floor' } },
-    )
-    fireEvent.click(screen.getByRole('button', { name: /^FORGE/i }))
 
-    const [generateMapsButton] = await screen.findAllByRole('button', { name: /Generate Maps/i })
-    fireEvent.click(generateMapsButton)
-
-    const materialPackTitle = await screen.findByText('Material Pack')
-    const materialPack = materialPackTitle.closest('section')
-
-    expect(materialPack).not.toBeNull()
-    if (!materialPack) {
-      throw new Error('Expected the material pack section to render.')
-    }
-
-    await waitFor(() => {
-      expect(
-        within(materialPack).getByRole('button', { name: /Download All Maps/i }),
-      ).toBeEnabled()
-    })
-
-    const materialMapRequestsAfterFirstGenerate = fetchMock.mock.calls.filter(
-      ([url]) => url === '/api/material-maps',
-    )
-    const initialMaterialMapRequest = JSON.parse(
-      String(materialMapRequestsAfterFirstGenerate[0]?.[1]?.body ?? '{}'),
-    )
-
-    expect(initialMaterialMapRequest.heightStrength).toBe(60)
-    expect(initialMaterialMapRequest.normalStrength).toBe(60)
-
-    fireEvent.click(within(materialPack).getByRole('button', { name: /Download Height/i }))
-    fireEvent.click(within(materialPack).getByRole('button', { name: /Download All Maps/i }))
-
-    await waitFor(() => {
-      expect(downloadDataUrlMock).toHaveBeenCalledTimes(5)
-    })
-  })
-
-  it('queues Texture Lab batch slots one at a time so later requests wait for earlier slots to finish', async () => {
-    const forgeRequestResolvers: Array<() => void> = []
-    let forgeRequestCount = 0
-
-    fetchMock.mockImplementation(async (input) => {
-      const url = typeof input === 'string' ? input : String(input)
-
-      if (url === '/api/health') {
-        return buildJsonResponse({ ok: true })
-      }
-
-      if (url === '/api/usage/telemetry') {
-        return buildJsonResponse({
-          generatedAt: new Date('2026-03-19T12:00:00.000Z').toISOString(),
-          rows: [],
-          source: 'local',
-          timeZone: 'America/Los_Angeles',
-        })
-      }
-
-      if (url === '/api/variant-forge-ideas') {
-        return buildJsonResponse({
-          ideas: ['idea-a', 'idea-b', 'idea-c', 'idea-d'],
-          source: 'ai',
-        })
-      }
-
-      if (url === '/api/forge') {
-        forgeRequestCount += 1
-        const requestId = forgeRequestCount
-
-        return new Promise<Response>((resolve) => {
-          forgeRequestResolvers.push(() => {
-            resolve(
-              buildJsonResponse({
-                images: [
-                  {
-                    data: textureBase64,
-                    id: `texture-result-${requestId}`,
-                    mimeType: 'image/png',
-                    text: 'weathered stone floor',
-                  },
-                ],
-                model: 'gemini-3-pro',
-                prompt: 'weathered stone floor',
-              }),
-            )
-          })
-        })
-      }
-
-      return buildJsonResponse({})
-    })
-
-    render(<App />)
-
-    fireEvent.click(screen.getByTestId('mode-tab-button-texture-lab'))
-    fireEvent.change(
-      screen.getByPlaceholderText(/Ornate steel longsword/i),
-      { target: { value: 'weathered stone floor' } },
-    )
-    fireEvent.click(screen.getByRole('button', { name: /^FORGE/i }))
-
-    await waitFor(() => {
-      expect(forgeRequestCount).toBe(1)
-    })
-
-    forgeRequestResolvers.shift()?.()
-
-    await waitFor(() => {
-      expect(forgeRequestCount).toBe(2)
-    })
-
-    forgeRequestResolvers.shift()?.()
-
-    await waitFor(() => {
-      expect(forgeRequestCount).toBe(3)
-    })
-
-    forgeRequestResolvers.shift()?.()
-
-    await waitFor(() => {
-      expect(screen.getAllByRole('button', { name: /Generate Maps/i }).length).toBeGreaterThanOrEqual(2)
-    })
+    expect(await screen.findByText('Expansion Workflow')).toBeInTheDocument()
+    expect(screen.getByText(/Expand an existing texture into a larger, seamless surface/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Generate$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Generate Maps/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Live Material View/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /EXPAND TEXTURE/i })).toBeDisabled()
   })
 })
 

@@ -4,7 +4,6 @@ import {
   validateActionAnimatorRequest,
   validateVfxExportRequest,
   validateForgeRequest,
-  validateMaterialMapsRequest,
   validateVariantForgeIdeaRequest,
   validateVfxRecipeRequest,
 } from './requestValidation.js'
@@ -244,44 +243,6 @@ describe('validateActionAnimatorRequest', () => {
           mimeType: 'image/png',
         },
         keyColor: 'magenta',
-      }),
-    ).toThrow()
-  })
-})
-
-describe('validateMaterialMapsRequest', () => {
-  it('clamps strength sliders and defaults missing values', () => {
-    expect(
-      validateMaterialMapsRequest({
-        heightStrength: 164,
-        metallicStrength: -14,
-        modelId: 'openai-gpt-image-2',
-        quality: 'low',
-        sourceImage: {
-          data: validPngBase64,
-          mimeType: 'image/png',
-        },
-      }),
-    ).toMatchObject({
-      heightStrength: 100,
-      metallicStrength: 0,
-      modelId: 'openai-gpt-image-2',
-      normalStrength: 60,
-      quality: 'low',
-      roughnessStrength: 60,
-      sourceImage: {
-        mimeType: 'image/png',
-      },
-    })
-  })
-
-  it('rejects non-image material-map source payloads', () => {
-    expect(() =>
-      validateMaterialMapsRequest({
-        sourceImage: {
-          data: 'abc123',
-          mimeType: 'text/plain',
-        },
       }),
     ).toThrow()
   })

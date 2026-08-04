@@ -7,7 +7,6 @@ import type {
   ForgeMode,
   GenerationCount,
   OpenAiImageQuality,
-  TextureMaterialMapDefaults,
   TextureExpansionTargetSize,
   TextureLabWorkflow,
   UvLabAtlasSize,
@@ -30,7 +29,6 @@ import {
   clampTextureLabOutputSize,
   clampUvAtlasSize,
   clampUvPaddingPx,
-  defaultTextureMaterialMapDefaults,
   getVariantForgePresetOptions,
   variantForgeDefaultPresetByFamily,
   variantForgeFamilies,
@@ -99,7 +97,6 @@ type StoredSettings = {
   prompt: string
   textureLab: {
     expansionTargetSize: TextureExpansionTargetSize
-    materialMapDefaults: TextureMaterialMapDefaults
     seamlessMode: boolean
     workflow: TextureLabWorkflow
   }
@@ -209,33 +206,6 @@ function readStoredVariantForgeFamilyCustomDirections(
   }
 
   return normalizedDirections
-}
-
-function readStoredTextureMaterialMapDefaults(value: unknown): TextureMaterialMapDefaults {
-  if (!value || typeof value !== 'object') {
-    return defaultTextureMaterialMapDefaults
-  }
-
-  const rawValue = value as Partial<Record<keyof TextureMaterialMapDefaults, unknown>>
-
-  return {
-    heightStrength:
-      typeof rawValue.heightStrength === 'number' && Number.isFinite(rawValue.heightStrength)
-        ? clampIntensity(rawValue.heightStrength)
-        : defaultTextureMaterialMapDefaults.heightStrength,
-    normalStrength:
-      typeof rawValue.normalStrength === 'number' && Number.isFinite(rawValue.normalStrength)
-        ? clampIntensity(rawValue.normalStrength)
-        : defaultTextureMaterialMapDefaults.normalStrength,
-    roughnessStrength:
-      typeof rawValue.roughnessStrength === 'number' && Number.isFinite(rawValue.roughnessStrength)
-        ? clampIntensity(rawValue.roughnessStrength)
-        : defaultTextureMaterialMapDefaults.roughnessStrength,
-    metallicStrength:
-      typeof rawValue.metallicStrength === 'number' && Number.isFinite(rawValue.metallicStrength)
-        ? clampIntensity(rawValue.metallicStrength)
-        : defaultTextureMaterialMapDefaults.metallicStrength,
-  }
 }
 
 function readStoredVfxTextureOutputs(
@@ -481,14 +451,8 @@ export function loadStoredState(): StoredState | null {
           expansionTargetSize: clampTextureLabOutputSize(
             parsed.settings?.textureLab?.expansionTargetSize ?? 1024,
           ),
-          materialMapDefaults: readStoredTextureMaterialMapDefaults(
-            parsed.settings?.textureLab?.materialMapDefaults,
-          ),
           seamlessMode: Boolean(parsed.settings?.textureLab?.seamlessMode),
-          workflow:
-            parsed.settings?.textureLab?.workflow === 'expand'
-              ? 'expand'
-              : 'generate',
+          workflow: 'expand',
         },
         uiLayout:
           parsed.settings?.uiLayout !== undefined
