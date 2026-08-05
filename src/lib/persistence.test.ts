@@ -136,6 +136,27 @@ describe('persistStoredState', () => {
     })
   })
 
+  it('migrates legacy Gemini 2.5 model overrides to Gemini 3.1 Flash Lite', () => {
+    window.localStorage.setItem(
+      'kizer-forge-state',
+      JSON.stringify({
+        recentPrompts: [],
+        settings: {
+          ...baseStoredSettings,
+          activeMode: 'armory',
+          modelOverridesByMode: {
+            armory: 'gemini-2.5-flash-image',
+          },
+        },
+        session: null,
+      }),
+    )
+
+    expect(loadStoredState()?.settings.modelOverridesByMode).toEqual({
+      armory: 'gemini-3-flash-lite',
+    })
+  })
+
   it('stores and restores persisted ui layouts', () => {
     const uiLayout = {
       ...getDefaultUiLayout(),

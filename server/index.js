@@ -136,20 +136,22 @@ const forgeJsonLimit = process.env.FORGE_JSON_LIMIT ?? '12mb'
 const characterSheetJsonLimit = process.env.CHARACTER_SHEET_JSON_LIMIT ?? '14mb'
 const actionAnimatorJsonLimit = process.env.ACTION_ANIMATOR_JSON_LIMIT ?? '14mb'
 const modelRegistry = {
-  'gemini-2.5-flash-image':
-    process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
   'gemini-3-flash':
-    process.env.GEMINI_FLASH_MODEL ?? 'gemini-3.1-flash-image-preview',
+    process.env.GEMINI_FLASH_MODEL ?? 'gemini-3.1-flash-image',
+  'gemini-3-flash-lite':
+    process.env.GEMINI_FLASH_LITE_MODEL ??
+    process.env.GEMINI_IMAGE_MODEL ??
+    'gemini-3.1-flash-lite-image',
   'gemini-3-pro':
-    process.env.GEMINI_PRO_MODEL ?? 'gemini-3-pro-image-preview',
+    process.env.GEMINI_PRO_MODEL ?? 'gemini-3-pro-image',
   'openai-gpt-image-2':
     process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
   'veo-3.1-fast':
     process.env.GEMINI_VEO_MODEL ?? 'veo-3.1-fast-generate-preview',
 }
 const modelProviderRegistry = {
-  'gemini-2.5-flash-image': 'google',
   'gemini-3-flash': 'google',
+  'gemini-3-flash-lite': 'google',
   'gemini-3-pro': 'google',
   'openai-gpt-image-2': 'openai',
   'veo-3.1-fast': 'google',
@@ -166,14 +168,14 @@ const routeModelAllowlist = {
     'openai-gpt-image-2',
     'gemini-3-pro',
     'gemini-3-flash',
-    'gemini-2.5-flash-image',
+    'gemini-3-flash-lite',
   ],
   '/api/character-sheet': ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': [
     'openai-gpt-image-2',
     'gemini-3-pro',
     'gemini-3-flash',
-    'gemini-2.5-flash-image',
+    'gemini-3-flash-lite',
   ],
   '/api/variant-forge-ideas': ['gemini-3-flash'],
 }
@@ -1532,6 +1534,7 @@ const googleTelemetryRowIdByLegacyId = {
   'gemini-3-pro-image': 'nano-banana-pro',
   'gemini-3.1-flash': 'gemini-3-flash-text',
   'gemini-3.1-flash-image': 'nano-banana-2',
+  'gemini-3.1-flash-lite-image': 'nano-banana-2-lite',
   'veo-3-fast-generate': 'veo-3-fast-generate',
 }
 
@@ -3635,10 +3638,11 @@ function describeAnimatorMotion(actionType) {
 function resolveModelForRoute(routeKey, requestedModelId) {
   const allowedModels = routeModelAllowlist[routeKey] ?? []
   const fallbackModel = routeModelDefaults[routeKey]
-  const normalizedRequestedModel =
+  const requestedModel =
     typeof requestedModelId === 'string' && requestedModelId.trim().length > 0
       ? requestedModelId.trim()
       : fallbackModel
+  const normalizedRequestedModel = normalizeImageModelAlias(requestedModel)
 
   if (!allowedModels.includes(normalizedRequestedModel)) {
     return {
@@ -3673,9 +3677,15 @@ function resolveModelForRoute(routeKey, requestedModelId) {
   }
 }
 
+function normalizeImageModelAlias(modelId) {
+  return modelId === 'gemini-2.5-flash-image'
+    ? 'gemini-3-flash-lite'
+    : modelId
+}
+
 function getActionAnimatorAllowedModelIds(pipeline = 'veo-video') {
   return pipeline === 'image-strip'
-    ? ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-flash-image']
+    ? ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash', 'gemini-3-flash-lite']
     : ['veo-3.1-fast']
 }
 
@@ -3685,10 +3695,11 @@ function getActionAnimatorDefaultModelId(pipeline = 'veo-video') {
 
 function resolveActionAnimatorModelSelection({ modelId, pipeline }) {
   const allowedModels = getActionAnimatorAllowedModelIds(pipeline)
-  const normalizedRequestedModel =
+  const requestedModel =
     typeof modelId === 'string' && modelId.trim().length > 0
       ? modelId.trim()
       : getActionAnimatorDefaultModelId(pipeline)
+  const normalizedRequestedModel = normalizeImageModelAlias(requestedModel)
 
   if (!allowedModels.includes(normalizedRequestedModel)) {
     return {
@@ -3734,8 +3745,8 @@ function resolveTelemetryModelId(modelId, routeKey) {
     return 'veo-3-fast-generate'
   }
 
-  if (modelId === 'gemini-2.5-flash-image') {
-    return 'nano-banana'
+  if (modelId === 'gemini-3-flash-lite') {
+    return 'nano-banana-2-lite'
   }
 
   if (modelId === 'gemini-3-flash') {

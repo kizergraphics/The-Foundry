@@ -3,8 +3,8 @@ import type { ActionAnimatorPipeline } from '../lib/forge'
 
 export const MODEL_LABELS = {
   'browser-uv-engine': 'Built-in UV Engine',
-  'gemini-2.5-flash-image': 'Gemini 2.5 Flash Image',
-  'gemini-3-flash': 'Gemini 3.1 Flash',
+  'gemini-3-flash': 'Gemini 3.1 Flash Image',
+  'gemini-3-flash-lite': 'Gemini 3.1 Flash Lite Image',
   'gemini-3-pro': 'Gemini 3 Pro Image',
   'openai-gpt-image-2': 'OpenAI GPT Image 2',
   'veo-3.1-fast': 'Veo 3 Fast Generate',
@@ -14,8 +14,8 @@ export type ModelId = keyof typeof MODEL_LABELS
 
 export const TELEMETRY_ROW_BY_MODEL_ID: Record<ModelId, string> = {
   'browser-uv-engine': 'browser-uv-engine',
-  'gemini-2.5-flash-image': 'nano-banana',
   'gemini-3-flash': 'nano-banana-2',
+  'gemini-3-flash-lite': 'nano-banana-2-lite',
   'gemini-3-pro': 'nano-banana-pro',
   'openai-gpt-image-2': 'gpt-image-2',
   'veo-3.1-fast': 'veo-3-fast-generate',
@@ -34,12 +34,12 @@ const smartDefaultModelByMode: Record<ForgeMode, ModelId> = {
 }
 
 const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
-  armory: ['openai-gpt-image-2', 'gemini-3-flash', 'gemini-2.5-flash-image'],
+  armory: ['openai-gpt-image-2', 'gemini-3-flash', 'gemini-3-flash-lite'],
   'action-animator': [
     'openai-gpt-image-2',
     'gemini-3-pro',
     'gemini-3-flash',
-    'gemini-2.5-flash-image',
+    'gemini-3-flash-lite',
   ],
   'character-sheet': ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash'],
   'portrait-studio': ['openai-gpt-image-2', 'gemini-3-pro'],
@@ -47,17 +47,17 @@ const availableModelsByMode: Record<ForgeMode, ModelId[]> = {
     'openai-gpt-image-2',
     'gemini-3-pro',
     'gemini-3-flash',
-    'gemini-2.5-flash-image',
+    'gemini-3-flash-lite',
   ],
   'uv-lab': ['browser-uv-engine'],
   'variant-forge': [
     'openai-gpt-image-2',
     'gemini-3-flash',
-    'gemini-2.5-flash-image',
+    'gemini-3-flash-lite',
     'gemini-3-pro',
   ],
   'vfx-forge': ['openai-gpt-image-2', 'gemini-3-flash'],
-  visualizer: ['openai-gpt-image-2', 'gemini-3-flash', 'gemini-2.5-flash-image'],
+  visualizer: ['openai-gpt-image-2', 'gemini-3-flash', 'gemini-3-flash-lite'],
 }
 
 export function getActionAnimatorDefaultModel(

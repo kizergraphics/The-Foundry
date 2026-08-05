@@ -259,7 +259,9 @@ describe('App model selection', () => {
 
     render(<App />)
 
-    fireEvent.click((await screen.findAllByRole('button', { name: /Gemini 3\.1 Flash/i }))[0])
+    fireEvent.click(
+      await screen.findByRole('button', { name: /^Gemini 3\.1 Flash Image$/i }),
+    )
 
     expect(screen.getByText('gemini-3-flash response stream')).toBeInTheDocument()
 
@@ -338,7 +340,9 @@ describe('App model selection', () => {
 
     render(<App />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /Gemini 3\.1 Flash/i }))
+    fireEvent.click(
+      await screen.findByRole('button', { name: /^Gemini 3\.1 Flash Image$/i }),
+    )
     fireEvent.change(screen.getByPlaceholderText(/Ornate steel longsword/i), {
       target: {
         value: 'hero sword',
@@ -835,7 +839,7 @@ describe('App Action Animator flow', () => {
       within(modelSelector).queryByRole('button', { name: /Gemini 3 Pro Image/i }),
     ).not.toBeInTheDocument()
     expect(
-      within(modelSelector).queryByRole('button', { name: /Gemini 2.5 Flash Image/i }),
+      within(modelSelector).queryByRole('button', { name: /Gemini 3.1 Flash Lite Image/i }),
     ).not.toBeInTheDocument()
   })
 
@@ -846,6 +850,9 @@ describe('App Action Animator flow', () => {
 
     expect(
       within(modelSelector).getByRole('button', { name: /OpenAI GPT Image 2/i }),
+    ).toBeInTheDocument()
+    expect(
+      within(modelSelector).getByRole('button', { name: /Gemini 3.1 Flash Lite Image/i }),
     ).toBeInTheDocument()
   })
 

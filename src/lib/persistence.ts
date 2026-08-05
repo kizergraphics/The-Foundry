@@ -134,12 +134,22 @@ const storageKey = 'kizer-forge-state'
 const maxRecentPrompts = 6
 const storedModelIds: ModelId[] = [
   'browser-uv-engine',
-  'gemini-2.5-flash-image',
   'gemini-3-flash',
+  'gemini-3-flash-lite',
   'gemini-3-pro',
   'openai-gpt-image-2',
   'veo-3.1-fast',
 ]
+
+function normalizeStoredModelId(value: unknown): ModelId | null {
+  if (value === 'gemini-2.5-flash-image') {
+    return 'gemini-3-flash-lite'
+  }
+
+  return typeof value === 'string' && storedModelIds.includes(value as ModelId)
+    ? (value as ModelId)
+    : null
+}
 
 function normalizeStoredMode(value: unknown): ForgeMode {
   if (value === 'loot-leveler') {
@@ -258,15 +268,13 @@ function readStoredModelOverridesByMode(
   const rawValue = value as Record<string, unknown>
 
   for (const [mode, modelId] of Object.entries(rawValue)) {
-    if (
-      !isForgeMode(mode) ||
-      typeof modelId !== 'string' ||
-      !storedModelIds.includes(modelId as ModelId)
-    ) {
+    const normalizedModelId = normalizeStoredModelId(modelId)
+
+    if (!isForgeMode(mode) || !normalizedModelId) {
       continue
     }
 
-    normalized[mode] = modelId as ModelId
+    normalized[mode] = normalizedModelId
   }
 
   return normalized

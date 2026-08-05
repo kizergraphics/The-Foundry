@@ -45,11 +45,19 @@ Then fill in the keys you want to use:
 
 ```text
 GEMINI_API_KEY=
+GEMINI_FLASH_MODEL=gemini-3.1-flash-image
+GEMINI_FLASH_LITE_MODEL=gemini-3.1-flash-lite-image
+GEMINI_PRO_MODEL=gemini-3-pro-image
 OPENAI_API_KEY=
 OPENAI_ADMIN_KEY=
 OPENAI_ORGANIZATION_ID=
 OPENAI_PROJECT_ID=
+OPENAI_IMAGE_MODEL=gpt-image-2
 ```
+
+The default image lineup uses OpenAI GPT Image 2 plus Gemini 3.1 Flash Image,
+Gemini 3.1 Flash Lite Image, and Gemini 3 Pro Image. The optional model variables
+above can pin different provider model IDs when needed.
 
 `.env` is intentionally ignored by git. Do not commit real API keys, auth tokens, signing certificates, local usage logs, or generated release builds.
 

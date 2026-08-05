@@ -48,7 +48,7 @@ describe('mode model helpers', () => {
       'openai-gpt-image-2',
       'gemini-3-pro',
       'gemini-3-flash',
-      'gemini-2.5-flash-image',
+      'gemini-3-flash-lite',
     ])
   })
 

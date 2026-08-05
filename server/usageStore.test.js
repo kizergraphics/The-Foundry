@@ -22,6 +22,32 @@ afterEach(() => {
 })
 
 describe('usageStore data directory', () => {
+  it('uses the current Gemini image cost estimates', async () => {
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foundry-user-data-'))
+    const usageStore = await loadUsageStore({
+      FOUNDRY_USER_DATA_DIR: userDataDir,
+      NODE_ENV: 'production',
+    })
+
+    await expect(
+      usageStore.getUsageSummary({ model: 'nano-banana-2-lite' }),
+    ).resolves.toMatchObject({
+      requestCostEstimate: 0.0336,
+      scopedModel: 'nano-banana-2-lite',
+    })
+    await expect(
+      usageStore.getUsageSummary({ model: 'nano-banana-2' }),
+    ).resolves.toMatchObject({ requestCostEstimate: 0.067 })
+    await expect(
+      usageStore.getUsageSummary({ model: 'nano-banana-pro' }),
+    ).resolves.toMatchObject({ requestCostEstimate: 0.134 })
+
+    await fs.rm(userDataDir, {
+      force: true,
+      recursive: true,
+    })
+  })
+
   it('writes runtime telemetry to the configured user-data directory', async () => {
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foundry-user-data-'))
     const usageStore = await loadUsageStore({

@@ -21,10 +21,11 @@ const chartBucketCount = 8
 const chartBucketDurationMs = 5 * minuteWindowMs
 
 const requestCostByModel = {
-  'gemini-2.5-flash-image': 0.0005,
-  'gemini-3-flash': 0.0005,
-  'gemini-3-pro': 0.0012,
-  'gemini-3-pro-image-preview': 0.0012,
+  'gemini-2.5-flash-image': 0.039,
+  'gemini-3-flash': 0.067,
+  'gemini-3-flash-lite': 0.0336,
+  'gemini-3-pro': 0.134,
+  'gemini-3-pro-image': 0.134,
   'gemini-3-flash-text': 0.0003,
   'gemini-2.5-flash-text': 0.0003,
   'openai-gpt-image-2': 0.053,
@@ -425,6 +426,8 @@ function resolveRequestCostEstimate(model) {
       ? 'gemini-3-pro'
       : model === 'nano-banana-2'
         ? 'gemini-3-flash'
+        : model === 'nano-banana-2-lite'
+          ? 'gemini-3-flash-lite'
         : model === 'nano-banana'
           ? 'gemini-2.5-flash-image'
           : model === 'gpt-image-2'

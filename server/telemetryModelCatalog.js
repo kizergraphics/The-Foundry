@@ -57,8 +57,22 @@ export const telemetryModelDefinitions = [
   },
   {
     category: 'Multi-modal generative models',
+    id: 'nano-banana-2-lite',
+    label: 'Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)',
+    limits: {
+      rpm: 500,
+      rpd: 2000,
+      tpm: 500000,
+    },
+    metricFamily: 'generate',
+    modelAliases: ['gemini-3-flash-lite'],
+    modelMatchers: ['gemini-3.1-flash-lite-image'],
+    provider: 'google',
+  },
+  {
+    category: 'Multi-modal generative models',
     id: 'nano-banana',
-    label: 'Nano Banana (Gemini 2.5 Flash Preview Image)',
+    label: 'Nano Banana (Gemini 2.5 Flash Image, legacy)',
     limits: {
       rpm: 500,
       rpd: 2000,
@@ -66,7 +80,7 @@ export const telemetryModelDefinitions = [
     },
     metricFamily: 'generate',
     modelAliases: ['gemini-2.5-flash-image'],
-    modelMatchers: ['gemini-2.5-flash-preview-image'],
+    modelMatchers: ['gemini-2.5-flash-image'],
     provider: 'google',
   },
   {

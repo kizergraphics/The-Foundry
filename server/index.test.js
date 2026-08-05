@@ -368,6 +368,40 @@ describe('Texture Lab batch scheduling', () => {
 })
 
 describe('API hardening', () => {
+  it('uses stable Gemini image models and migrates the legacy 2.5 alias', async () => {
+    const { __mock } = await import('@google/genai/node')
+    __mock.generateContent.mockReset()
+    const generatedBase64 = await createPngBase64(1, 1, [80, 120, 160])
+    __mock.generateContent.mockResolvedValue(buildImageGeneration(generatedBase64))
+
+    const app = await loadApp({
+      GEMINI_API_KEY: 'test-key',
+    })
+    const cases = [
+      ['gemini-3-flash', 'gemini-3-flash', 'gemini-3.1-flash-image'],
+      ['gemini-3-pro', 'gemini-3-pro', 'gemini-3-pro-image'],
+      ['gemini-3-flash-lite', 'gemini-3-flash-lite', 'gemini-3.1-flash-lite-image'],
+      ['gemini-2.5-flash-image', 'gemini-3-flash-lite', 'gemini-3.1-flash-lite-image'],
+    ]
+
+    for (const [requestedModel, expectedModel, providerModel] of cases) {
+      const response = await request(app)
+        .post('/api/forge')
+        .send({
+          generationCount: 1,
+          modelId: requestedModel,
+          mode: 'armory',
+          prompt: 'current model smoke test',
+          workflow: 'generate',
+        })
+
+      expect(response.status).toBe(200)
+      expect(response.body.model).toBe(expectedModel)
+      expect(response.body.providerModel).toBe(providerModel)
+      expect(__mock.generateContent.mock.calls.at(-1)?.[0]?.model).toBe(providerModel)
+    }
+  })
+
   it('supports OpenAI GPT Image 2 on forge routes', async () => {
     const { __mock } = await import('@google/genai/node')
     __mock.generateContent.mockReset()
