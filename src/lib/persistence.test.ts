@@ -580,6 +580,7 @@ describe('persistStoredState', () => {
     )
 
     expect(loadStoredState()?.settings.textureLab).toEqual({
+      settings: { factor: 2, direction: 'all', preservation: 'preserve', technique: 'creative', variants: 1 },
       expansionTargetSize: 512,
       seamlessMode: true,
       workflow: 'expand',

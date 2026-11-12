@@ -1,5 +1,5 @@
+import type { TextureMetadata } from '../../shared/textureLab.js'
 import {
-  buildTextureExpansionInput,
   createDataUrl,
   dataUrlToBlob,
   fileToBase64,
@@ -32,6 +32,7 @@ export type ForgeApiResponse = {
     id: string
     mimeType: string
     text?: string
+    texture?: TextureMetadata
   }>
   model?: string
   prompt?: string
@@ -165,6 +166,7 @@ export function normalizeForgeApiResults(payload: ForgeApiResponse): ForgeResult
     id: image.id,
     mimeType: image.mimeType,
     text: image.text,
+    texture: image.texture,
   }))
 }
 
@@ -296,35 +298,15 @@ export async function buildTextureExpansionRequest({
   state: ForgeState
   styleText: string
 }) {
-  const [expansionCanvas, sourceBase64] = await Promise.all([
-    buildTextureExpansionInput(sourceAsset.file, {
-      targetSize: state.textureLab.expansionTargetSize,
-    }),
-    fileToBase64(sourceAsset.file),
-  ])
-
   return {
     generationCount: 1,
-    mode: state.activeMode,
-    modelId,
-    prompt: state.prompt.trim(),
-    quality,
-    styleText,
+    mode: 'texture-lab', modelId, prompt: state.prompt.trim(), quality, styleText,
+    seamlessMode: state.textureLab.seamlessMode,
     textureExpansion: {
-      canvasImage: {
-        data: expansionCanvas.base64,
-        mimeType: expansionCanvas.mimeType,
-        name: `expanded-canvas-${sourceAsset.name}`,
-      },
-      sourceCoverage: expansionCanvas.sourceCoverage,
-      sourceHeight: expansionCanvas.sourceHeight,
-      sourceImage: {
-        data: sourceBase64,
-        mimeType: sourceAsset.mimeType,
-        name: sourceAsset.name,
-      },
-      sourceWidth: expansionCanvas.sourceWidth,
-      targetSize: expansionCanvas.targetSize,
+      ...state.textureLab.settings,
+      sourceImage: { data: await fileToBase64(sourceAsset.file), mimeType: sourceAsset.mimeType, name: sourceAsset.name },
+      targetSize: state.textureLab.expansionTargetSize,
+      seamlessMode: state.textureLab.seamlessMode,
     },
     workflow: 'expand-texture',
   }

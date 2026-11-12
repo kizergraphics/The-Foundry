@@ -1,3 +1,4 @@
+import { processTexture } from './textureLab.js'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,6 +10,7 @@ import express from 'express'
 import { GoogleGenAI } from '@google/genai/node'
 import ffmpegPath from 'ffmpeg-static'
 import sharp from 'sharp'
+import { telemetryModelIdByAlias } from './telemetryModelCatalog.js'
 import {
   createConcurrencyLimiter,
   createCorsMiddleware,
@@ -53,6 +55,7 @@ import {
   variantForgeDefaultPresetByFamily,
 } from '../shared/variantForgeCatalog.js'
 import { forgeApiModes } from '../shared/modeCatalog.js'
+import { MODEL_LABELS } from '../shared/modelLabels.js'
 import { resolveVfxEffectLabel } from '../shared/vfxForgeCatalog.js'
 import { variantForgeIdeaSuggestionCount } from '../shared/variantForgeIdeas.js'
 
@@ -81,6 +84,7 @@ export function buildEnvSearchPaths(options = {}) {
   const execDir = execPath ? path.dirname(execPath) : null
   const candidateDirectories = [
     effectiveRootDir,
+    options.portableExecutableDirectory,
     cwd,
     resourcesPath,
     execDir,
@@ -98,6 +102,7 @@ export function buildEnvSearchPaths(options = {}) {
 const envSearchPaths = buildEnvSearchPaths({
   cwd: process.cwd(),
   execPath: process.execPath,
+  portableExecutableDirectory: process.env.PORTABLE_EXECUTABLE_DIR,
   resourcesPath: process.resourcesPath,
   rootDir,
 })
@@ -136,6 +141,8 @@ const forgeJsonLimit = process.env.FORGE_JSON_LIMIT ?? '12mb'
 const characterSheetJsonLimit = process.env.CHARACTER_SHEET_JSON_LIMIT ?? '14mb'
 const actionAnimatorJsonLimit = process.env.ACTION_ANIMATOR_JSON_LIMIT ?? '14mb'
 const modelRegistry = {
+  'gemini-nano-banana-2.1': 'gemini-nano-banana-2.1',
+  'gemini-3.5-flash-lite': process.env.GEMINI_TEXT_MODEL ?? 'gemini-3.5-flash-lite',
   'gemini-3-flash':
     process.env.GEMINI_FLASH_MODEL ?? 'gemini-3.1-flash-image',
   'gemini-3-flash-lite':
@@ -146,38 +153,49 @@ const modelRegistry = {
     process.env.GEMINI_PRO_MODEL ?? 'gemini-3-pro-image',
   'openai-gpt-image-2':
     process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
-  'veo-3.1-fast':
-    process.env.GEMINI_VEO_MODEL ?? 'veo-3.1-fast-generate-preview',
+  'gemini-omni-1.2-flash': 'gemini-omni-1.2-flash',
 }
 const modelProviderRegistry = {
+  'gemini-nano-banana-2.1': 'google',
+  'gemini-3.5-flash-lite': 'google',
   'gemini-3-flash': 'google',
   'gemini-3-flash-lite': 'google',
   'gemini-3-pro': 'google',
   'openai-gpt-image-2': 'openai',
-  'veo-3.1-fast': 'google',
+  'gemini-omni-1.2-flash': 'google',
 }
 const routeModelDefaults = {
-  '/api/action-animator': 'veo-3.1-fast',
+  '/api/action-animator': 'gemini-omni-1.2-flash',
   '/api/character-sheet': 'openai-gpt-image-2',
   '/api/forge': 'openai-gpt-image-2',
-  '/api/variant-forge-ideas': 'gemini-3-flash',
+  '/api/variant-forge-ideas': 'gemini-3.5-flash-lite',
 }
+const actionAnimatorImageModels = [
+  'openai-gpt-image-2',
+  'gemini-nano-banana-2.1',
+  'gemini-3-pro',
+  'gemini-3-flash',
+  'gemini-3-flash-lite',
+]
 const routeModelAllowlist = {
   '/api/action-animator': [
-    'veo-3.1-fast',
+    routeModelDefaults['/api/action-animator'],
+    ...actionAnimatorImageModels,
+  ],
+  '/api/character-sheet': [
     'openai-gpt-image-2',
+    'gemini-nano-banana-2.1',
     'gemini-3-pro',
     'gemini-3-flash',
-    'gemini-3-flash-lite',
   ],
-  '/api/character-sheet': ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash'],
   '/api/forge': [
     'openai-gpt-image-2',
+    'gemini-nano-banana-2.1',
     'gemini-3-pro',
     'gemini-3-flash',
     'gemini-3-flash-lite',
   ],
-  '/api/variant-forge-ideas': ['gemini-3-flash'],
+  '/api/variant-forge-ideas': [routeModelDefaults['/api/variant-forge-ideas']],
 }
 const supportedForgeModes = forgeApiModes
 const forgeBatchMaxAttemptsPerImage = 4
@@ -216,12 +234,15 @@ const forgeBatchInterRequestDelayMs = 250
 const forgeBatchRetryDelayMs = 1200
 const maxPromptOrchestrationWordCount = 24
 const maxPromptEnhancerWordCount = 9
-const actionAnimatorPollingIntervalMs = 10000
 const actionAnimatorTimeoutMs = 5 * 60 * 1000
 const minActionAnimatorDurationSeconds = 4
 const maxActionAnimatorDurationSeconds = 8
 const actionAnimatorDurationSeconds = clampActionAnimatorDurationSeconds(
-  Number(process.env.GEMINI_VEO_DURATION_SECONDS ?? minActionAnimatorDurationSeconds),
+  Number(
+    process.env.GEMINI_OMNI_DURATION_SECONDS ??
+    process.env.GEMINI_VEO_DURATION_SECONDS ??
+    minActionAnimatorDurationSeconds,
+  ),
 )
 const actionAnimatorKeyColorHexById = {
   blue: '0x0000FF',
@@ -376,10 +397,7 @@ app.post(
       await recordUsageEvent({
         model: modelSelection.modelId,
         route: '/api/action-animator',
-        telemetryModel: resolveTelemetryModelId(
-          modelSelection.modelId,
-          '/api/action-animator',
-        ),
+        telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
         tokenCount: animatorResult.tokenCount,
       }).catch((logError) => {
         console.warn('Telemetry logging failed for /api/action-animator:', logError)
@@ -465,10 +483,7 @@ app.post(
       await recordUsageEvent({
         model: modelSelection.modelId,
         route: '/api/variant-forge-ideas',
-        telemetryModel: resolveTelemetryModelId(
-          modelSelection.modelId,
-          '/api/variant-forge-ideas',
-        ),
+        telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
         tokenCount: extractTotalTokenCount(generation),
       }).catch(() => {})
 
@@ -696,52 +711,33 @@ app.post(
         : null
 
     if (requestedWorkflow === 'expand-texture') {
-      const validExpansion = normalizeTextureExpansion(textureExpansion)
-
-      if (!validExpansion) {
-        response.status(400).json({
-          error:
-            'Texture expansion requires a centered expansion canvas and the original source texture.',
+      try {
+        // Verified against the Images edit reference; unknown models use reference guidance.
+        const maskSupported = modelSelection.provider === 'openai' &&
+          /^gpt-image-2(?:-2026-04-21)?$/.test(modelSelection.providerModel)
+        const image = await processTexture(textureExpansion, {
+          maskSupported,
+          notes: [normalizedPrompt, providedStyleText].filter(Boolean).join(' '),
+          generate: async ({ canvas, mask, size, prompt: texturePrompt }) => {
+            const generation = await generateImagesWithModel({
+              candidateCount: 1, modelSelection, prompt: texturePrompt, quality,
+              references: [{ data: canvas.toString('base64'), mimeType: 'image/png' }],
+              mask, routeKey: '/api/forge', size: `${size}x${size}`,
+              googleConfig: { imageConfig: { aspectRatio: '1:1', imageSize: '1K' } },
+              systemInstruction: systemInstruction || 'Follow the material edit instructions. Preserve context and feature scale.',
+              timeoutMs: textureLabGenerationTimeoutMs,
+            })
+            await recordUsageEvent({ model: modelSelection.modelId, route: '/api/forge',
+              telemetryModel: telemetryModelIdByAlias[modelSelection.modelId], tokenCount: extractTotalTokenCount(generation.raw),
+            }).catch(error => console.warn('Texture usage logging failed:', error))
+            if (!generation.images.length) throw new Error('The provider returned no texture image.')
+            return { ...generation.images[0], usage: { model: modelSelection.providerModel, tokenCount: extractTotalTokenCount(generation.raw) ?? null } }
+          },
         })
-        return
+        response.json({ images: [image], model: textureExpansion.technique === 'faithful' ? 'local-quilting' : modelSelection.modelId, prompt: normalizedPrompt })
+      } catch (error) {
+        response.status(422).json({ error: { code: 'texture_processing_failed', message: error.message, title: 'Texture operation failed' } })
       }
-
-      const generation = await generateImagesWithModel({
-        candidateCount: 1,
-        modelSelection,
-        prompt: finalPrompt,
-        quality,
-        references: [validExpansion.canvasImage],
-        routeKey: '/api/forge',
-        size: '1024x1024',
-        systemInstruction: resolvedSystemInstruction,
-        timeoutMs: textureLabGenerationTimeoutMs,
-      })
-      const images = generation.images
-
-      if (images.length === 0) {
-        response
-          .status(422)
-          .json(buildNoImageResponseError('/api/forge', modelSelection, generation.text))
-        return
-      }
-
-      await recordUsageEvent({
-        model: modelSelection.modelId,
-        route: '/api/forge',
-        telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
-        tokenCount: extractTotalTokenCount(generation.raw),
-      }).catch((logError) => {
-        console.warn('Telemetry logging failed for /api/forge texture expansion:', logError)
-      })
-
-      response.json({
-        images,
-        model: modelSelection.modelId,
-        prompt: finalPrompt,
-        providerModel: modelSelection.providerModel,
-        styleId: providedStyleText || null,
-      })
       return
     }
 
@@ -779,7 +775,7 @@ app.post(
       await recordUsageEvent({
         model: modelSelection.modelId,
         route: '/api/forge',
-        telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
+        telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
         tokenCount: extractTotalTokenCount(generation.raw),
       }).catch((logError) => {
         console.warn('Telemetry logging failed for /api/forge seam repair:', logError)
@@ -829,7 +825,7 @@ app.post(
       await recordUsageEvent({
         model: modelSelection.modelId,
         route: '/api/forge',
-        telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
+        telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
         tokenCount: extractTotalTokenCount(generation.raw),
       }).catch((logError) => {
         console.warn('Telemetry logging failed for /api/forge:', logError)
@@ -1214,7 +1210,7 @@ app.post(
         recordUsageEvent({
           model: modelSelection.modelId,
           route: '/api/forge',
-          telemetryModel: resolveTelemetryModelId(modelSelection.modelId, '/api/forge'),
+          telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
           tokenCount: extractTotalTokenCount(generation),
         }).catch((logError) => {
           console.warn('Telemetry logging failed for /api/forge:', logError)
@@ -1434,10 +1430,7 @@ app.post(
     await recordUsageEvent({
       model: modelSelection.modelId,
       route: '/api/character-sheet',
-      telemetryModel: resolveTelemetryModelId(
-        modelSelection.modelId,
-        '/api/character-sheet',
-      ),
+      telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
       tokenCount: extractTotalTokenCount(generation.raw),
     }).catch((logError) => {
       console.warn('Telemetry logging failed for /api/character-sheet:', logError)
@@ -1535,6 +1528,7 @@ const googleTelemetryRowIdByLegacyId = {
   'gemini-3.1-flash': 'gemini-3-flash-text',
   'gemini-3.1-flash-image': 'nano-banana-2',
   'gemini-3.1-flash-lite-image': 'nano-banana-2-lite',
+  'gemini-nano-banana-2.1': 'nano-banana-2.1',
   'veo-3-fast-generate': 'veo-3-fast-generate',
 }
 
@@ -1745,7 +1739,7 @@ async function buildForgePromptWithBestPractices({
     })
   }
 
-  const orchestratorModel = modelRegistry['gemini-3-flash']
+  const orchestratorModel = modelRegistry['gemini-3.5-flash-lite']
 
   if (!orchestratorModel) {
     return buildForgePromptFallback({
@@ -1814,12 +1808,9 @@ async function buildForgePromptWithBestPractices({
     })
 
     await recordUsageEvent({
-      model: 'gemini-3-flash',
+      model: 'gemini-3.5-flash-lite',
       route: '/internal/prompt-orchestrator',
-      telemetryModel: resolveTelemetryModelId(
-        'gemini-3-flash',
-        '/internal/prompt-orchestrator',
-      ),
+      telemetryModel: telemetryModelIdByAlias['gemini-3.5-flash-lite'],
       tokenCount: extractTotalTokenCount(promptGeneration),
     }).catch(() => {})
 
@@ -1902,43 +1893,8 @@ function buildSemanticTilingPrompt({ prompt, styleText, textureSize }) {
   )
 }
 
-function buildTextureExpansionPrompt({ prompt, styleText, textureExpansion }) {
-  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
-  const normalizedStyleText =
-    typeof styleText === 'string' ? styleText.trim() : ''
-  const targetSize =
-    textureExpansion && Number.isFinite(Number(textureExpansion.targetSize))
-      ? Number(textureExpansion.targetSize)
-      : 1024
-  const sourceWidth =
-    textureExpansion && Number.isFinite(Number(textureExpansion.sourceWidth))
-      ? Number(textureExpansion.sourceWidth)
-      : null
-  const sourceHeight =
-    textureExpansion && Number.isFinite(Number(textureExpansion.sourceHeight))
-      ? Number(textureExpansion.sourceHeight)
-      : null
-
-  return [
-    'Texture outpainting task.',
-    `Expand the centered texture into a seamless ${targetSize} x ${targetSize} square material map.`,
-    'The provided reference image already contains the smaller centered source texture on a larger context canvas.',
-    'Fill the entire canvas with texture detail. Do not leave any flat backdrop, blank border, or studio background visible.',
-    'Use the central pattern as the authority for material identity, texel density, grain, roughness, lighting, and color.',
-    'The outer area of the input canvas is only a soft color and scale guide; replace it with freshly synthesized material detail.',
-    'Do not reconstruct the original source texture as the full-frame output.',
-    'Do not copy, stamp, mirror, or tile the center texture into the new border. Avoid recognizable repeated motifs.',
-    'Vary cracks, fibers, stones, grain, stains, wear, and other medium-scale features while keeping the same material family.',
-    'Preserve a clean top-down texture read suitable for game tiling.',
-    'Ensure the new edges match their opposite sides so the final image tiles seamlessly after expansion.',
-    sourceWidth && sourceHeight
-      ? `Original source dimensions: ${sourceWidth} x ${sourceHeight}.`
-      : null,
-    normalizedStyleText ? `Style guidance: ${normalizedStyleText}.` : null,
-    normalizedPrompt ? `Material notes: ${normalizedPrompt}.` : null,
-  ]
-    .filter(Boolean)
-    .join(' ')
+function buildTextureExpansionPrompt({ prompt, styleText }) {
+  return ['Expand the source material with varied new surrounding detail.', prompt, styleText].filter(Boolean).join(' ')
 }
 
 function buildSeamRepairPrompt({ prompt, styleText }) {
@@ -2498,7 +2454,7 @@ async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
     return normalizedPrompt
   }
 
-  const enhancerModel = modelRegistry['gemini-3-flash']
+  const enhancerModel = modelRegistry['gemini-3.5-flash-lite']
 
   if (!enhancerModel) {
     return normalizedPrompt
@@ -2522,9 +2478,9 @@ async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
     })
 
     await recordUsageEvent({
-      model: 'gemini-3-flash',
+      model: 'gemini-3.5-flash-lite',
       route: '/internal/prompt-enhancer',
-      telemetryModel: resolveTelemetryModelId('gemini-3-flash', '/internal/prompt-enhancer'),
+      telemetryModel: telemetryModelIdByAlias['gemini-3.5-flash-lite'],
       tokenCount: extractTotalTokenCount(enhancement),
     }).catch(() => {})
 
@@ -2569,33 +2525,6 @@ function extractImages(generation) {
       )
     }) ?? []
   )
-}
-
-function normalizeTextureExpansion(textureExpansion) {
-  const canvasImage = textureExpansion?.canvasImage
-  const sourceImage = textureExpansion?.sourceImage
-
-  if (
-    typeof canvasImage?.mimeType !== 'string' ||
-    typeof canvasImage?.data !== 'string' ||
-    !canvasImage.data.length ||
-    typeof sourceImage?.mimeType !== 'string' ||
-    typeof sourceImage?.data !== 'string' ||
-    !sourceImage.data.length
-  ) {
-    return null
-  }
-
-  return {
-    canvasImage: {
-      data: canvasImage.data,
-      mimeType: canvasImage.mimeType,
-    },
-    sourceImage: {
-      data: sourceImage.data,
-      mimeType: sourceImage.mimeType,
-    },
-  }
 }
 
 function normalizeSeamRepair(seamRepair) {
@@ -2728,26 +2657,27 @@ async function generateAnimatorArtifacts({
     }
   }
 
-  const sourceImage = {
-    imageBytes: image.data,
-    mimeType: image.mimeType,
-  }
-  const operation = await ai.models.generateVideos({
+  const interaction = await ai.interactions.create({
     model: modelSelection.providerModel,
-    source: {
-      image: sourceImage,
-      prompt: normalizedPrompt,
+    input: [
+      { type: 'image', data: image.data, mime_type: image.mimeType },
+      { type: 'text', text: normalizedPrompt },
+    ],
+    response_format: {
+      type: 'video',
+      duration: `${actionAnimatorDurationSeconds}s`,
+      resolution: '720p',
     },
-    config: {
-      durationSeconds: actionAnimatorDurationSeconds,
-      numberOfVideos: 1,
-      personGeneration: 'allow_adult',
-    },
+  }, {
+    timeout: actionAnimatorTimeoutMs,
+    maxRetries: 0,
   })
 
-  const settledOperation = await waitForVideoOperation(ai, operation)
-  const video = settledOperation.response?.generatedVideos?.[0]?.video
-  const videoBuffer = await readGeneratedVideo(ai, video)
+  if (!interaction.output_video?.data) {
+    throw new Error('Gemini Omni Flash returned no video for the animation request.')
+  }
+
+  const videoBuffer = Buffer.from(interaction.output_video.data, 'base64')
   const artifactPayload = await createActionAnimatorArtifactsFromVideo({
     frameCount: normalizedFrameCount,
     frameSize: normalizedFrameSize,
@@ -2763,68 +2693,6 @@ async function generateAnimatorArtifacts({
     prompt: normalizedPrompt,
     tokenCount: 0,
   }
-}
-
-async function waitForVideoOperation(ai, operation) {
-  const startedAt = Date.now()
-  let currentOperation = operation
-
-  while (!currentOperation.done) {
-    if (Date.now() - startedAt > actionAnimatorTimeoutMs) {
-      throw new Error('Veo video generation timed out before the operation completed.')
-    }
-
-    await sleep(actionAnimatorPollingIntervalMs)
-    currentOperation = await ai.operations.getVideosOperation({
-      operation: currentOperation,
-    })
-  }
-
-  if (currentOperation.error) {
-    throw new Error(JSON.stringify(currentOperation.error))
-  }
-
-  return currentOperation
-}
-
-async function readGeneratedVideo(ai, video) {
-  if (video?.videoBytes) {
-    return Buffer.from(video.videoBytes, 'base64')
-  }
-
-  if (typeof video?.uri === 'string' && video.uri.length > 0) {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-veo-download-'))
-    const downloadPath = path.join(tempDir, 'generated-video.mp4')
-
-    try {
-      if (ai.files?.download) {
-        await ai.files.download({
-          file: video,
-          downloadPath,
-        })
-
-        return await fs.readFile(downloadPath)
-      }
-
-      const videoResponse = await fetch(video.uri, {
-        headers: apiKey
-          ? {
-              'x-goog-api-key': apiKey,
-            }
-          : undefined,
-      })
-
-      if (!videoResponse.ok) {
-        throw new Error('Generated video could not be downloaded from the returned URI.')
-      }
-
-      return Buffer.from(await videoResponse.arrayBuffer())
-    } finally {
-      await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
-    }
-  }
-
-  throw new Error('Veo returned no downloadable video bytes for the animation request.')
 }
 
 async function createActionAnimatorArtifactsFromVideo({
@@ -2917,7 +2785,7 @@ async function createActionAnimatorArtifactsFromVideo({
         id: 'action-animator-sprite-sheet',
         mimeType: 'image/png',
         text:
-          `Generated ${safeFrameCount} keyed sprite frames from Veo 3.1 Fast at ${safeFrameSize} x ${safeFrameSize}. ` +
+          `Generated ${safeFrameCount} keyed sprite frames from Gemini Omni Flash at ${safeFrameSize} x ${safeFrameSize}. ` +
           'Frames were sampled evenly across the full clip and normalized onto a flat chroma background.',
       },
       video: {
@@ -3091,6 +2959,7 @@ function extractOpenAiImages(payload) {
 }
 
 async function generateImagesWithModel({
+  mask,
   candidateCount = 1,
   googleConfig = {},
   modelSelection,
@@ -3104,6 +2973,7 @@ async function generateImagesWithModel({
 }) {
   if (modelSelection.provider === 'openai') {
     return generateImagesWithOpenAiModel({
+      mask,
       candidateCount,
       modelSelection,
       prompt,
@@ -3170,6 +3040,7 @@ async function generateImagesWithGoogleModel({
 }
 
 async function generateImagesWithOpenAiModel({
+  mask,
   candidateCount,
   modelSelection,
   prompt,
@@ -3184,7 +3055,7 @@ async function generateImagesWithOpenAiModel({
   const timeoutHandle = setTimeout(() => {
     controller.abort()
   }, timeoutMs)
-  const telemetryModel = resolveTelemetryModelId(modelSelection.modelId, routeKey)
+  const telemetryModel = telemetryModelIdByAlias[modelSelection.modelId]
   const combinedPrompt = buildOpenAiImagePrompt(prompt, systemInstruction)
   const resolvedQuality = quality ?? resolveOpenAiImageQuality(routeKey)
   const preparedReferences = await prepareOpenAiReferencesForRoute({
@@ -3206,6 +3077,7 @@ async function generateImagesWithOpenAiModel({
             method: 'POST',
             headers: editHeaders,
             body: buildOpenAiImageEditFormData({
+              mask,
               candidateCount,
               model: modelSelection.providerModel,
               prompt: combinedPrompt,
@@ -3408,6 +3280,7 @@ async function downscaleOpenAiReferenceImage(reference, maxEdgePx) {
 }
 
 function buildOpenAiImageEditFormData({
+  mask,
   candidateCount,
   model,
   prompt,
@@ -3416,6 +3289,7 @@ function buildOpenAiImageEditFormData({
   size,
 }) {
   const formData = new FormData()
+  if (mask) formData.set('mask', new Blob([mask], { type: 'image/png' }), 'edit-mask.png')
   formData.set('model', model)
   formData.set('prompt', prompt)
   formData.set('n', String(candidateCount))
@@ -3685,12 +3559,12 @@ function normalizeImageModelAlias(modelId) {
 
 function getActionAnimatorAllowedModelIds(pipeline = 'veo-video') {
   return pipeline === 'image-strip'
-    ? ['openai-gpt-image-2', 'gemini-3-pro', 'gemini-3-flash', 'gemini-3-flash-lite']
-    : ['veo-3.1-fast']
+    ? actionAnimatorImageModels
+    : [routeModelDefaults['/api/action-animator']]
 }
 
 function getActionAnimatorDefaultModelId(pipeline = 'veo-video') {
-  return pipeline === 'image-strip' ? 'openai-gpt-image-2' : 'veo-3.1-fast'
+  return pipeline === 'image-strip' ? 'openai-gpt-image-2' : routeModelDefaults['/api/action-animator']
 }
 
 function resolveActionAnimatorModelSelection({ modelId, pipeline }) {
@@ -3699,7 +3573,9 @@ function resolveActionAnimatorModelSelection({ modelId, pipeline }) {
     typeof modelId === 'string' && modelId.trim().length > 0
       ? modelId.trim()
       : getActionAnimatorDefaultModelId(pipeline)
-  const normalizedRequestedModel = normalizeImageModelAlias(requestedModel)
+  const normalizedRequestedModel = requestedModel === 'veo-3.1-fast'
+    ? routeModelDefaults['/api/action-animator']
+    : normalizeImageModelAlias(requestedModel)
 
   if (!allowedModels.includes(normalizedRequestedModel)) {
     return {
@@ -3722,38 +3598,6 @@ function buildRouteModelFallbackSequence(routeKey, preferredModelId) {
     preferredModelId,
     ...allowedModels.filter((modelId) => modelId !== preferredModelId),
   ]
-}
-
-function resolveTelemetryModelId(modelId, routeKey) {
-  if (routeKey === '/internal/prompt-orchestrator') {
-    return 'gemini-3-flash-text'
-  }
-
-  if (routeKey === '/internal/prompt-enhancer') {
-    return 'gemini-3-flash-text'
-  }
-
-  if (modelId === 'gemini-3-pro') {
-    return 'nano-banana-pro'
-  }
-
-  if (modelId === 'openai-gpt-image-2') {
-    return 'gpt-image-2'
-  }
-
-  if (modelId === 'veo-3.1-fast') {
-    return 'veo-3-fast-generate'
-  }
-
-  if (modelId === 'gemini-3-flash-lite') {
-    return 'nano-banana-2-lite'
-  }
-
-  if (modelId === 'gemini-3-flash') {
-    return 'nano-banana-2'
-  }
-
-  return null
 }
 
 function extractTotalTokenCount(result) {
@@ -3872,6 +3716,7 @@ function normalizeGenerationError(
   provider = 'google',
 ) {
   const providerLabel = resolveProviderLabel(provider)
+  const modelLabel = MODEL_LABELS[modelName] ?? modelName
   const payloadFromError =
     error && typeof error === 'object' && 'payload' in error ? error.payload : null
   const statusFromError =
@@ -3914,8 +3759,8 @@ function normalizeGenerationError(
               : buildQuotaDetails(payload, retryAfterSeconds),
           message:
             provider === 'openai'
-              ? `This OpenAI key or project does not currently have usable rate limit capacity for ${modelName}. Check your usage tier, project limits, and billing status.`
-              : `This Gemini key or project does not currently have usable quota for ${modelName}. ` +
+              ? `This OpenAI key or project does not currently have usable rate limit capacity for ${modelLabel}. Check your usage tier, project limits, and billing status.`
+              : `This Gemini key or project does not currently have usable quota for ${modelLabel}. ` +
                 'That can be caused by free-tier limits, missing billing, or model-specific quota restrictions.',
           retryAfterSeconds,
           title:

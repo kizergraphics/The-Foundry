@@ -91,6 +91,21 @@ describe('action animator server sizing helpers', () => {
       }),
     ).toContain('C:\\Users\\ant77\\Desktop\\The Foundry\\.env')
   })
+
+  it('searches beside the portable launcher before the extraction directory', () => {
+    const paths = buildEnvSearchPaths({
+      cwd: 'C:\\Temp\\Foundry',
+      execPath: 'C:\\Temp\\Foundry\\The Foundry.exe',
+      portableExecutableDirectory: 'C:\\Projects\\The Foundry\\release',
+      resourcesPath: 'C:\\Temp\\Foundry\\resources',
+      rootDir: 'C:\\Temp\\Foundry\\resources\\app.asar',
+    })
+
+    expect(paths.slice(1, 3)).toEqual([
+      'C:\\Projects\\The Foundry\\release\\.env',
+      'C:\\Temp\\Foundry\\.env',
+    ])
+  })
 })
 
 describe('variant forge idea helpers', () => {

@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  telemetryModelDefinitions,
+  activeTelemetryModelDefinitions,
   telemetryModelIdByAlias,
   telemetryModelsById,
 } from './telemetryModelCatalog.js'
@@ -21,6 +21,8 @@ const chartBucketCount = 8
 const chartBucketDurationMs = 5 * minuteWindowMs
 
 const requestCostByModel = {
+  'gemini-nano-banana-2.1': 0.0336,
+  'nano-banana-2.1': 0.0336,
   'gemini-2.5-flash-image': 0.039,
   'gemini-3-flash': 0.067,
   'gemini-3-flash-lite': 0.0336,
@@ -141,7 +143,7 @@ export async function getTelemetrySnapshot({
 
   return {
     generatedAt: new Date(nowTimestamp).toISOString(),
-    rows: telemetryModelDefinitions.map((definition) => {
+    rows: activeTelemetryModelDefinitions.map((definition) => {
       const events = usageStore.events.filter(
         (event) => resolveEventTelemetryModelId(event) === definition.id,
       )

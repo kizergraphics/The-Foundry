@@ -263,7 +263,7 @@ describe('App model selection', () => {
       await screen.findByRole('button', { name: /^Gemini 3\.1 Flash Image$/i }),
     )
 
-    expect(screen.getByText('gemini-3-flash response stream')).toBeInTheDocument()
+    expect(screen.getByText('Gemini 3.1 Flash Image response stream')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /^FORGE/i }))
 
@@ -276,7 +276,7 @@ describe('App model selection', () => {
     )
 
     expect(forgeRequest.modelId).toBe('gemini-3-flash')
-    expect(await screen.findByText('gemini-3-flash response stream')).toBeInTheDocument()
+    expect(await screen.findByText('Gemini 3.1 Flash Image response stream')).toBeInTheDocument()
   })
 
   it('retries a failed standard multi-generation slot and completes the batch', async () => {
@@ -411,7 +411,7 @@ describe('App Texture Lab expansion flow', () => {
     fireEvent.click(screen.getByTestId('mode-tab-button-texture-lab'))
 
     expect(await screen.findByText('Expansion Workflow')).toBeInTheDocument()
-    expect(screen.getByText(/Expand an existing texture into a larger, seamless surface/i)).toBeInTheDocument()
+    expect(screen.getByText(/Expand an existing texture into a larger surface/i)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Generate$/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Generate Maps/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/Live Material View/i)).not.toBeInTheDocument()
@@ -793,7 +793,7 @@ describe('App Action Animator flow', () => {
               pipeline: 'veo-video',
               prompt: 'Blue key prompt',
               sampleStrategy: 'even',
-              sourceModel: 'veo-3.1-fast',
+              sourceModel: 'gemini-omni-1.2-flash',
             },
             spriteSheet: {
               data: 'CCCC',
@@ -805,7 +805,7 @@ describe('App Action Animator flow', () => {
               mimeType: 'video/mp4',
             },
           },
-          model: 'veo-3.1-fast',
+          model: 'gemini-omni-1.2-flash',
           prompt: 'Blue key prompt',
         })
       }
@@ -827,14 +827,19 @@ describe('App Action Animator flow', () => {
     window.localStorage.clear()
   })
 
-  it('shows Veo as the only model option in Action Animator', async () => {
+  it('shows Gemini Omni as the only model option in Action Animator', async () => {
     render(<App />)
 
     fireEvent.click(screen.getByTestId('mode-tab-button-action-animator'))
 
     const modelSelector = await screen.findByTestId('layout-item-model-selector')
 
-    expect(within(modelSelector).getByRole('button', { name: /Veo 3 Fast Generate/i })).toBeInTheDocument()
+    expect(
+      within(modelSelector).getByRole('button', {
+        name: 'Gemini Omni 1.2 Flash',
+        description: /\$0\.07 \/ sec at 720p/,
+      }),
+    ).toBeInTheDocument()
     expect(
       within(modelSelector).queryByRole('button', { name: /Gemini 3 Pro Image/i }),
     ).not.toBeInTheDocument()
@@ -852,11 +857,14 @@ describe('App Action Animator flow', () => {
       within(modelSelector).getByRole('button', { name: /OpenAI GPT Image 2/i }),
     ).toBeInTheDocument()
     expect(
-      within(modelSelector).getByRole('button', { name: /Gemini 3.1 Flash Lite Image/i }),
+      within(modelSelector).getByRole('button', {
+        name: 'Gemini 3.1 Flash Lite Image',
+        description: /\$0\.0336.*Lowest at 1K/,
+      }),
     ).toBeInTheDocument()
   })
 
-  it('submits keyed Veo settings and exposes video and frame downloads', async () => {
+  it('submits keyed Gemini Omni settings and exposes video and frame downloads', async () => {
     render(<App />)
 
     fireEvent.click(screen.getByTestId('mode-tab-button-action-animator'))
@@ -903,7 +911,7 @@ describe('App Action Animator flow', () => {
       fps: 10,
       frameCount: 12,
       keyColor: 'blue',
-      modelId: 'veo-3.1-fast',
+      modelId: 'gemini-omni-1.2-flash',
       normalizedSize: 512,
       pipeline: 'veo-video',
     })
@@ -932,10 +940,13 @@ describe('App Action Animator flow', () => {
       within(modelSelector).getByRole('button', { name: /OpenAI GPT Image 2/i }),
     ).toBeInTheDocument()
     expect(
-      within(modelSelector).getByRole('button', { name: /Gemini 3 Pro Image/i }),
+      within(modelSelector).getByRole('button', {
+        name: 'Gemini 3 Pro Image',
+        description: /\$0\.134.*Highest at 1K/,
+      }),
     ).toBeInTheDocument()
     expect(
-      within(modelSelector).queryByRole('button', { name: /Veo 3 Fast Generate/i }),
+      within(modelSelector).queryByRole('button', { name: /Gemini Omni 1.2 Flash/i }),
     ).not.toBeInTheDocument()
 
     const animatorPanel = await screen.findByTestId('layout-item-action-animator-panel')

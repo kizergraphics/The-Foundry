@@ -1,8 +1,10 @@
+import { MODEL_LABELS } from '../shared/modelLabels.js'
+
 export const telemetryModelDefinitions = [
   {
     category: 'Multi-modal generative models',
     id: 'gpt-image-2',
-    label: 'OpenAI GPT Image 2',
+    label: MODEL_LABELS['openai-gpt-image-2'],
     limits: {
       rpm: null,
       rpd: null,
@@ -16,7 +18,7 @@ export const telemetryModelDefinitions = [
   {
     category: 'Multi-modal generative models',
     id: 'nano-banana-pro',
-    label: 'Nano Banana Pro (Gemini 3 Pro Image)',
+    label: MODEL_LABELS['gemini-3-pro'],
     limits: {
       rpm: 20,
       rpd: 250,
@@ -29,8 +31,37 @@ export const telemetryModelDefinitions = [
   },
   {
     category: 'Multi-modal generative models',
+    id: 'gemini-omni-1.2-flash',
+    label: MODEL_LABELS['gemini-omni-1.2-flash'],
+    limits: {
+      rpm: 8,
+      rpd: 40,
+      tpm: null,
+    },
+    metricFamily: 'video',
+    modelAliases: ['gemini-omni-1.2-flash'],
+    modelMatchers: ['gemini-omni-1.2-flash'],
+    provider: 'google',
+  },
+  {
+    category: 'Multi-modal generative models',
+    id: 'nano-banana-2.1',
+    label: MODEL_LABELS['gemini-nano-banana-2.1'],
+    limits: {
+      rpm: null,
+      rpd: null,
+      tpm: null,
+    },
+    metricFamily: 'generate',
+    modelAliases: ['gemini-nano-banana-2.1'],
+    modelMatchers: ['gemini-nano-banana-2.1'],
+    provider: 'google',
+  },
+  {
+    category: 'Multi-modal generative models',
     id: 'veo-3-fast-generate',
     label: 'Veo 3 Fast Generate',
+    historical: true,
     limits: {
       rpm: 2,
       rpd: 10,
@@ -44,7 +75,7 @@ export const telemetryModelDefinitions = [
   {
     category: 'Multi-modal generative models',
     id: 'nano-banana-2',
-    label: 'Nano Banana 2 (Gemini 3.1 Flash Image)',
+    label: MODEL_LABELS['gemini-3-flash'],
     limits: {
       rpm: 100,
       rpd: 1000,
@@ -58,7 +89,7 @@ export const telemetryModelDefinitions = [
   {
     category: 'Multi-modal generative models',
     id: 'nano-banana-2-lite',
-    label: 'Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)',
+    label: MODEL_LABELS['gemini-3-flash-lite'],
     limits: {
       rpm: 500,
       rpd: 2000,
@@ -73,6 +104,7 @@ export const telemetryModelDefinitions = [
     category: 'Multi-modal generative models',
     id: 'nano-banana',
     label: 'Nano Banana (Gemini 2.5 Flash Image, legacy)',
+    historical: true,
     limits: {
       rpm: 500,
       rpd: 2000,
@@ -85,8 +117,23 @@ export const telemetryModelDefinitions = [
   },
   {
     category: 'Text-out models',
+    id: 'gemini-3.5-flash-lite',
+    label: 'Gemini 3.5 Flash-Lite',
+    limits: {
+      rpm: null,
+      rpd: null,
+      tpm: null,
+    },
+    metricFamily: 'generate',
+    modelAliases: ['gemini-3.5-flash-lite'],
+    modelMatchers: ['gemini-3.5-flash-lite'],
+    provider: 'google',
+  },
+  {
+    category: 'Text-out models',
     id: 'gemini-3-flash-text',
     label: 'Gemini 3 Flash',
+    historical: true,
     limits: {
       rpm: 1000,
       rpd: 10000,
@@ -101,6 +148,7 @@ export const telemetryModelDefinitions = [
     category: 'Text-out models',
     id: 'gemini-2.5-flash-text',
     label: 'Gemini 2.5 Flash',
+    historical: true,
     limits: {
       rpm: 1000,
       rpd: 10000,
@@ -112,6 +160,10 @@ export const telemetryModelDefinitions = [
     provider: 'google',
   },
 ]
+
+export const activeTelemetryModelDefinitions = telemetryModelDefinitions.filter(
+  (definition) => !definition.historical,
+)
 
 export const telemetryModelIdByAlias = Object.fromEntries(
   telemetryModelDefinitions.flatMap((definition) =>

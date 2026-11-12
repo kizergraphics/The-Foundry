@@ -1,3 +1,4 @@
+import { validateTextureRequest } from '../shared/textureLab.js'
 import {
   getVariantForgePresetOptions,
   isVariantForgePresetForFamily,
@@ -504,18 +505,7 @@ export function validateForgeRequest(body) {
       maxSystemInstructionLength,
     ),
     textureExpansion: body?.textureExpansion
-      ? {
-          canvasImage: validateInlineImage(
-            body.textureExpansion.canvasImage,
-            'textureExpansion.canvasImage',
-            maxTextureExpansionBytes,
-          ),
-          sourceImage: validateInlineImage(
-            body.textureExpansion.sourceImage,
-            'textureExpansion.sourceImage',
-            maxTextureExpansionBytes,
-          ),
-        }
+      ? validateTextureExpansionBody(body.textureExpansion, body.seamlessMode)
       : undefined,
     textureKind,
     textureOutputs:
@@ -732,4 +722,14 @@ export function toValidationResponse(error) {
   return buildValidationError(
     error instanceof Error ? error.message : 'The request payload is invalid.',
   )
+}
+
+function validateTextureExpansionBody(input, seamlessMode) {
+  let options
+  try { options = validateTextureRequest({ ...input, seamlessMode: input.seamlessMode ?? seamlessMode }) }
+  catch (error) { throw buildValidationError(error.message) }
+  return { ...options,
+    sourceImage: validateInlineImage(input.sourceImage, 'textureExpansion.sourceImage', maxTextureExpansionBytes),
+    baseImage: input.baseImage ? validateInlineImage(input.baseImage, 'textureExpansion.baseImage', maxTextureExpansionBytes) : undefined,
+  }
 }

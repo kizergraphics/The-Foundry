@@ -12,29 +12,21 @@ const originalEnv = { ...process.env }
 
 vi.mock('@google/genai/node', () => {
   const generateContent = vi.fn()
-  const generateVideos = vi.fn()
-  const getVideosOperation = vi.fn()
-  const download = vi.fn()
+  const createInteraction = vi.fn()
   const GoogleGenAI = vi.fn(function GoogleGenAI() {
     this.models = {
       generateContent,
-      generateVideos,
     }
-    this.operations = {
-      getVideosOperation,
-    }
-    this.files = {
-      download,
+    this.interactions = {
+      create: createInteraction,
     }
   })
 
   return {
     GoogleGenAI,
     __mock: {
-      download,
+      createInteraction,
       generateContent,
-      generateVideos,
-      getVideosOperation,
     },
   }
 })
@@ -62,7 +54,7 @@ afterEach(() => {
 })
 
 async function createPngBase64(width, height, channelValues) {
-  return sharp(Buffer.from(channelValues), {
+  return sharp(Buffer.alloc(width * height * 3, Buffer.from(channelValues)), {
     raw: {
       channels: 3,
       height,
@@ -378,6 +370,7 @@ describe('API hardening', () => {
       GEMINI_API_KEY: 'test-key',
     })
     const cases = [
+      ['gemini-nano-banana-2.1', 'gemini-nano-banana-2.1', 'gemini-nano-banana-2.1'],
       ['gemini-3-flash', 'gemini-3-flash', 'gemini-3.1-flash-image'],
       ['gemini-3-pro', 'gemini-3-pro', 'gemini-3-pro-image'],
       ['gemini-3-flash-lite', 'gemini-3-flash-lite', 'gemini-3.1-flash-lite-image'],
@@ -609,12 +602,12 @@ describe('API hardening', () => {
     expect(Math.max(resizedMetadata.width ?? 0, resizedMetadata.height ?? 0)).toBe(1024)
   })
 
-  it('sends only the centered expansion canvas to Gemini texture expansion requests', async () => {
+  it('builds a protected expansion canvas for Gemini', async () => {
     const { __mock } = await import('@google/genai/node')
     __mock.generateContent.mockReset()
     const canvasImageBase64 = await createPngBase64(1, 1, [20, 80, 140])
     const sourceImageBase64 = await createPngBase64(1, 1, [220, 180, 40])
-    const generatedBase64 = await createPngBase64(1, 1, [60, 120, 180])
+    const generatedBase64 = await createPngBase64(1024, 1024, [60, 120, 180])
     __mock.generateContent.mockResolvedValue(buildImageGeneration(generatedBase64))
 
     const app = await loadApp({
@@ -645,23 +638,17 @@ describe('API hardening', () => {
 
     const [requestBody] = __mock.generateContent.mock.calls[0]
     const inlineParts = requestBody.contents.filter((part) => part.inlineData)
-    expect(inlineParts).toEqual([
-      {
-        inlineData: {
-          data: canvasImageBase64,
-          mimeType: 'image/png',
-        },
-      },
-    ])
-    expect(requestBody.contents[0].text).toContain('Texture outpainting task')
-    expect(requestBody.contents[0].text).toContain('centered source texture')
+    expect(inlineParts).toHaveLength(1)
+    expect((await sharp(Buffer.from(inlineParts[0].inlineData.data,'base64')).metadata()).width).toBe(1024)
+    expect(requestBody.contents[0].text).toContain('varied plausible new detail')
+    expect(response.body.images[0].texture.maskMode).toContain('reference guidance')
     expect(requestBody.contents[0].text).not.toContain(sourceImageBase64)
   })
 
-  it('sends only the centered expansion canvas to OpenAI texture expansion edits', async () => {
+  it('sends a native mask and authoritative canvas to OpenAI texture edits', async () => {
     const canvasImageBase64 = await createPngBase64(1, 1, [30, 90, 150])
     const sourceImageBase64 = await createPngBase64(1, 1, [230, 190, 50])
-    const generatedBase64 = await createPngBase64(1, 1, [70, 130, 190])
+    const generatedBase64 = await createPngBase64(1024, 1024, [70, 130, 190])
     const fetchMock = vi.fn().mockResolvedValue({
       headers: new Headers(),
       json: async () => ({
@@ -717,10 +704,10 @@ describe('API hardening', () => {
     const formData = requestOptions.body
     const uploadedImages = formData.getAll('image[]')
     expect(uploadedImages).toHaveLength(1)
-    expect(Buffer.from(await uploadedImages[0].arrayBuffer()).toString('base64')).toBe(
-      canvasImageBase64,
-    )
-    expect(formData.get('prompt')).toContain('Texture outpainting task')
+    expect((await sharp(Buffer.from(await uploadedImages[0].arrayBuffer())).metadata()).width).toBe(1024)
+    expect(formData.get('mask')).toBeTruthy()
+    expect(response.body.images[0].texture.maskMode).toContain('native mask')
+    expect(formData.get('prompt')).toContain('varied plausible new detail')
     expect(formData.get('size')).toBe('1024x1024')
   })
 
@@ -755,6 +742,15 @@ describe('API hardening', () => {
 
     expect(response.status).toBe(200)
     expect(response.body.source).toBe('local')
+    expect(response.body.rows.map((row) => row.label)).toEqual([
+      'OpenAI GPT Image 2',
+      'Gemini 3 Pro Image',
+      'Gemini Omni 1.2 Flash',
+      'Nano Banana 2.1',
+      'Gemini 3.1 Flash Image',
+      'Gemini 3.1 Flash Lite Image',
+      'Gemini 3.5 Flash-Lite',
+    ])
     expect(response.body.error).toEqual({
       code: 'telemetry_unavailable',
       message: 'Google quota telemetry is unavailable right now. Local telemetry is still active.',
@@ -894,27 +890,13 @@ describe('API hardening', () => {
 })
 
 describe('Action Animator route', () => {
-  it('returns video, sprite sheet, frames, and metadata for Veo extraction', async () => {
+  it('routes saved Veo selections through Omni and extracts keyed frames', async () => {
     const { __mock } = await import('@google/genai/node')
-    __mock.generateVideos.mockReset()
-    __mock.getVideosOperation.mockReset()
-    __mock.download.mockReset()
+    __mock.createInteraction.mockReset()
     const videoBuffer = await createActionAnimatorVideoBuffer()
 
-    __mock.generateVideos.mockResolvedValue({
-      done: true,
-      response: {
-        generatedVideos: [
-          {
-            video: {
-              uri: 'mock://generated-video',
-            },
-          },
-        ],
-      },
-    })
-    __mock.download.mockImplementation(async ({ downloadPath }) => {
-      await fs.writeFile(downloadPath, videoBuffer)
+    __mock.createInteraction.mockResolvedValue({
+      output_video: { data: videoBuffer.toString('base64') },
     })
 
     const app = await loadApp({
@@ -939,15 +921,27 @@ describe('Action Animator route', () => {
       })
 
     expect(response.status).toBe(200)
-    expect(__mock.generateVideos).toHaveBeenCalledTimes(1)
-    expect(response.body.model).toBe('veo-3.1-fast')
+    expect(__mock.createInteraction).toHaveBeenCalledTimes(1)
+    expect(__mock.createInteraction).toHaveBeenCalledWith(
+      {
+        model: 'gemini-omni-1.2-flash',
+        input: [
+          { type: 'image', data: expect.any(String), mime_type: 'image/png' },
+          { type: 'text', text: expect.stringContaining('green') },
+        ],
+        response_format: { type: 'video', duration: '4s', resolution: '720p' },
+      },
+      expect.objectContaining({ maxRetries: 0 }),
+    )
+    expect(response.body.model).toBe('gemini-omni-1.2-flash')
+    expect(response.body.providerModel).toBe('gemini-omni-1.2-flash')
     expect(response.body.artifacts.metadata).toMatchObject({
       fps: 8,
       frameCount: 4,
       keyColor: 'green',
       normalizedSize: 512,
       sampleStrategy: 'even',
-      sourceModel: 'veo-3.1-fast',
+      sourceModel: 'gemini-omni-1.2-flash',
     })
     expect(response.body.artifacts.video.mimeType).toBe('video/mp4')
     expect(response.body.artifacts.spriteSheet.mimeType).toBe('image/png')

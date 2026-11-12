@@ -1,3 +1,5 @@
+import { textureSettings } from '../../shared/textureLab.js'
+import type { TextureSettings } from '../../shared/textureLab.js'
 import type {
   ActionAnimatorActionType,
   ActionAnimatorKeyColor,
@@ -96,6 +98,7 @@ type StoredSettings = {
   portraitStudio: StoredPortraitStudioSettings
   prompt: string
   textureLab: {
+    settings?: TextureSettings
     expansionTargetSize: TextureExpansionTargetSize
     seamlessMode: boolean
     workflow: TextureLabWorkflow
@@ -134,16 +137,21 @@ const storageKey = 'kizer-forge-state'
 const maxRecentPrompts = 6
 const storedModelIds: ModelId[] = [
   'browser-uv-engine',
+  'gemini-nano-banana-2.1',
   'gemini-3-flash',
   'gemini-3-flash-lite',
   'gemini-3-pro',
   'openai-gpt-image-2',
-  'veo-3.1-fast',
+  'gemini-omni-1.2-flash',
 ]
 
 function normalizeStoredModelId(value: unknown): ModelId | null {
   if (value === 'gemini-2.5-flash-image') {
     return 'gemini-3-flash-lite'
+  }
+
+  if (value === 'veo-3.1-fast') {
+    return 'gemini-omni-1.2-flash'
   }
 
   return typeof value === 'string' && storedModelIds.includes(value as ModelId)
@@ -456,6 +464,7 @@ export function loadStoredState(): StoredState | null {
         prompt:
           typeof parsed.settings?.prompt === 'string' ? parsed.settings.prompt : '',
         textureLab: {
+          settings: textureSettings(parsed.settings?.textureLab?.settings),
           expansionTargetSize: clampTextureLabOutputSize(
             parsed.settings?.textureLab?.expansionTargetSize ?? 1024,
           ),

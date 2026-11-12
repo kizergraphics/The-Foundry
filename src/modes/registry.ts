@@ -53,7 +53,7 @@ export type ModePresentation = {
 }
 
 export const defaultTextureExpansionPrompt =
-  'Generatively expand this texture. Use the central pattern as a reference to fill the outer edges with a matching, seamless, high-resolution material. Maintain identical grain, lighting, and color.'
+  'Generatively expand this texture. Use the central pattern as a reference to fill the outer edges with a matching material with varied new detail. Maintain identical grain, lighting, and color.'
 
 export function getModePresentation({
   isForging,
@@ -441,7 +441,7 @@ function getBriefItems(state: ForgeState, flags: ModeFlags): ForgeBriefItem[] {
       {
         label: 'Pipeline',
         value:
-          state.actionAnimator.pipeline === 'image-strip' ? 'Image Strip' : 'Veo Video',
+          state.actionAnimator.pipeline === 'image-strip' ? 'Image Strip' : 'Gemini Omni Video',
       },
       {
         label: 'Action',
@@ -673,7 +673,7 @@ function getPrimaryActionDescription({
     if (flags.isActionAnimatorMode) {
       return state.actionAnimator.pipeline === 'image-strip'
         ? 'Generating a guided sprite strip and preparing keyed frame tiles'
-        : 'Generating a Veo clip and extracting keyed sprite frames'
+        : 'Generating a Gemini Omni clip and extracting keyed sprite frames'
     }
 
     if (flags.isCharacterSheetMode) {
@@ -693,7 +693,7 @@ function getPrimaryActionDescription({
     }
 
     if (flags.isTextureExpansionMode) {
-      return 'Sending centered outpaint canvas to the selected image model'
+      return 'Processing the current texture operation'
     }
 
     if (flags.isVfxForgeMode) {
@@ -712,7 +712,7 @@ function getPrimaryActionDescription({
   if (flags.isActionAnimatorMode) {
     return state.actionAnimator.pipeline === 'image-strip'
       ? 'Character image staged for guided sprite-strip generation'
-      : 'Character image staged for Veo-driven sprite extraction'
+      : 'Character image staged for video-based sprite extraction'
   }
 
   if (getIsReadyForApi(state, flags)) {
@@ -729,7 +729,7 @@ function getPrimaryActionDescription({
     }
 
     if (flags.isTextureExpansionMode) {
-      return 'Centered source canvas staged for outpaint execution'
+      return 'Source ready for protected expansion'
     }
 
     if (flags.isVfxForgeMode) {

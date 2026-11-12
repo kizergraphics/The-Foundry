@@ -22,7 +22,8 @@
     "prepare:uv-runtime": "node scripts/sync-uv-runtime.mjs",
     "start": "node server/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "compare:textures": "node scripts/compare-textures.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

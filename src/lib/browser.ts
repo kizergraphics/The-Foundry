@@ -50,20 +50,6 @@ export async function dataUrlToFile(
   })
 }
 
-type TextureExpansionInputOptions = {
-  sourceCoverage?: number
-  targetSize?: number
-}
-
-type TextureExpansionInput = {
-  base64: string
-  mimeType: string
-  sourceCoverage: number
-  sourceHeight: number
-  sourceWidth: number
-  targetSize: number
-}
-
 type AnimatorStripCanvasInput = {
   base64: string
   canvasHeight: number
@@ -79,53 +65,6 @@ type NormalizeAnimatorFramesResult = {
 }
 
 const actionAnimatorBackgroundColor = '#00FF00'
-const textureExpansionContextSampleSize = 64
-const textureExpansionContextBlockSize = 16
-
-export async function buildTextureExpansionInput(
-  file: Blob,
-  options: TextureExpansionInputOptions = {},
-): Promise<TextureExpansionInput> {
-  const targetSize = options.targetSize ?? 1024
-  const sourceCoverage = options.sourceCoverage ?? 0.46
-  const image = await loadImage(file)
-  const canvas = document.createElement('canvas')
-  canvas.width = targetSize
-  canvas.height = targetSize
-
-  const context = canvas.getContext('2d')
-
-  if (!context) {
-    throw new Error('Canvas rendering is not available in this browser.')
-  }
-
-  const maxSourceSize = targetSize * sourceCoverage
-  const drawScale = Math.min(
-    maxSourceSize / image.naturalWidth,
-    maxSourceSize / image.naturalHeight,
-  )
-  const drawWidth = Math.round(image.naturalWidth * drawScale)
-  const drawHeight = Math.round(image.naturalHeight * drawScale)
-  const drawX = Math.round((targetSize - drawWidth) / 2)
-  const drawY = Math.round((targetSize - drawHeight) / 2)
-
-  context.clearRect(0, 0, targetSize, targetSize)
-  context.imageSmoothingEnabled = true
-  drawTextureExpansionContext(context, image, targetSize)
-  context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
-
-  const blob = await canvasToBlob(canvas, 'image/png')
-
-  return {
-    base64: await fileToBase64(blob),
-    mimeType: 'image/png',
-    sourceCoverage,
-    sourceHeight: image.naturalHeight,
-    sourceWidth: image.naturalWidth,
-    targetSize,
-  }
-}
-
 type TextureSeamRepairInput = {
   mimeType: string
   offsetBase64: string
@@ -553,112 +492,7 @@ export function inferSpriteSheetGridLayout(options: {
   }
 }
 
-function drawTextureExpansionContext(
-  context: CanvasRenderingContext2D,
-  image: HTMLImageElement,
-  targetSize: number,
-) {
-  const sampleCanvas = document.createElement('canvas')
-  sampleCanvas.width = textureExpansionContextSampleSize
-  sampleCanvas.height = textureExpansionContextSampleSize
-  const sampleContext = sampleCanvas.getContext('2d', {
-    willReadFrequently: true,
-  })
 
-  if (!sampleContext) {
-    throw new Error('Canvas rendering is not available in this browser.')
-  }
-
-  sampleContext.drawImage(
-    image,
-    0,
-    0,
-    textureExpansionContextSampleSize,
-    textureExpansionContextSampleSize,
-  )
-
-  const sample = sampleContext.getImageData(
-    0,
-    0,
-    textureExpansionContextSampleSize,
-    textureExpansionContextSampleSize,
-  )
-
-  for (let y = 0; y < targetSize; y += textureExpansionContextBlockSize) {
-    for (let x = 0; x < targetSize; x += textureExpansionContextBlockSize) {
-      const sampleX = wrapIndex(
-        Math.round(
-          (x / targetSize) * textureExpansionContextSampleSize +
-            deterministicJitter(x, y, 17) * 19,
-        ),
-        textureExpansionContextSampleSize,
-      )
-      const sampleY = wrapIndex(
-        Math.round(
-          (y / targetSize) * textureExpansionContextSampleSize +
-            deterministicJitter(x, y, 43) * 19,
-        ),
-        textureExpansionContextSampleSize,
-      )
-      const sampleOffset =
-        (sampleY * textureExpansionContextSampleSize + sampleX) * 4
-      const valueShift = Math.round((deterministicJitter(x, y, 71) - 0.5) * 26)
-      const red = clampByte(sample.data[sampleOffset] + valueShift)
-      const green = clampByte(sample.data[sampleOffset + 1] + valueShift)
-      const blue = clampByte(sample.data[sampleOffset + 2] + valueShift)
-
-      context.fillStyle = `rgb(${red}, ${green}, ${blue})`
-      context.fillRect(
-        x,
-        y,
-        textureExpansionContextBlockSize,
-        textureExpansionContextBlockSize,
-      )
-    }
-  }
-
-  context.save()
-  context.globalAlpha = 0.48
-  context.filter = 'blur(22px)'
-  drawCoverImage(context, image, targetSize, targetSize)
-  context.restore()
-
-  context.save()
-  context.globalAlpha = 0.22
-  context.filter = 'blur(12px)'
-  context.translate(targetSize, 0)
-  context.scale(-1, 1)
-  drawCoverImage(context, image, targetSize, targetSize)
-  context.restore()
-}
-
-function drawCoverImage(
-  context: CanvasRenderingContext2D,
-  image: HTMLImageElement,
-  width: number,
-  height: number,
-) {
-  const scale = Math.max(width / image.naturalWidth, height / image.naturalHeight)
-  const drawWidth = Math.ceil(image.naturalWidth * scale)
-  const drawHeight = Math.ceil(image.naturalHeight * scale)
-  const drawX = Math.floor((width - drawWidth) / 2)
-  const drawY = Math.floor((height - drawHeight) / 2)
-
-  context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
-}
-
-function deterministicJitter(x: number, y: number, seed: number) {
-  const value = Math.sin(x * 12.9898 + y * 78.233 + seed * 37.719) * 43758.5453
-  return value - Math.floor(value)
-}
-
-function wrapIndex(value: number, size: number) {
-  return ((value % size) + size) % size
-}
-
-function clampByte(value: number) {
-  return Math.max(0, Math.min(255, Math.round(value)))
-}
 
 export async function sliceSpriteSheetFramesByContent(
   source: string | Blob,

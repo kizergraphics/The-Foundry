@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs'
 import crypto from 'node:crypto'
-import { telemetryModelDefinitions } from './telemetryModelCatalog.js'
+import { activeTelemetryModelDefinitions } from './telemetryModelCatalog.js'
 
 const googleTokenScope =
   'https://www.googleapis.com/auth/cloud-platform.read-only https://www.googleapis.com/auth/monitoring.read'
@@ -98,7 +98,7 @@ export async function getGoogleTelemetrySnapshot({
 
     return {
       generatedAt: nowDate.toISOString(),
-      rows: telemetryModelDefinitions.map((definition) =>
+      rows: activeTelemetryModelDefinitions.map((definition) =>
         buildTelemetryRow(definition, metricStore, nowDate),
       ),
       source: 'google-cloud-monitoring',

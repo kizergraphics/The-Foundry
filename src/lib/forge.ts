@@ -1,3 +1,5 @@
+import { textureDefaults } from '../../shared/textureLab.js'
+import type { TextureSettings, TextureMetadata } from '../../shared/textureLab.js'
 import type { LucideIcon } from 'lucide-react'
 import {
   Box,
@@ -117,6 +119,7 @@ export type CharacterSheetState = {
 }
 
 export type TextureLabState = {
+  settings: TextureSettings
   expansionSource: ReferenceAsset | null
   expansionTargetSize: TextureExpansionTargetSize
   seamlessMode: boolean
@@ -195,6 +198,7 @@ export type ForgeAction =
     }
   | { type: 'set-character-sheet-consistency'; enabled: boolean }
   | { type: 'set-character-sheet-parent-id'; parentId: string | null }
+  | { type: 'set-texture-settings'; settings: Partial<TextureSettings> }
   | { type: 'set-texture-expansion-source'; asset: ReferenceAsset | null }
   | { type: 'set-texture-lab-seamless-mode'; enabled: boolean }
   | {
@@ -240,6 +244,7 @@ export type ModeDefinition = {
 }
 
 export type ForgeResult = {
+  texture?: TextureMetadata
   dataUrl: string
   id: string
   mimeType: string
@@ -313,7 +318,7 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     label: 'Action Animator',
     eyebrow: 'Motion',
     description:
-      'Turns a locked character image into a Veo-driven motion strip for quick animation blocking.',
+      'Turns a locked character image into a video-based motion strip for quick animation blocking.',
     instruction:
       '2D side-view animation strip, locked camera, consistent scale, readable motion spacing',
     surfaceClassName:
@@ -477,6 +482,7 @@ export const initialState: ForgeState = {
     subject: null,
   },
   textureLab: {
+    settings: { ...textureDefaults },
     expansionSource: null,
     expansionTargetSize: 1024,
     seamlessMode: false,
@@ -630,6 +636,8 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           pipeline: action.pipeline,
         },
       }
+    case 'set-texture-settings':
+      return { ...state, textureLab: { ...state.textureLab, settings: { ...state.textureLab.settings, ...action.settings } } }
     case 'set-texture-expansion-source':
       return {
         ...state,

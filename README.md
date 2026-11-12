@@ -153,3 +153,21 @@ npm run lint
 ## Contributing
 
 Issues and pull requests are welcome. The best places to help right now are Texture Lab, the 3D viewer, the Visualizer tab, drag-and-drop polish, tests around rough workflows, and clearer setup documentation.
+
+
+### Texture Lab expansion and editing
+
+Texture Lab offers creative provider editing or local faithful patch synthesis, 1.5×/2×/4× expansion, directional placement, 512/1024 PNG exports, and 1–4 sequential variants. Preserve-original protects the source **after proportional scaling**; Blend allows changes only in its displayed boundary band. The 4× option uses two stages. Seamless adds a localized wrap-offset finishing pass; it does not guarantee that distinctive internal marks disappear in a tiled view.
+
+Use the candidate selector to choose what is previewed and exported. Drag a rectangle in the 1× preview (or use the accessible corner selection and coordinate fields) to regenerate a region. Green outlines the protected interior. The 3×3 and 5×5 previews use browser background tiling without allocating oversized images. Stop takes effect after the active operation; Resume retries only the failed/interrupted operation and then continues queued work. Completed candidates survive failures. Finishing failures retain an explicitly unfinished candidate with Retry Finish.
+
+Creative requests currently generate at 1024×1024 and are explicitly resized to the chosen export size before protected compositing. Native masks are enabled only for the verified GPT Image 2 edit endpoint; other selected providers use reference guidance and deterministic compositing. Mask semantics were verified against https://developers.openai.com/api/reference/python/resources/images/methods/edit on 2026-11-11. Provider dimensions are validated; unexpected sizes are reported rather than cropped. Local synthesis requires no provider key and uses no GPU model. Settings persist, while editing checkpoints and original images remain session-local.
+
+#### Repeatable comparison
+
+Run `npm run compare:textures` first: it processes one synthetic stone fixture with two local variants and spends no credits. `npm run compare:textures -- --all` checks stone, dirt, wood, cloth, and brick. Synthetic fixtures exercise algorithms; use `--fixtures <directory>` with those PNG filenames for real visual evaluation. `--fixture <name>` supports individual failing examples. Import original-pipeline outputs with `--baselines <directory>` using names such as `stone-baseline-1.png` and `stone-baseline-2.png`; missing baselines stay marked missing.
+
+Results, timings, memory samples, metadata, editable visual review fields, and a 1×/tiled HTML gallery are written under `.codex-logs/texture-lab-comparison`. For a single live creative comparison against a running Foundry server, explicitly add `--live --max-calls 4`; this permits exactly two expansion-plus-finish variants, without retries. Use `--url` and `--model` to select the server/model. A configured internal token can be supplied as `FOUNDRY_INTERNAL_TOKEN`. No live batch starts by default. Usage is recorded when available; unknown provider cost stays null. Real failed examples, original baseline images, and human quality review are required before claiming improved appearance.
+
+
+Initial offline review (2026-11-11): ten seeded local outputs completed across the five synthetic materials. Dirt retained a consistent granular appearance; wood and cloth retained overall direction but showed join/phase artifacts. Large stone cracks and brick courses fragmented outside the protected source, and the preserved source footprint remained recognizable in tiled views. Faithful synthesis is therefore unsuitable for assuming structural continuation on those examples. These observations are not a baseline comparison or a live creative-provider assessment. Use creative expansion for evaluation of newly invented larger features; its visual quality still needs real-texture testing.

@@ -13,12 +13,12 @@ describe('mode model helpers', () => {
     expect(getModeDefaultModel('visualizer')).toBe('openai-gpt-image-2')
   })
 
-  it('uses Veo by default for the animator video pipeline', () => {
+  it('uses Gemini Omni by default for the animator video pipeline', () => {
     expect(
       getModeDefaultModel('action-animator', {
         actionAnimatorPipeline: 'veo-video',
       }),
-    ).toBe('veo-3.1-fast')
+    ).toBe('gemini-omni-1.2-flash')
   })
 
   it('uses OpenAI by default for the animator image pipeline', () => {
@@ -29,13 +29,13 @@ describe('mode model helpers', () => {
     ).toBe('openai-gpt-image-2')
   })
 
-  it('returns only Veo for the animator video pipeline', () => {
+  it('returns only Gemini Omni for the animator video pipeline', () => {
     expect(
       getAvailableModelsForMode('action-animator', {
         actionAnimatorPipeline: 'veo-video',
       }),
     ).toEqual([
-      'veo-3.1-fast',
+      'gemini-omni-1.2-flash',
     ])
   })
 
@@ -46,6 +46,7 @@ describe('mode model helpers', () => {
       }),
     ).toEqual([
       'openai-gpt-image-2',
+      'gemini-nano-banana-2.1',
       'gemini-3-pro',
       'gemini-3-flash',
       'gemini-3-flash-lite',

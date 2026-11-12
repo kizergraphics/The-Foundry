@@ -1,3 +1,6 @@
+import { TextureLabControls, TextureLabWorkspace } from './components/TextureLabWorkspace'
+import { useTextureLabRun } from './lib/textureLabRun'
+import { textureSettings } from '../shared/textureLab.js'
 import {
   lazy,
   startTransition,
@@ -7,6 +10,7 @@ import {
   useCallback,
   useEffect,
   useEffectEvent,
+  useId,
   useReducer,
   useRef,
   useState,
@@ -72,7 +76,6 @@ import {
   downloadBlob,
   downloadDataUrl,
   downloadResult,
-  normalizeSquareTextureDataUrl,
   sliceSpriteSheetFramesByContent,
   slicePortraitStudioFaces,
 } from './lib/browser'
@@ -165,6 +168,7 @@ import type {
 } from '../shared/vfxForgeCatalog.js'
 import type { VariantForgeIdeaResponseSource } from '../shared/variantForgeIdeas.js'
 import {
+  GEMINI_MODEL_PRICES,
   getAvailableModelsForMode,
   getModeDefaultModel,
   MODEL_LABELS,
@@ -621,6 +625,7 @@ function buildHydratedForgeState(
     textureLab: {
       ...initialState.textureLab,
       ...storedState.settings.textureLab,
+      settings: textureSettings(storedState.settings.textureLab.settings),
       workflow: 'expand' as const,
     },
     uvLab: {
@@ -677,6 +682,7 @@ function buildStoredStateSnapshot(
       },
       prompt: state.prompt,
       textureLab: {
+        settings: state.textureLab.settings,
         expansionTargetSize: state.textureLab.expansionTargetSize,
         seamlessMode: state.textureLab.seamlessMode,
         workflow: 'expand',
@@ -721,6 +727,14 @@ function App() {
   const [state, dispatch] = useReducer(forgeReducer, initialState)
   const [status, setStatus] = useState<ForgeStatus>('idle')
   const [results, setResults] = useState<ForgeResult[]>([])
+  const textureRunner = useTextureLabRun((result) => {
+    setResults(previous => {
+      const textures = previous.filter(entry => entry.texture)
+      return textures.some(entry => entry.id === result.id) ? textures.map(entry => entry.id === result.id ? result : entry) : [...textures, result]
+    })
+    setLastResultMode('texture-lab')
+    setLastSavedAt(new Date().toISOString())
+  })
   const [forgeSlots, setForgeSlots] = useState<ForgeBatchSlotState[]>([])
   const [error, setError] = useState<ForgeErrorInfo | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -963,7 +977,7 @@ function App() {
     : results.length
   const isShowingResults = visibleResultsCount > 0 || hasForgeSlots
   const activeGenerationCount =
-    isVfxForgeMode
+    isTextureLabMode ? state.textureLab.settings.variants : isVfxForgeMode
       ? Math.max(1, state.vfxForge.textureOutputs.length)
       : isSingleResultMode
         ? 1
@@ -979,8 +993,7 @@ function App() {
     (_, index) => index,
   )
   const effectiveModel = activeModel
-  const activeModelName =
-    isForging || serverModel !== effectiveModel ? effectiveModel : serverModel ?? effectiveModel
+  const activeModelName = MODEL_LABELS[effectiveModel]
   const selectedTelemetryModel = effectiveModel
   const highlightedTelemetryRowId =
     TELEMETRY_ROW_BY_MODEL_ID[selectedTelemetryModel ?? activeModel] ?? null
@@ -1382,6 +1395,7 @@ function App() {
     state.generationCount,
     state.portraitStudio.prompt,
     state.prompt,
+    state.textureLab.settings,
     state.textureLab.expansionTargetSize,
     state.textureLab.seamlessMode,
     state.uvLab.atlasSize,
@@ -1459,28 +1473,6 @@ function App() {
         parentId: nextResults[0]?.id ?? null,
       })
     }
-  }
-
-  async function normalizeTextureLabResults(
-    nextResults: ForgeResult[],
-    targetSize: TextureExpansionTargetSize,
-  ) {
-    return Promise.all(
-      nextResults.map(async (entry) => {
-        try {
-          return {
-            ...entry,
-            dataUrl: await normalizeSquareTextureDataUrl(
-              entry.dataUrl,
-              targetSize,
-            ),
-            mimeType: 'image/png',
-          }
-        } catch {
-          return entry
-        }
-      }),
-    )
   }
 
   async function handleIncrementalForgeBatch({
@@ -1664,7 +1656,7 @@ function App() {
   }
 
   async function handleForge() {
-    if (!isReadyForApi || isForging || forgeRunInFlightRef.current) {
+    if (!isReadyForApi || isForging || textureRunner.busy || forgeRunInFlightRef.current) {
       return
     }
 
@@ -1765,7 +1757,7 @@ function App() {
           payload.results,
           payload.model,
           payload.prompt ?? promptPreview,
-          `Action Animator extracted ${payload.artifacts.frames.length} keyed frame${payload.artifacts.frames.length === 1 ? '' : 's'} from Veo video output.`,
+          `Action Animator extracted ${payload.artifacts.frames.length} keyed frame${payload.artifacts.frames.length === 1 ? '' : 's'} from Gemini Omni video output.`,
           {
             actionAnimatorArtifacts: payload.artifacts,
             telemetryModel: payload.model,
@@ -1876,35 +1868,12 @@ function App() {
           throw new Error('Attach a source texture before starting an expansion pass.')
         }
 
-        const { ok, payload } = await postForgeRequest(
-          await buildTextureExpansionRequest({
-            modelId: activeModel,
-            quality: activeOpenAiImageQuality,
-            sourceAsset,
-            state,
-            styleText: activeStyleInput.trim(),
-          }),
-        )
+        await textureRunner.start(await buildTextureExpansionRequest({
+          modelId: activeModel, quality: activeOpenAiImageQuality, sourceAsset, state,
+          styleText: activeStyleInput.trim(),
+        }))
+        setStatus('success')
 
-        if (!ok || !payload?.images?.length) {
-          throw toForgeError(payload?.error)
-        }
-
-        const normalizedResults = await normalizeTextureLabResults(
-          normalizeForgeApiResults(payload),
-          state.textureLab.expansionTargetSize,
-        )
-
-        finalizeForgeRun(
-          normalizedResults,
-          payload.model ?? null,
-          payload.prompt ?? promptPreview,
-          'Texture expansion completed with a centered outpaint pass.',
-          {
-            telemetryModel: payload.model,
-            trackTelemetry: true,
-          },
-        )
         return
       }
 
@@ -2277,13 +2246,7 @@ function App() {
       mode: state.activeMode,
       prompt: activePromptValue || promptPreview,
     })
-    const mockResults =
-      isTextureLabMode
-        ? await normalizeTextureLabResults(
-            rawMockResults,
-            state.textureLab.expansionTargetSize,
-          )
-        : rawMockResults
+    const mockResults = rawMockResults
 
     if (isVfxForgeMode) {
       setVfxTextureResults(
@@ -2309,7 +2272,7 @@ function App() {
 
   const controlZoneClassName = useWideControlGrid ? 'space-y-5' : 'space-y-4'
   const promptPanelDescription = isTextureLabMode
-    ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
+    ? 'Optional material notes. The source texture drives the expansion pass even if this field is blank.'
     : 'Describe the asset or scene you want generated'
 
   const controlPanelItems: Partial<
@@ -2668,7 +2631,12 @@ function App() {
     if (isTextureLabMode) {
       controlPanelItems['texture-workflow'] = {
         content: (
-          <TextureLabWorkflowPanel
+          <TextureLabControls
+            settings={state.textureLab.settings}
+            onSettingsChange={(settings) => dispatch({ type: 'set-texture-settings', settings })}
+            source={state.textureLab.expansionSource}
+            modelId={activeModel}
+            disabled={textureRunner.busy}
             expansionTargetSize={state.textureLab.expansionTargetSize}
             onSeamlessModeChange={(enabled) =>
               dispatch({
@@ -2781,6 +2749,7 @@ function App() {
         disabled={
           !isReadyForApi ||
           isForging ||
+          (isTextureLabMode && (textureRunner.busy || textureRunner.pending)) ||
           !selectedModelSupported
         }
         className="inline-flex w-full items-center justify-between rounded-[24px] border border-sky-300/20 bg-[linear-gradient(135deg,rgba(56,189,248,0.2),rgba(10,14,20,0.92))] px-5 py-4 text-left shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)] transition duration-200 hover:border-sky-200/30 hover:shadow-[0_0_0_1px_rgba(125,211,252,0.12),0_28px_80px_rgba(14,165,233,0.24)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-sky-300/20 disabled:hover:shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)]"
@@ -2895,7 +2864,9 @@ function App() {
       testId: 'layout-item-forge-brief',
     }
     workspacePanelItems['result-grid'] = {
-      content: (
+      content: isTextureLabMode ? (
+        <TextureLabWorkspace results={results.filter(result => result.texture)} runner={textureRunner} onDownload={handleDownload} />
+      ) : (
         <div
           className={
             isSingleResultMode
@@ -3887,7 +3858,7 @@ function App() {
                         activeMode={state.activeMode}
                         description={
                           isTextureExpansionMode
-                            ? 'Optional material notes. The centered source texture drives the expansion pass even if this field is blank.'
+                            ? 'Optional material notes. The source texture drives the expansion pass even if this field is blank.'
                             : isTextureGenerateMode && state.textureLab.seamlessMode
                               ? 'Describe the material. Seamless Mode converts this into a tile-safe semantic tiling prompt at the selected texture size.'
                               : isTextureGenerateMode
@@ -4851,6 +4822,8 @@ function ModelSelector({
         ? 'Locked for This Workflow'
         : 'Smart Default + Manual'
   const showOpenAiImageQuality = activeModel === 'openai-gpt-image-2'
+  const activeModelPrice = GEMINI_MODEL_PRICES[activeModel]
+  const priceId = useId()
 
   return (
     <section className="rounded-[22px] border border-white/10 bg-black/20 p-4">
@@ -4862,26 +4835,46 @@ function ModelSelector({
           {modelOverrideLabel}
         </span>
       </div>
-      <div className="mt-3 inline-flex w-full gap-2 rounded-full border border-white/10 bg-white/[0.02] p-1.5">
+      <div className="mt-3 flex w-full flex-wrap gap-2 rounded-[16px] border border-white/10 bg-white/[0.02] p-1.5">
         {availableModels.map((model) => {
           const isActive = activeModel === model
+          const price = GEMINI_MODEL_PRICES[model]
 
           return (
             <button
               key={model}
               type="button"
+              aria-label={MODEL_LABELS[model]}
+              aria-describedby={price ? `${priceId}-${model}` : undefined}
+              aria-pressed={isActive}
               onClick={() => onSelect(model)}
-              className={`flex-1 rounded-full px-3 py-2 text-xs font-medium transition ${
+              className={`min-w-32 flex-1 rounded-[12px] px-3 py-2 text-xs font-medium transition ${
                 isActive
                   ? 'border border-sky-300/35 bg-sky-400/14 text-sky-100'
                   : 'border border-transparent text-zinc-400 hover:border-white/20 hover:bg-white/[0.04] hover:text-zinc-200'
               }`}
             >
               {MODEL_LABELS[model]}
+              {price ? (
+                <span id={`${priceId}-${model}`} className="mt-1 block text-[11px] tabular-nums text-zinc-300">
+                  {price.rate}
+                  {price.tier ? <span className="block text-zinc-400">{price.tier}</span> : null}
+                </span>
+              ) : null}
             </button>
           )
         })}
       </div>
+      {availableModels.some((model) => GEMINI_MODEL_PRICES[model]) ? (
+        <p className="mt-2 text-[11px] text-zinc-400">
+          {activeModelPrice?.higherResolutions ? (
+            <span className="block tabular-nums text-zinc-300">
+              {activeModelPrice.higherResolutions}
+            </span>
+          ) : null}
+          Gemini output prices in USD. Input and other token charges may apply.
+        </p>
+      ) : null}
       {showOpenAiImageQuality ? (
         <div className="mt-4 space-y-2 rounded-[16px] border border-white/10 bg-white/[0.03] p-3">
           <div className="flex items-center justify-between gap-3">
@@ -5150,101 +5143,6 @@ function UvLabBrief({
   )
 }
 
-type TextureLabWorkflowPanelProps = {
-  expansionTargetSize: TextureExpansionTargetSize
-  onSeamlessModeChange: (enabled: boolean) => void
-  onTargetSizeChange: (size: TextureExpansionTargetSize) => void
-  seamlessMode: boolean
-}
-
-function TextureLabWorkflowPanel({
-  expansionTargetSize,
-  onSeamlessModeChange,
-  onTargetSizeChange,
-  seamlessMode,
-}: TextureLabWorkflowPanelProps) {
-  return (
-    <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-            Expansion Workflow
-          </p>
-          <p className="mt-2 text-sm font-medium text-white">
-            Expand an existing texture into a larger, seamless surface.
-          </p>
-        </div>
-        <div className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-xs text-zinc-400">
-          Texture Lab
-        </div>
-      </div>
-
-      <button
-        type="button"
-        onClick={() => onSeamlessModeChange(!seamlessMode)}
-        className={`mt-4 flex w-full items-center justify-between rounded-[20px] border px-4 py-3 text-left transition ${
-          seamlessMode
-            ? 'border-emerald-300/30 bg-emerald-400/10 text-emerald-50'
-            : 'border-white/10 bg-white/[0.03] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]'
-        }`}
-      >
-        <span>
-          <span className="block text-sm font-medium">Seamless Mode</span>
-          <span className="mt-1 block text-xs leading-5 text-current/70">
-            Adds tile-safe guidance while preserving the source texture as the expansion anchor.
-          </span>
-        </span>
-        <span className="rounded-full border border-current/20 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.28em]">
-          {seamlessMode ? 'On' : 'Off'}
-        </span>
-      </button>
-
-      <div className="mt-4 rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-          Texture Size
-        </p>
-        <p className="mt-2 text-sm leading-6 text-zinc-300">
-          Choose the final square size for the expanded texture.
-        </p>
-
-        <div className="mt-4 grid grid-cols-2 gap-2">
-          {[512, 1024].map((size) => (
-            <button
-              key={size}
-              type="button"
-              onClick={() => onTargetSizeChange(size as TextureExpansionTargetSize)}
-              className={`rounded-[18px] border px-3 py-3 text-left transition ${
-                expansionTargetSize === size
-                  ? 'border-emerald-300/35 bg-emerald-400/12 text-emerald-50'
-                  : 'border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]'
-              }`}
-            >
-              <span className="block text-sm font-medium">{size} x {size}</span>
-              <span className="mt-1 block text-xs leading-5 text-current/70">
-                {size === 512
-                  ? 'Compact game-ready output with a deterministic final resize.'
-                  : 'Preferred full-size square texture when the model can deliver 1K.'}
-              </span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="mt-4 rounded-[22px] border border-emerald-300/20 bg-emerald-500/10 p-4">
-        <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-emerald-100/70">
-          Expansion Strategy
-        </p>
-        <p className="mt-2 text-sm leading-6 text-emerald-50">
-          The source texture is centered on a larger guided canvas, then the selected
-          image model synthesizes fresh surrounding material while keeping the final map
-          tile-safe. This workflow uses the active model for the edit pass at the selected
-          output size.
-        </p>
-      </div>
-    </section>
-  )
-}
-
 type TextureExpansionPanelProps = {
   asset: ReferenceAsset | null
   onFileSelect: (asset: ReferenceAsset | null) => void
@@ -5260,7 +5158,7 @@ function TextureExpansionPanel({
     <section className="space-y-4 rounded-[24px] border border-white/10 bg-black/20 p-4">
       <ImageUploadField
         label="Source Texture"
-        helper="Required. This image is centered on a larger context canvas before the selected image model expands the surrounding material."
+        helper="Required. The server scales and protects this source while creating new surrounding material."
         asset={asset}
         icon={ImagePlus}
         isRequired
@@ -5272,9 +5170,9 @@ function TextureExpansionPanel({
           Outpaint Notes
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-300">
-          <li>The source is shrunk into the center of the canvas as the crisp anchor.</li>
-          <li>The selected image model receives the centered context canvas as the expansion reference.</li>
-          <li>New edges are instructed to use fresh detail, avoid stamped repeats, and still tile cleanly.</li>
+          <li>The source is scaled once and placed according to the selected direction.</li>
+          <li>Creative expansion invents detail; faithful synthesis rearranges source patches locally.</li>
+          <li>Enable Seamless to finish edge and corner joins after expansion.</li>
           <li>Target canvas: {targetSize} x {targetSize}.</li>
         </ul>
       </div>
@@ -5616,11 +5514,11 @@ function ActionAnimatorPanel({
           <p className="mt-2 text-sm font-medium text-white">
             {isImageStripPipeline
               ? 'Generate a guided sprite strip with image models, then split and normalize the returned frames for preview and export.'
-              : 'Generate a Veo clip, extract keyed frames server-side, and review the normalized sprite output before export.'}
+              : 'Generate a Gemini Omni clip, extract keyed frames server-side, and review the normalized sprite output before export.'}
           </p>
         </div>
         <div className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 font-mono text-xs text-cyan-100">
-          {isImageStripPipeline ? 'Image strip pipeline' : 'Veo video pipeline'}
+          {isImageStripPipeline ? 'Image strip pipeline' : 'Gemini Omni video pipeline'}
         </div>
       </div>
 
@@ -5645,7 +5543,7 @@ function ActionAnimatorPanel({
         <p className="mt-3 text-sm leading-6 text-zinc-400">
           {isImageStripPipeline
             ? 'Use Gemini or ChatGPT image models to return a guided sprite strip. Optional first and last frame references help lock the endpoints.'
-            : 'Use Veo to animate the source character into a short keyed video before frame extraction.'}
+            : 'Use Gemini Omni to animate the source character into a short keyed video before frame extraction.'}
         </p>
       </div>
 
@@ -5654,7 +5552,7 @@ function ActionAnimatorPanel({
         helper={
           isImageStripPipeline
             ? 'Upload the source character image the sprite strip should preserve across every frame.'
-            : 'Upload the source character image Veo should preserve while generating motion.'
+            : 'Upload the source character image Gemini Omni should preserve while generating motion.'
         }
         asset={asset}
         icon={ImagePlus}
@@ -5715,7 +5613,7 @@ function ActionAnimatorPanel({
             actionType === 'custom'
               ? isImageStripPipeline
                 ? 'Describe the exact motion you want the image models to stage across the strip.'
-                : 'Describe the exact motion you want Veo to animate.'
+                : 'Describe the exact motion you want Gemini Omni to animate.'
               : 'Optional motion notes. Ex: heavier footfalls, stronger anticipation, aggressive lean.'
           }
           rows={4}
