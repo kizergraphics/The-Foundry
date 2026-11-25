@@ -31,6 +31,7 @@ const baseStoredSettings = {
   },
   prompt: 'hero sword',
   textureLab: {
+    sourceSeamlessMode: true,
     expansionTargetSize: 1024 as const,
     seamlessMode: false,
     workflow: 'expand' as const,
@@ -81,7 +82,7 @@ describe('persistStoredState', () => {
       },
     })
 
-    const rawState = window.localStorage.getItem('kizer-forge-state')
+    const rawState = window.localStorage.getItem('foundry-web-state-v1')
 
     expect(rawState).toContain('"serverModel":"gemini-3-flash"')
     expect(rawState).not.toContain('dataUrl')
@@ -90,7 +91,7 @@ describe('persistStoredState', () => {
 
   it('restores metadata-only sessions cleanly', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: ['hero sword'],
         settings: {
@@ -116,29 +117,16 @@ describe('persistStoredState', () => {
     })
   })
 
-  it('stores and restores per-mode model overrides', () => {
-    persistStoredState({
-      recentPrompts: [],
-      settings: {
-        ...baseStoredSettings,
-        activeMode: 'armory',
-        modelOverridesByMode: {
-          armory: 'gemini-3-flash',
-          'texture-lab': 'openai-gpt-image-2',
-        },
-      },
-      session: null,
-    })
-
-    expect(loadStoredState()?.settings.modelOverridesByMode).toEqual({
-      armory: 'gemini-3-flash',
-      'texture-lab': 'openai-gpt-image-2',
-    })
+  it.each(['codex', 'openai-gpt-image-2', 'gemini-3-flash', 'browser-uv-engine', 'veo-3.1-fast'])('migrates saved %s overrides to Codex', legacyModel => {
+    window.localStorage.setItem('foundry-web-state-v1', JSON.stringify({
+      recentPrompts: [], settings: { ...baseStoredSettings, activeMode: 'armory', modelOverridesByMode: { armory: legacyModel } }, session: null,
+    }))
+    expect(loadStoredState()?.settings.modelOverridesByMode).toEqual({ armory: 'codex' })
   })
 
-  it('migrates legacy Gemini 2.5 model overrides to Gemini 3.1 Flash Lite', () => {
+  it('migrates legacy Gemini model overrides to the fixed web model', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -153,7 +141,7 @@ describe('persistStoredState', () => {
     )
 
     expect(loadStoredState()?.settings.modelOverridesByMode).toEqual({
-      armory: 'gemini-3-flash-lite',
+      armory: 'codex',
     })
   })
 
@@ -163,7 +151,7 @@ describe('persistStoredState', () => {
       byMode: {
         'vfx-forge': {
           control: {
-            primary: ['vfx-forge-panel', 'model-selector', 'style-reference'],
+            primary: ['vfx-forge-panel', 'image-quality', 'style-reference'],
             secondary: ['forge-action'],
           },
           workspace: {
@@ -199,7 +187,7 @@ describe('persistStoredState', () => {
 
   it('hydrates a default ui layout when older saved settings do not include one', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -216,7 +204,7 @@ describe('persistStoredState', () => {
 
   it('sanitizes persisted ui layouts by dropping unknown ids and appending defaults', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -256,7 +244,7 @@ describe('persistStoredState', () => {
       byMode: {
         'vfx-forge': {
           control: {
-            primary: ['vfx-forge-panel', 'model-selector', 'style-reference'],
+            primary: ['vfx-forge-panel', 'image-quality', 'style-reference'],
             secondary: ['forge-action'],
           },
           workspace: {
@@ -274,8 +262,6 @@ describe('persistStoredState', () => {
           'variant-forge',
           'portrait-studio',
           'texture-lab',
-          'uv-lab',
-          'visualizer',
           'character-sheet',
         ],
         shell: {
@@ -289,9 +275,9 @@ describe('persistStoredState', () => {
     })
   })
 
-  it('restores the Veo animator settings with normalized values', () => {
+  it('migrates legacy video animator settings to image strips with normalized values', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -320,13 +306,13 @@ describe('persistStoredState', () => {
       frameCount: 30,
       keyColor: 'green',
       normalizedSize: 512,
-      pipeline: 'veo-video',
+      pipeline: 'image-strip',
     })
   })
 
   it('restores the image-strip animator pipeline when saved', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -346,7 +332,7 @@ describe('persistStoredState', () => {
 
   it('migrates legacy loot leveler settings into variant forge', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -397,7 +383,7 @@ describe('persistStoredState', () => {
 
   it('restores variant option toggles and custom settings', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -439,7 +425,7 @@ describe('persistStoredState', () => {
 
   it('restores family-specific custom directions', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -469,7 +455,7 @@ describe('persistStoredState', () => {
 
   it('migrates legacy projectileType into the projectile effect label', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -495,7 +481,7 @@ describe('persistStoredState', () => {
 
   it('migrates legacy shared custom direction into the active family', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -521,7 +507,7 @@ describe('persistStoredState', () => {
 
   it('preserves categories with no active variant presets', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -563,7 +549,7 @@ describe('persistStoredState', () => {
 
   it('migrates legacy Texture Lab generation settings to expansion', () => {
     window.localStorage.setItem(
-      'kizer-forge-state',
+      'foundry-web-state-v1',
       JSON.stringify({
         recentPrompts: [],
         settings: {
@@ -582,6 +568,7 @@ describe('persistStoredState', () => {
     expect(loadStoredState()?.settings.textureLab).toEqual({
       settings: { factor: 2, direction: 'all', preservation: 'preserve', technique: 'creative', variants: 1 },
       expansionTargetSize: 512,
+      sourceSeamlessMode: true,
       seamlessMode: true,
       workflow: 'expand',
     })

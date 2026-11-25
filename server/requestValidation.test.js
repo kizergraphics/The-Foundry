@@ -175,7 +175,7 @@ describe('validateVariantForgeIdeaRequest', () => {
 })
 
 describe('validateActionAnimatorRequest', () => {
-  it('accepts keyed Veo animator payloads and defaults optional values', () => {
+  it('accepts keyed image-strip animator payloads and defaults optional values', () => {
     expect(
       validateActionAnimatorRequest({
         fps: 10,
@@ -196,7 +196,7 @@ describe('validateActionAnimatorRequest', () => {
       },
       keyColor: 'blue',
       normalizedSize: 1080,
-      pipeline: 'veo-video',
+      pipeline: 'image-strip',
       prompt: '',
     })
   })
@@ -313,4 +313,8 @@ describe('validateVfxExportRequest', () => {
       }),
     ).toThrow()
   })
+})
+
+it('rejects removed video pipelines', () => {
+  expect(() => validateActionAnimatorRequest({ image: { data: validPngBase64, mimeType: 'image/png' }, pipeline: 'veo-video' })).toThrow()
 })

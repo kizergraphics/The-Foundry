@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createDataUrl,
+  unionAnimatorBounds,
   dataUrlToBlob,
   fileToBase64,
   inferSpriteSheetGridLayout,
@@ -61,4 +62,10 @@ describe('browser encoding helpers', () => {
       rows: 2,
     })
   })
+})
+
+it('uses a shared bounding box that retains jump displacement', () => {
+  expect(unionAnimatorBounds([{ left: 10, right: 30, top: 60, bottom: 90 }, { left: 12, right: 32, top: 10, bottom: 40 }]))
+    .toEqual({ left: 10, right: 32, top: 10, bottom: 90 })
+  expect(() => unionAnimatorBounds([])).toThrow('No sprite bounds')
 })

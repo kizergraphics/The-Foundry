@@ -10,7 +10,7 @@ import {
   useCallback,
   useEffect,
   useEffectEvent,
-  useId,
+  useMemo,
   useReducer,
   useRef,
   useState,
@@ -46,8 +46,8 @@ import {
   Fingerprint,
   Gem,
   GripVertical,
-  Hammer,
   ImagePlus,
+  Images,
   LoaderCircle,
   Palette,
   Play,
@@ -59,11 +59,13 @@ import {
 } from 'lucide-react'
 
 import { ImageUploadField } from './components/ImageUploadField'
-import { ModelUploadField } from './components/ModelUploadField'
+import { ImageLibrary } from './components/ImageLibrary'
 import { GeneratedResultCard, PlaceholderCard } from './components/ResultCards'
 import {
   actionAnimatorActionOptions,
   generateActionAnimator,
+  getActionAnimatorAtlasPreviewFrames,
+  getActionAnimatorPreviewPosition,
   type ActionAnimatorArtifacts,
 } from './lib/actionAnimator'
 import {
@@ -80,6 +82,7 @@ import {
   slicePortraitStudioFaces,
 } from './lib/browser'
 import { buildMockResults } from './lib/mockForge'
+import { libraryUpdatedEvent } from './lib/imageLibrary'
 import {
   buildRecentPrompts,
   loadStoredState,
@@ -113,6 +116,7 @@ import {
   getVariantForgeOptionState,
   initialState,
   modeDefinitions,
+  toReferenceAsset,
   openAiImageQualityOptions,
   variantForgeFamilies,
   variantForgePresetCatalog,
@@ -128,29 +132,14 @@ import type {
   ForgeMode,
   ForgeResult,
   ForgeStatus,
-  ModelAsset,
   ModeDefinition,
   OpenAiImageQuality,
   ReferenceAsset,
   TextureExpansionTargetSize,
-  UvLabAtlasSize,
   VariantForgeFamily,
   VariantForgeOptionStateMap,
   VariantForgePreset,
 } from './lib/forge'
-import type { UvJobStatusResponse } from './lib/uvLab'
-import {
-  formatTriangleCount,
-  formatUvStep,
-  isTerminalUvJobStatus,
-  revokeUvJobArtifacts,
-  type UvEngineState as LocalUvEngineState,
-} from './lib/uvLab'
-import {
-  getBrowserUvEngineId,
-  primeUvEngine,
-  runLocalUvJob,
-} from './lib/uvEngine'
 import {
   appendVariantForgeIdeaToDirection,
   formatVariantForgeLabel,
@@ -168,11 +157,9 @@ import type {
 } from '../shared/vfxForgeCatalog.js'
 import type { VariantForgeIdeaResponseSource } from '../shared/variantForgeIdeas.js'
 import {
-  GEMINI_MODEL_PRICES,
   getAvailableModelsForMode,
   getModeDefaultModel,
   MODEL_LABELS,
-  TELEMETRY_ROW_BY_MODEL_ID,
   type ModelId,
 } from './modes/models'
 import { buildActiveVariantForgeOptions, getModePresentation } from './modes/registry'
@@ -194,52 +181,28 @@ import {
   postForgeRequest,
   postVfxExportRequest,
   postVfxRecipeRequest,
+  runForgeBatch,
   type VfxTexturePayload,
 } from './modes/execution'
 
 type ServiceHealth = {
+  generationConfigured?: boolean
+  provider?: 'codex'
+  runtime?: { available: boolean; authenticated: boolean; ready: boolean; message: string }
   ok: boolean
 }
 
-type UvEngineStatus = {
-  message: string | null
-  state: LocalUvEngineState
+function codexStatusMessage(health: ServiceHealth | null): string {
+  if (!health?.ok) return 'Checking the local Codex app bridge. If this persists, start the local web server and recheck status.'
+  if (health.runtime?.message) return health.runtime.message
+  return health.generationConfigured
+    ? 'Codex is ready through the local app bridge. Generation uses your Codex subscription usage and limits.'
+    : 'Codex is not ready. Install Codex and sign in locally with your ChatGPT account, then recheck status. Imported textures and local PBR tools work without signing in.'
 }
 
 type ForgeBriefItem = {
   label: string
   value: string
-}
-
-type TelemetryMetric = {
-  current: number | null
-  limit: number | null
-  ratio: number | null
-}
-
-type TelemetryRow = {
-  category: string
-  chartPoints: number[]
-  id: string
-  label: string
-  lastRequestAt: string | null
-  metrics: {
-    rpm: TelemetryMetric
-    rpd: TelemetryMetric
-    tpm?: TelemetryMetric | null
-  }
-}
-
-type TelemetrySnapshot = {
-  error?: {
-    code?: string
-    details?: unknown
-    message?: string
-  }
-  generatedAt: string
-  rows: TelemetryRow[]
-  source?: string
-  timeZone: string
 }
 
 type VfxTextureResultMap = Partial<Record<VfxTextureKind, ForgeResult>>
@@ -281,8 +244,10 @@ const portraitStudioExpressionLabels = [
   'joy',
   'surprised',
 ] as const
-const standardForgeClientBatchMaxAttempts = 2
-const standardForgeClientBatchRequestTimeoutMs = 105000
+// Codex generation is billed work: never silently repeat a failed/uncertain request.
+const standardForgeClientBatchMaxAttempts = 1
+// The local bridge owns the job timeout (up to 30 minutes). Allow its response to arrive.
+const standardForgeClientBatchRequestTimeoutMs = 1830000
 const standardForgeClientRetryDelayMs = 1200
 const standardForgeClientMaxRetryDelayMs = 10000
 const shellZoneKeyPrefix = 'shell:'
@@ -300,7 +265,7 @@ const panelItemLabels: Record<LayoutPanelItemId, string> = {
   'character-sheet-panel': 'Character Sheet Panel',
   'forge-action': 'Forge Action',
   'forge-brief': 'Forge Brief',
-  'model-selector': 'Model Selector',
+  'image-quality': 'Image Quality',
   'portrait-direction': 'Portrait Direction',
   'portrait-studio-panel': 'Portrait Studio Panel',
   'prompt-panel': 'Prompt Panel',
@@ -318,15 +283,7 @@ const panelItemLabels: Record<LayoutPanelItemId, string> = {
   'vfx-forge-panel': 'VFX Forge Panel',
 }
 
-type TelemetryWindowState = {
-  sessionMaxByModel: Record<string, number>
-  startedAt: number
-}
-
-const telemetryWindowStorageKey = 'kizer-forge-telemetry-window'
-const telemetryWindowDurationMs = 24 * 60 * 60 * 1000
-const UvLabWorkspace = lazy(() => import('./components/UvLabWorkspace'))
-const telemetryRefreshIntervalMs = 10000
+const PbrMaterialWorkbench = lazy(() => import('./components/PbrMaterialWorkbench').then(module => ({ default: module.PbrMaterialWorkbench })))
 
 function getShellZoneKey(zoneId: LayoutShellZoneId) {
   return `${shellZoneKeyPrefix}${zoneId}`
@@ -501,71 +458,6 @@ function reorderSortableList<TItem extends string>({
   return arrayMove(items, activeIndex, overIndex)
 }
 
-function loadTelemetryWindowState(now = Date.now()): TelemetryWindowState {
-  if (typeof window === 'undefined') {
-    return {
-      sessionMaxByModel: {},
-      startedAt: now,
-    }
-  }
-
-  try {
-    const rawState = window.localStorage.getItem(telemetryWindowStorageKey)
-
-    if (!rawState) {
-      return {
-        sessionMaxByModel: {},
-        startedAt: now,
-      }
-    }
-
-    const parsedState = JSON.parse(rawState) as Partial<TelemetryWindowState>
-    const startedAt =
-      typeof parsedState.startedAt === 'number' && Number.isFinite(parsedState.startedAt)
-        ? parsedState.startedAt
-        : now
-    const sessionMaxByModel =
-      parsedState.sessionMaxByModel &&
-      typeof parsedState.sessionMaxByModel === 'object'
-        ? Object.fromEntries(
-            Object.entries(parsedState.sessionMaxByModel).filter(
-              ([modelName, value]) =>
-                typeof modelName === 'string' &&
-                modelName.trim().length > 0 &&
-                typeof value === 'number' &&
-                Number.isFinite(value) &&
-                value >= 0,
-            ),
-          )
-        : {}
-
-    if (now - startedAt >= telemetryWindowDurationMs) {
-      return {
-        sessionMaxByModel: {},
-        startedAt: now,
-      }
-    }
-
-    return {
-      sessionMaxByModel,
-      startedAt,
-    }
-  } catch {
-    return {
-      sessionMaxByModel: {},
-      startedAt: now,
-    }
-  }
-}
-
-function persistTelemetryWindowState(state: TelemetryWindowState) {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  window.localStorage.setItem(telemetryWindowStorageKey, JSON.stringify(state))
-}
-
 function buildForgeBatchSlots(count: number): ForgeBatchSlotState[] {
   return Array.from({ length: count }, () => ({
     attempt: 1,
@@ -607,10 +499,11 @@ function buildHydratedForgeState(
 ) {
   return {
     ...initialState,
-    activeMode: storedState.settings.activeMode,
+    activeMode: storedState.settings.activeMode === 'uv-lab' || storedState.settings.activeMode === 'visualizer' ? 'armory' as const : storedState.settings.activeMode,
     actionAnimator: {
       ...initialState.actionAnimator,
       ...storedState.settings.actionAnimator,
+      pipeline: 'image-strip' as const,
     },
     characterSheet: {
       ...initialState.characterSheet,
@@ -684,6 +577,7 @@ function buildStoredStateSnapshot(
       textureLab: {
         settings: state.textureLab.settings,
         expansionTargetSize: state.textureLab.expansionTargetSize,
+        sourceSeamlessMode: state.textureLab.sourceSeamlessMode,
         seamlessMode: state.textureLab.seamlessMode,
         workflow: 'expand',
       },
@@ -727,6 +621,8 @@ function App() {
   const [state, dispatch] = useReducer(forgeReducer, initialState)
   const [status, setStatus] = useState<ForgeStatus>('idle')
   const [results, setResults] = useState<ForgeResult[]>([])
+  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [librarySaveFailed, setLibrarySaveFailed] = useState(false)
   const textureRunner = useTextureLabRun((result) => {
     setResults(previous => {
       const textures = previous.filter(entry => entry.texture)
@@ -740,18 +636,19 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null)
   const [serverPrompt, setServerPrompt] = useState<string | null>(null)
   const [serverModel, setServerModel] = useState<string | null>(null)
-  const [uvJob, setUvJob] = useState<UvJobStatusResponse | null>(null)
-  const [uvEngineStatus, setUvEngineStatus] = useState<UvEngineStatus>({
-    message: 'UV engine has not been loaded yet.',
-    state: 'idle',
-  })
-  const [uvUploadError, setUvUploadError] = useState<string | null>(null)
   const [recentPrompts, setRecentPrompts] = useState<string[]>([])
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null)
   const [lastCharacterSheetResult, setLastCharacterSheetResult] =
     useState<ForgeResult | null>(null)
   const [lastResultMode, setLastResultMode] = useState<ForgeMode | null>(null)
   const [vfxRecipeManifest, setVfxRecipeManifest] = useState<VfxRecipeManifest | null>(null)
+  const [vfxRunSettings, setVfxRunSettings] = useState<typeof initialState.vfxForge | null>(null)
+  const [textureSourceCount, setTextureSourceCount] = useState(1)
+  const [textureSourceSlots, setTextureSourceSlots] = useState<ForgeBatchSlotState[] | null>(null)
+  const [selectedTextureCandidate, setSelectedTextureCandidate] = useState<string | null>(null)
+  const textureSelectionVersionRef = useRef(0)
+  const [pbrSource, setPbrSource] = useState<ForgeResult>()
+  const [pbrSourceRevision, setPbrSourceRevision] = useState(0)
   const [vfxTextureResults, setVfxTextureResults] = useState<VfxTextureResultMap>({})
   const [actionAnimatorArtifacts, setActionAnimatorArtifacts] =
     useState<ActionAnimatorRunArtifacts | null>(null)
@@ -788,18 +685,12 @@ function App() {
   const pendingPersistStateRef = useRef<Parameters<typeof persistStoredState>[0] | null>(
     null,
   )
-  const [sessionCountsByModel, setSessionCountsByModel] = useState<
-    Record<string, number>
-  >({})
-  const [sessionMaxByModel, setSessionMaxByModel] = useState(
-    () => loadTelemetryWindowState().sessionMaxByModel,
-  )
   const isForging = status === 'loading'
   const activeStyleInput = styleInputByMode[state.activeMode] ?? ''
   const activeOpenAiImageQuality =
     openAiImageQualityByMode[state.activeMode] ??
     getDefaultOpenAiImageQualityForMode(state.activeMode)
-  const refreshVariantForgeIdeas = useEffectEvent(async () => {
+  const refreshVariantForgeIdeas = useCallback(async () => {
     const family = state.variantForge.variantFamily
     const nextRequestVersion =
       (variantForgeIdeaRequestVersionRef.current[family] ?? 0) + 1
@@ -854,12 +745,13 @@ function App() {
         [family]: fallbackState,
       }))
     }
-  })
+  }, [state.variantForge, activeStyleInput])
+  const autoRefreshVariantForgeIdeas = useEffectEvent(() => { void refreshVariantForgeIdeas() })
   const modeAvailableModels = getAvailableModelsForMode(state.activeMode, {
     actionAnimatorPipeline: state.actionAnimator.pipeline,
   })
   const selectedModelSupported =
-    state.activeMode === 'uv-lab' || modeAvailableModels.includes(activeModel)
+    modeAvailableModels.includes(activeModel)
   const modePresentation = getModePresentation({
     isForging,
     selectedModelSupported,
@@ -877,7 +769,6 @@ function App() {
       isPortraitStudioMode,
       isTextureExpansionMode,
       isTextureLabMode,
-      isUvLabMode,
       isVariantForgeMode,
       isVfxForgeMode,
     },
@@ -933,7 +824,7 @@ function App() {
     buildVariantForgeFallbackIdeaState(state.variantForge.variantFamily)
   const activeVariantForgeIdeaSuggestions = activeVariantForgeIdeaState.ideas
   const activeVfxEffectLabel = resolveVfxEffectLabel(state.vfxForge.effectLabel)
-  const selectedVfxTextureResults = state.vfxForge.textureOutputs.flatMap((kind) => {
+  const selectedVfxTextureResults = (vfxRunSettings?.textureOutputs ?? state.vfxForge.textureOutputs).flatMap((kind) => {
     const result = vfxTextureResults[kind]
 
     return result
@@ -946,9 +837,8 @@ function App() {
       : []
   })
   const canBuildVfxRecipe =
-    state.vfxForge.exportTarget !== 'none' &&
+    (vfxRunSettings?.exportTarget ?? state.vfxForge.exportTarget) !== 'none' &&
     selectedVfxTextureResults.length > 0 &&
-    selectedVfxTextureResults.length === state.vfxForge.textureOutputs.length &&
     !isForging
   const canDownloadVfxBundle =
     canBuildVfxRecipe && vfxRecipeManifest !== null && !isDownloadingVfxBundle
@@ -958,8 +848,15 @@ function App() {
       return
     }
 
-    void refreshVariantForgeIdeas()
+    autoRefreshVariantForgeIdeas()
   }, [isVariantForgeMode, state.variantForge.variantFamily, state.variantForge.variantPreset])
+  useEffect(() => {
+    const onLibraryUpdate = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === 'failed') setLibrarySaveFailed(true)
+    }
+    window.addEventListener(libraryUpdatedEvent, onLibraryUpdate)
+    return () => window.removeEventListener(libraryUpdatedEvent, onLibraryUpdate)
+  }, [])
   useEffect(() => {
     setVfxRecipeManifest(null)
   }, [
@@ -994,13 +891,6 @@ function App() {
   )
   const effectiveModel = activeModel
   const activeModelName = MODEL_LABELS[effectiveModel]
-  const selectedTelemetryModel = effectiveModel
-  const highlightedTelemetryRowId =
-    TELEMETRY_ROW_BY_MODEL_ID[selectedTelemetryModel ?? activeModel] ?? null
-  const telemetryModelKey = selectedTelemetryModel ?? 'all-models'
-  const currentSessionCount = sessionCountsByModel[telemetryModelKey] ?? 0
-  const sessionMax = sessionMaxByModel[telemetryModelKey] ?? 0
-
   const refreshHealth = useCallback(async (cancelState?: { cancelled: boolean }) => {
     await fetch('/api/health')
       .then(async (response) => {
@@ -1049,8 +939,12 @@ function App() {
   useEffect(() => {
     const cancelState = { cancelled: false }
     void refreshHealth(cancelState)
-
+    const timer = window.setInterval(() => { void refreshHealth(cancelState) }, 15000)
+    const onFocus = () => { void refreshHealth(cancelState) }
+    window.addEventListener('focus', onFocus)
     return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
       cancelState.cancelled = true
     }
   }, [refreshHealth])
@@ -1073,91 +967,6 @@ function App() {
     state.activeMode,
   ])
 
-  const warmUvEngine = useEffectEvent(async () => {
-    setUvEngineStatus((previousStatus) =>
-      previousStatus.state === 'ready' || previousStatus.state === 'loading'
-        ? previousStatus
-        : {
-            message: 'Loading xatlas and the local format converter.',
-            state: 'loading',
-          },
-    )
-
-    try {
-      await primeUvEngine((step, detail) => {
-        setUvEngineStatus({
-          message: detail ?? formatUvStep(step),
-          state: 'loading',
-        })
-      })
-      setUvEngineStatus({
-        message: 'Ready. UV Lab runs entirely in this browser session.',
-        state: 'ready',
-      })
-    } catch (engineError) {
-      setUvEngineStatus({
-        message:
-          engineError instanceof Error
-            ? engineError.message
-            : 'The in-browser UV engine failed to load.',
-        state: 'error',
-      })
-    }
-  })
-
-  useEffect(() => {
-    if (!isUvLabMode || uvEngineStatus.state !== 'idle') {
-      return
-    }
-
-    void warmUvEngine()
-  }, [isUvLabMode, uvEngineStatus.state])
-
-  useEffect(() => {
-    return () => {
-      revokeUvJobArtifacts(uvJob)
-    }
-  }, [uvJob])
-
-  const registerSuccessfulApiCall = useCallback((modelName?: string | null) => {
-    const telemetryKey =
-      typeof modelName === 'string' && modelName.trim().length > 0
-        ? modelName
-        : 'all-models'
-
-    setSessionCountsByModel((previousCounts) => {
-      const nextCount = (previousCounts[telemetryKey] ?? 0) + 1
-      const now = Date.now()
-      const previousWindowState = loadTelemetryWindowState(now)
-      const nextWindowState =
-        now - previousWindowState.startedAt >= telemetryWindowDurationMs
-          ? {
-              sessionMaxByModel: {
-                [telemetryKey]: nextCount,
-              },
-              startedAt: now,
-            }
-          : {
-              ...previousWindowState,
-              sessionMaxByModel: {
-                ...previousWindowState.sessionMaxByModel,
-                [telemetryKey]: Math.max(
-                  previousWindowState.sessionMaxByModel[telemetryKey] ?? 0,
-                  nextCount,
-                ),
-              },
-            }
-
-      persistTelemetryWindowState(nextWindowState)
-      setSessionMaxByModel(nextWindowState.sessionMaxByModel)
-
-      return {
-        ...previousCounts,
-        [telemetryKey]: nextCount,
-      }
-    })
-  }, [])
-
   const updateForgeSlot = useCallback((
     slotIndex: number,
     updater: (slot: ForgeBatchSlotState) => ForgeBatchSlotState,
@@ -1166,29 +975,6 @@ function App() {
       previousSlots.map((slot, index) => (index === slotIndex ? updater(slot) : slot)),
     )
   }, [])
-
-  const handleModelSelect = useCallback((nextModel: ModelId) => {
-    if (!modeAvailableModels.includes(nextModel)) {
-      setError({
-        code: 'model_unsupported',
-        message:
-          `The selected model ${MODEL_LABELS[nextModel]} is not available for ${activeMode.label}.`,
-        title: 'Model Not Supported For This Tab',
-      })
-      return
-    }
-
-    setActiveModel(nextModel)
-    setServerModel(null)
-    setError(null)
-    setModelOverridesByMode((previousOverrides) => ({
-      ...previousOverrides,
-      [state.activeMode]: nextModel,
-    }))
-    setNotice(
-      `Model override set to ${MODEL_LABELS[nextModel]} for ${activeMode.label}.`,
-    )
-  }, [activeMode.label, modeAvailableModels, state.activeMode])
 
   const handleStyleInputChange = useCallback((nextValue: string) => {
     setStyleInputByMode((previousState) => ({
@@ -1384,9 +1170,15 @@ function App() {
     recentPrompts,
     serverModel,
     serverPrompt,
+    state,
     state.activeMode,
     state.actionAnimator.actionType,
     state.actionAnimator.customActionPrompt,
+    state.actionAnimator.fps,
+    state.actionAnimator.frameCount,
+    state.actionAnimator.keyColor,
+    state.actionAnimator.normalizedSize,
+    state.actionAnimator.pipeline,
     state.characterSheet.consistencyEnabled,
     state.characterSheet.generationMode,
     state.characterSheet.manifestPrompt,
@@ -1397,6 +1189,7 @@ function App() {
     state.prompt,
     state.textureLab.settings,
     state.textureLab.expansionTargetSize,
+    state.textureLab.sourceSeamlessMode,
     state.textureLab.seamlessMode,
     state.uvLab.atlasSize,
     state.uvLab.paddingPx,
@@ -1440,8 +1233,6 @@ function App() {
     nextNotice: string,
     options?: {
       actionAnimatorArtifacts?: ActionAnimatorRunArtifacts | null
-      telemetryModel?: string | null
-      trackTelemetry?: boolean
     },
   ) {
     const savedAt = new Date().toISOString()
@@ -1459,9 +1250,6 @@ function App() {
     setRecentPrompts(nextRecentPrompts)
     setActionAnimatorArtifacts(options?.actionAnimatorArtifacts ?? null)
 
-    if (options?.trackTelemetry) {
-      registerSuccessfulApiCall(options.telemetryModel ?? nextServerModel)
-    }
 
     if (isCharacterSheetMode) {
       setLastCharacterSheetResult(nextResults[0] ?? null)
@@ -1481,12 +1269,12 @@ function App() {
     noticeLabel,
     totalCount,
   }: {
-    baseRequest: Awaited<ReturnType<typeof buildStandardForgeRequest>>
+    baseRequest: Record<string, unknown> & { mode: ForgeMode }
     nextServerPromptFallback: string
     noticeLabel: string
     totalCount: number
   }) {
-    const maxAttempts = standardForgeClientBatchMaxAttempts
+    const maxAttempts = baseRequest.mode === 'variant-forge' ? 1 : standardForgeClientBatchMaxAttempts
     const nextRecentPrompts = buildRecentPrompts(activePromptValue, recentPrompts)
     let latestServerModel: string | null = null
     let latestServerPrompt: string | null = null
@@ -1549,7 +1337,6 @@ function App() {
             result: nextSlotResult,
             status: 'ready',
           }))
-          registerSuccessfulApiCall(payload.model ?? null)
 
           return {
             error: null,
@@ -1557,9 +1344,12 @@ function App() {
           }
         } catch (slotError) {
           const normalizedError = toForgeError(slotError)
+          const isRateLimited =
+            normalizedError.code === 'quota_exceeded' ||
+            normalizedError.code === 'rate_limit_exceeded'
           const canRetry =
             attempt < maxAttempts &&
-            (normalizedError.code === 'quota_exceeded' ||
+            (isRateLimited ||
               normalizedError.code === 'request_timeout' ||
               normalizedError.code === 'model_output_incompatible' ||
               normalizedError.code === 'batch_incomplete')
@@ -1579,7 +1369,7 @@ function App() {
           }
 
           const retryDelayMs =
-            normalizedError.code === 'quota_exceeded'
+            isRateLimited
               ? Math.min(
                   Math.max(
                     (normalizedError.retryAfterSeconds ?? 1) * 1000,
@@ -1592,14 +1382,14 @@ function App() {
           updateForgeSlot(slotIndex, (slot) => ({
             ...slot,
             detail:
-              normalizedError.code === 'quota_exceeded'
+              isRateLimited
                 ? `The active provider rate-limited this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
                 : normalizedError.code === 'model_output_incompatible'
                   ? `The active model returned no image for this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`
                   : `The active provider timed out on this slot. Retrying in about ${Math.round(retryDelayMs / 1000)}s.`,
             error: normalizedError,
             status:
-              normalizedError.code === 'quota_exceeded'
+              isRateLimited
                 ? 'rate-limited'
                 : 'retrying',
           }))
@@ -1617,11 +1407,7 @@ function App() {
       }
     }
 
-    const slotEntries = await Promise.all(
-      Array.from({ length: totalCount }, async (_, slotIndex) =>
-        runSlotGeneration(slotIndex),
-      ),
-    )
+    const slotEntries = await runForgeBatch(baseRequest.mode, totalCount, runSlotGeneration)
 
     const completedResults = slotEntries.flatMap((entry) => (entry.result ? [entry.result] : []))
     const failedEntries = slotEntries.filter((entry) => entry.error)
@@ -1683,69 +1469,8 @@ function App() {
     setForgeSlots([])
     setServerPrompt(null)
     setActionAnimatorArtifacts(null)
-    if (isUvLabMode) {
-      setUvJob(null)
-    }
 
     try {
-      if (isUvLabMode) {
-        const meshAsset = state.uvLab.mesh
-
-        if (!meshAsset) {
-          throw new Error('Attach an OBJ or FBX mesh before running UV Lab.')
-        }
-
-        const localJobId = `local-${crypto.randomUUID()}`
-        setUvJob({
-          artifacts: null,
-          error: null,
-          id: localJobId,
-          stats: null,
-          status: 'running',
-          step: 'importing',
-        })
-        setServerModel(getBrowserUvEngineId())
-        setServerPrompt('Automatic UV unwrap and packing.')
-        setNotice('Preparing the in-browser UV engine.')
-        setLastResultMode(null)
-
-        const payload = await runLocalUvJob({
-          asset: meshAsset,
-          atlasSize: state.uvLab.atlasSize,
-          onProgress: (step, detail) => {
-            setUvJob((previousJob) => ({
-              artifacts: previousJob?.artifacts ?? null,
-              error: null,
-              id: localJobId,
-              stats: previousJob?.stats ?? null,
-              status: 'running',
-              step,
-            }))
-            setStatus('loading')
-            setError(null)
-            setNotice(detail ?? formatUvStep(step))
-            setUvEngineStatus({
-              message: detail ?? formatUvStep(step),
-              state: 'loading',
-            })
-          },
-          paddingPx: state.uvLab.paddingPx,
-        })
-        setUvJob({
-          ...payload,
-          id: localJobId,
-        })
-        setStatus('success')
-        setError(null)
-        setNotice('UV unwrap completed. Atlas and mesh artifacts are ready.')
-        setLastSavedAt(new Date().toISOString())
-        setUvEngineStatus({
-          message: 'Ready. UV Lab runs entirely in this browser session.',
-          state: 'ready',
-        })
-        return
-      }
-
       if (isActionAnimatorMode) {
         const payload = await generateActionAnimator({
           modelId: activeModel,
@@ -1757,11 +1482,9 @@ function App() {
           payload.results,
           payload.model,
           payload.prompt ?? promptPreview,
-          `Action Animator extracted ${payload.artifacts.frames.length} keyed frame${payload.artifacts.frames.length === 1 ? '' : 's'} from Gemini Omni video output.`,
+          `Action Animator extracted ${payload.artifacts.frames.length} keyed frame${payload.artifacts.frames.length === 1 ? '' : 's'} from the image strip.`,
           {
             actionAnimatorArtifacts: payload.artifacts,
-            telemetryModel: payload.model,
-            trackTelemetry: true,
           },
         )
         return
@@ -1783,8 +1506,6 @@ function App() {
           activePromptValue.trim(),
           'Character sheet generated with palette extraction enabled.',
           {
-            telemetryModel: payload.model,
-            trackTelemetry: true,
           },
         )
         return
@@ -1797,33 +1518,20 @@ function App() {
           state.variantForge.familyCustomDirections,
         )
 
-        const { ok, payload } = await postForgeRequest(
-          await buildVariantForgeRequest({
+        const variantRequest = await buildVariantForgeRequest({
             activeVariantOptions,
             customDirection: activeFamilyCustomDirection,
             modelId: activeModel,
             quality: activeOpenAiImageQuality,
             state: state.variantForge,
             styleText: activeStyleInput.trim(),
-          }),
-        )
-
-        if (!ok || !payload?.images?.length) {
-          throw toForgeError(payload?.error)
-        }
-
-        finalizeForgeRun(
-          normalizeForgeApiResults(payload),
-          payload.model ?? null,
-          payload.prompt ?? promptPreview,
-          activeVariantOptions.length > 0
-            ? `Variant Forge created a ${formatVariantForgeLabel(state.variantForge.variantPreset)} variant.`
-            : `Variant Forge created a ${formatVariantForgeLabel(state.variantForge.variantFamily)} family variant with no preset toggles enabled.`,
-          {
-            telemetryModel: payload.model,
-            trackTelemetry: true,
-          },
-        )
+          })
+        await handleIncrementalForgeBatch({
+          baseRequest: { ...variantRequest, mode: 'variant-forge' },
+          nextServerPromptFallback: promptPreview,
+          noticeLabel: 'Variant Forge',
+          totalCount: state.generationCount,
+        })
         return
       }
 
@@ -1854,8 +1562,6 @@ function App() {
           payload.prompt ?? promptPreview,
           'Portrait Studio generated a five-expression contact sheet.',
           {
-            telemetryModel: payload.model,
-            trackTelemetry: true,
           },
         )
         return
@@ -1878,8 +1584,11 @@ function App() {
       }
 
       if (isVfxForgeMode) {
-        const generatedTextures = await Promise.all(
-          state.vfxForge.textureOutputs.map(async (textureKind) => {
+        setVfxRunSettings({ ...state.vfxForge, textureOutputs: [...state.vfxForge.textureOutputs] })
+        const generatedTextures = []
+        const failures: string[] = []
+        for (const textureKind of state.vfxForge.textureOutputs) {
+          try {
             const { ok, payload } = await postForgeRequest(
               await buildVfxForgeRequest({
                 modelId: activeModel,
@@ -1896,7 +1605,7 @@ function App() {
 
             const [normalizedResult] = normalizeForgeApiResults(payload)
 
-            return {
+            generatedTextures.push({
               kind: textureKind,
               model: payload.model ?? null,
               prompt: payload.prompt ?? promptPreview,
@@ -1908,9 +1617,11 @@ function App() {
                     ? `${getVfxTextureLabel(textureKind)} texture. ${normalizedResult.text}`
                     : `${getVfxTextureLabel(textureKind)} texture generated for ${activeVfxEffectLabel}.`,
               },
-            }
-          }),
-        )
+            })
+          } catch (error) { failures.push(`${getVfxTextureLabel(textureKind)}: ${toForgeError(error).message}`) }
+        }
+        if (!generatedTextures.length) throw new Error(failures.join(' '))
+
         const nextVfxTextureResults = Object.fromEntries(
           generatedTextures.map((entry) => [entry.kind, entry.result]),
         ) as VfxTextureResultMap
@@ -1923,10 +1634,9 @@ function App() {
           generatedTextures[0]?.prompt ?? promptPreview,
           `VFX Forge generated ${generatedTextures.length} texture output${generatedTextures.length === 1 ? '' : 's'} for ${activeVfxEffectLabel}.`,
           {
-            telemetryModel: generatedTextures[0]?.model ?? null,
-            trackTelemetry: true,
           },
         )
+        if (failures.length) setError({ title: 'Some VFX textures need retrying', message: failures.join(' ') + ' Successful outputs are preserved and can be exported.' })
         return
       }
 
@@ -1960,34 +1670,87 @@ function App() {
         finalizedResults,
         payload.model ?? null,
         activePromptValue.trim(),
-        `Forge pass completed with ${payload.images.length} candidate outputs.`,
+        payload.warning ?? `Forge pass completed with ${payload.images.length} candidate outputs.`,
         {
-          telemetryModel: payload.model,
-          trackTelemetry: true,
         },
       )
     } catch (requestError) {
       setStatus('error')
       setError(toForgeError(requestError))
-      if (isUvLabMode) {
-        const nextError = toForgeError(requestError, 'UV Job Failed')
-        setUvJob((previousJob) =>
-          previousJob
-            ? {
-                ...previousJob,
-                error: {
-                  code: nextError.code,
-                  message: nextError.message,
-                },
-                status: 'failed',
-              }
-            : null,
-        )
-        setUvEngineStatus(() => ({
-          message: nextError.message,
-          state: 'error',
-        }))
+    } finally {
+      forgeRunInFlightRef.current = false
+    }
+  }
+
+  async function selectTextureCandidate(result: ForgeResult, allowDuringGeneration = false) {
+    if (textureRunner.busy || textureRunner.pending || (forgeRunInFlightRef.current && !allowDuringGeneration)) return
+    const version = ++textureSelectionVersionRef.current
+    const file = await dataUrlToFile(result.dataUrl, 'generated-texture.png')
+    if (version !== textureSelectionVersionRef.current || (forgeRunInFlightRef.current && !allowDuringGeneration)) return
+    dispatch({ type: 'set-texture-expansion-source', asset: toReferenceAsset(file) })
+    setSelectedTextureCandidate(result.id)
+    setPbrSource(result)
+    setPbrSourceRevision(previous => previous + 1)
+  }
+
+  function deleteTextureCandidate(candidate: ForgeResult) {
+    if (forgeRunInFlightRef.current || textureRunner.busy || textureRunner.pending) return
+    textureSelectionVersionRef.current += 1
+    setTextureSourceSlots(slots => slots?.filter(slot => slot.result?.id !== candidate.id) ?? null)
+    if (selectedTextureCandidate === candidate.id) {
+      setSelectedTextureCandidate(null)
+      dispatch({ type: 'set-texture-expansion-source', asset: null })
+    }
+    if (pbrSource?.id === candidate.id) {
+      setPbrSource(undefined)
+    }
+    setNotice(null)
+  }
+
+  async function handleGenerateTexture() {
+    if (forgeRunInFlightRef.current || textureRunner.busy || textureRunner.pending || !state.prompt.trim()) return
+    forgeRunInFlightRef.current = true
+    const totalCount = textureSourceCount
+    const runId = crypto.randomUUID()
+    const selectionVersion = textureSelectionVersionRef.current
+    const request = {
+      mode: 'texture-lab', modelId: activeModel, quality: activeOpenAiImageQuality,
+      prompt: state.prompt.trim(), workflow: 'generate', textureSize: 1024,
+      seamlessMode: state.textureLab.sourceSeamlessMode, generationCount: 1, references: [],
+    }
+    setStatus('loading')
+    setError(null)
+    setNotice(null)
+    setTextureSourceSlots(buildForgeBatchSlots(totalCount))
+    const updateSlot = (index: number, changes: Partial<ForgeBatchSlotState>) =>
+      setTextureSourceSlots(slots => slots?.map((slot, slotIndex) => slotIndex === index ? { ...slot, ...changes } : slot) ?? null)
+    try {
+      const entries = await runForgeBatch('texture-lab', totalCount, async index => {
+        updateSlot(index, { status: 'generating', detail: 'Generating source texture.' })
+        try {
+          const { ok, payload } = await postForgeRequest(request, { timeoutMs: standardForgeClientBatchRequestTimeoutMs })
+          if (!ok || !payload?.images?.length) throw toForgeError(payload?.error)
+          const normalized = normalizeForgeApiResults(payload)[0]
+          const result = { ...normalized, id: `${runId}-source-${index + 1}-${normalized.id}` }
+          updateSlot(index, { status: 'ready', result, detail: 'Ready.' })
+          return { result, error: null }
+        } catch (requestError) {
+          const error = toForgeError(requestError)
+          updateSlot(index, { status: 'failed', error, detail: error.message })
+          return { result: null, error }
+        }
+      })
+      const completed = entries.flatMap(entry => entry.result ? [entry.result] : [])
+      if (completed.length === 0) throw entries[0]?.error ?? new Error('No source textures completed.')
+      // Only the first source run auto-selects. Subsequent runs retain the user's approved source.
+      if (!state.textureLab.expansionSource && selectionVersion === textureSelectionVersionRef.current) {
+        await selectTextureCandidate(completed[0], true)
       }
+      setStatus('success')
+      setNotice(`${completed.length} of ${totalCount} source textures ready. Choose a candidate for expansion and PBR.`)
+    } catch (requestError) {
+      setStatus('error')
+      setError(toForgeError(requestError))
     } finally {
       forgeRunInFlightRef.current = false
     }
@@ -2012,7 +1775,7 @@ function App() {
         ? 'png'
         : 'jpg'
     if (isVfxForgeMode && vfxTextureKind) {
-      const effectSlug = slugifyFileSegment(state.vfxForge.effectLabel, 'effect')
+      const effectSlug = slugifyFileSegment(vfxRunSettings?.effectLabel ?? state.vfxForge.effectLabel, 'effect')
       downloadResult(
         result,
         `kizer-forge-vfx-${effectSlug}-${String(vfxTextureKind)}.${extension}`,
@@ -2041,52 +1804,21 @@ function App() {
     state.actionAnimator.customActionPrompt,
     state.vfxForge.effectLabel,
     vfxTextureResults,
+    vfxRunSettings,
   ])
 
-  const handleDownloadActionAnimatorFrames = useCallback(() => {
-    if (!actionAnimatorArtifacts || actionAnimatorArtifacts.frames.length === 0) {
-      return
-    }
-
-    const actionSlug =
-      state.actionAnimator.actionType === 'custom'
-        ? slugifyFileSegment(state.actionAnimator.customActionPrompt, 'custom')
-        : state.actionAnimator.actionType
-
-    actionAnimatorArtifacts.frames.forEach((frame, frameIndex) => {
-      window.setTimeout(() => {
-        downloadDataUrl(
-          frame.dataUrl,
-          `kizer-forge-action-animator-${actionSlug}-frame-${String(frameIndex + 1).padStart(2, '0')}.png`,
-        )
-      }, frameIndex * 120)
-    })
-
-    setNotice(`Queued ${actionAnimatorArtifacts.frames.length} Action Animator frame downloads.`)
-  }, [
-    actionAnimatorArtifacts,
-    state.actionAnimator.actionType,
-    state.actionAnimator.customActionPrompt,
-  ])
-
-  const handleDownloadActionAnimatorVideo = useCallback(async () => {
-    if (!actionAnimatorArtifacts?.video) {
-      return
-    }
-
-    const actionSlug =
-      state.actionAnimator.actionType === 'custom'
-        ? slugifyFileSegment(state.actionAnimator.customActionPrompt, 'custom')
-        : state.actionAnimator.actionType
-    const videoBlob = await dataUrlToBlob(actionAnimatorArtifacts.video.dataUrl)
-
-    downloadBlob(videoBlob, `kizer-forge-action-animator-${actionSlug}.mp4`)
-    setNotice('Downloaded the Action Animator source video.')
-  }, [
-    actionAnimatorArtifacts,
-    state.actionAnimator.actionType,
-    state.actionAnimator.customActionPrompt,
-  ])
+  const handleDownloadActionAnimatorFrames = useCallback(async () => {
+    if (!actionAnimatorArtifacts?.frames.length) return
+    try {
+      const { default: JSZip } = await import('jszip')
+      const zip = new JSZip()
+      for (const [index, frame] of actionAnimatorArtifacts.frames.entries()) zip.file(`frames/frame-${String(index + 1).padStart(2, '0')}.png`, await dataUrlToBlob(frame.dataUrl))
+      zip.file('atlas.png', await dataUrlToBlob(actionAnimatorArtifacts.spriteSheet.dataUrl))
+      zip.file('animation.json', JSON.stringify(actionAnimatorArtifacts.metadata, null, 2))
+      downloadBlob(await zip.generateAsync({ type: 'blob' }), 'foundry-animation-frames.zip')
+      setNotice(`Downloaded ${actionAnimatorArtifacts.frames.length} ordered frames with animation metadata in one ZIP.`)
+    } catch (error) { setError(toForgeError(error, 'Frame export failed')) }
+  }, [actionAnimatorArtifacts])
 
   const handleBuildVfxRecipe = useCallback(async () => {
     if (!canBuildVfxRecipe || isBuildingVfxRecipe) {
@@ -2099,7 +1831,7 @@ function App() {
     try {
       const { ok, payload } = await postVfxRecipeRequest(
         await buildVfxRecipeRequest({
-          recipeState: state.vfxForge,
+          recipeState: { ...(vfxRunSettings ?? state.vfxForge), textureOutputs: Object.keys(vfxTextureResults) as VfxTextureKind[] },
           textures: collectVfxTexturePayloads(vfxTextureResults),
         }),
       )
@@ -2117,7 +1849,7 @@ function App() {
     } finally {
       setIsBuildingVfxRecipe(false)
     }
-  }, [canBuildVfxRecipe, isBuildingVfxRecipe, state.vfxForge, vfxTextureResults])
+  }, [canBuildVfxRecipe, isBuildingVfxRecipe, state.vfxForge, vfxTextureResults, vfxRunSettings])
 
   const handleDownloadVfxBundle = useCallback(async () => {
     if (!canBuildVfxRecipe || isDownloadingVfxBundle) {
@@ -2129,7 +1861,7 @@ function App() {
 
     try {
       const requestBody = await buildVfxRecipeRequest({
-        recipeState: state.vfxForge,
+        recipeState: { ...(vfxRunSettings ?? state.vfxForge), textureOutputs: Object.keys(vfxTextureResults) as VfxTextureKind[] },
         textures: collectVfxTexturePayloads(vfxTextureResults),
       })
       const { blob, ok, payload } = await postVfxExportRequest(requestBody)
@@ -2140,7 +1872,7 @@ function App() {
 
       downloadBlob(
         blob,
-        `kizer-forge-vfx-${slugifyFileSegment(state.vfxForge.effectLabel, 'effect')}-bundle.zip`,
+        `kizer-forge-vfx-${slugifyFileSegment(vfxRunSettings?.effectLabel ?? state.vfxForge.effectLabel, 'effect')}-bundle.zip`,
       )
       setNotice('Downloaded the Unity recipe export bundle.')
     } catch (bundleError) {
@@ -2148,7 +1880,7 @@ function App() {
     } finally {
       setIsDownloadingVfxBundle(false)
     }
-  }, [canBuildVfxRecipe, isDownloadingVfxBundle, state.vfxForge, vfxTextureResults])
+  }, [canBuildVfxRecipe, isDownloadingVfxBundle, state.vfxForge, vfxTextureResults, vfxRunSettings])
 
   const handleDownloadPortraitFaces = useCallback(async (
     result: ForgeResult,
@@ -2183,7 +1915,7 @@ function App() {
       const frameDataUrls = await sliceSpriteSheetFramesByContent(
         result.dataUrl,
         {
-          expectedCount: state.vfxForge.frameCount,
+          expectedCount: vfxRunSettings?.frameCount ?? state.vfxForge.frameCount,
         },
       )
       const effectSlug = slugifyFileSegment(
@@ -2191,20 +1923,16 @@ function App() {
         'effect',
       )
 
-      frameDataUrls.forEach((dataUrl, frameIndex) => {
-        window.setTimeout(() => {
-          downloadDataUrl(
-            dataUrl,
-            `kizer-forge-vfx-forge-${index + 1}-${effectSlug}-frame-${String(frameIndex + 1).padStart(2, '0')}.png`,
-          )
-        }, frameIndex * 120)
-      })
-
-      setNotice(`Queued ${frameDataUrls.length} VFX frame downloads.`)
+      const { default: JSZip } = await import('jszip')
+      const zip = new JSZip()
+      for (const [frameIndex, dataUrl] of frameDataUrls.entries()) zip.file(`frame-${String(frameIndex + 1).padStart(2, '0')}.png`, await dataUrlToBlob(dataUrl))
+      zip.file('effect.json', JSON.stringify(vfxRunSettings ?? state.vfxForge, null, 2))
+      downloadBlob(await zip.generateAsync({ type: 'blob' }), `foundry-vfx-${index + 1}-${effectSlug}-frames.zip`)
+      setNotice(`Downloaded ${frameDataUrls.length} ordered VFX frames in one ZIP.`)
     } catch (downloadError) {
       setError(toForgeError(downloadError, 'VFX Frame Download Failed'))
     }
-  }, [state.vfxForge.effectLabel, state.vfxForge.frameCount])
+  }, [state.vfxForge, vfxRunSettings])
 
   async function hydrateLatestCharacterSheetInto(
     action:
@@ -2279,25 +2007,21 @@ function App() {
     Record<LayoutPanelItemId, LayoutItemDescriptor<LayoutPanelItemId>>
   > = {}
 
-  if (!isUvLabMode) {
-    controlPanelItems['model-selector'] = {
+  {
+    controlPanelItems['image-quality'] = {
       content: (
-        <ModelSelector
-          activeModel={activeModel}
-          availableModels={modeAvailableModels}
-          mode={state.activeMode}
+        <OutputQuality
           openAiImageQuality={activeOpenAiImageQuality}
           onOpenAiImageQualityChange={handleOpenAiImageQualityChange}
-          onSelect={handleModelSelect}
         />
       ),
-      id: 'model-selector',
-      label: panelItemLabels['model-selector'],
-      testId: 'layout-item-model-selector',
+      id: 'image-quality',
+      label: panelItemLabels['image-quality'],
+      testId: 'layout-item-image-quality',
     }
   }
 
-  if (!(isActionAnimatorMode || isPortraitStudioMode || isUvLabMode || isVariantForgeMode || isVfxForgeMode)) {
+  if (!(isActionAnimatorMode || isPortraitStudioMode || isVariantForgeMode || isVfxForgeMode)) {
     controlPanelItems['style-input'] = {
       content: (
         <StyleInputPanel
@@ -2357,6 +2081,7 @@ function App() {
     controlPanelItems['action-animator-panel'] = {
       content: (
         <ActionAnimatorPanel
+          key={actionAnimatorArtifacts?.spriteSheet.id ?? 'empty'}
           actionType={state.actionAnimator.actionType}
           asset={state.actionAnimator.characterImage}
           artifacts={actionAnimatorArtifacts}
@@ -2370,7 +2095,6 @@ function App() {
           normalizedSize={state.actionAnimator.normalizedSize}
           pipeline={state.actionAnimator.pipeline}
           onDownloadFrames={handleDownloadActionAnimatorFrames}
-          onDownloadVideo={() => void handleDownloadActionAnimatorVideo()}
           onActionTypeChange={(actionType) =>
             dispatch({ type: 'set-action-animator-action', actionType })
           }
@@ -2401,9 +2125,6 @@ function App() {
           onNormalizedSizeChange={(size) =>
             dispatch({ type: 'set-action-animator-normalized-size', size })
           }
-          onPipelineChange={(pipeline) =>
-            dispatch({ type: 'set-action-animator-pipeline', pipeline })
-          }
           onUseLatestCharacterSheet={() =>
             void hydrateLatestCharacterSheetInto({
               type: 'set-action-animator-image',
@@ -2416,6 +2137,10 @@ function App() {
       testId: 'layout-item-action-animator-panel',
     }
   } else if (isVariantForgeMode) {
+    controlPanelItems['batch-panel'] = {
+      content: <BatchPanel generationCount={state.generationCount} disabled={isForging} onSelect={count => dispatch({ type: 'set-generation-count', count })} />,
+      id: 'batch-panel', label: panelItemLabels['batch-panel'], testId: 'layout-item-batch-panel',
+    }
     controlPanelItems['variant-forge-panel'] = {
       content: (
         <VariantForgePanel
@@ -2531,40 +2256,6 @@ function App() {
       label: panelItemLabels['portrait-direction'],
       testId: 'layout-item-portrait-direction',
     }
-  } else if (isUvLabMode) {
-    controlPanelItems['uv-lab-panel'] = {
-      content: (
-        <UvLabPanel
-          asset={state.uvLab.mesh}
-          atlasSize={state.uvLab.atlasSize}
-          errorMessage={uvUploadError}
-          latestJob={uvJob}
-          paddingPx={state.uvLab.paddingPx}
-          onAtlasSizeChange={(size) =>
-            dispatch({ type: 'set-uv-lab-atlas-size', size })
-          }
-          onFileSelect={(asset) => {
-            dispatch({ type: 'set-uv-lab-mesh', asset })
-            setUvJob(null)
-            setUvUploadError(null)
-          }}
-          onInvalidSelection={(message) => {
-            setUvUploadError(message)
-            setError({
-              message,
-              title: 'Mesh Upload Rejected',
-            })
-          }}
-          onPaddingChange={(paddingPx) =>
-            dispatch({ type: 'set-uv-lab-padding-px', paddingPx })
-          }
-          uvEngineStatus={uvEngineStatus}
-        />
-      ),
-      id: 'uv-lab-panel',
-      label: panelItemLabels['uv-lab-panel'],
-      testId: 'layout-item-uv-lab-panel',
-    }
   } else if (isVfxForgeMode) {
     controlPanelItems['vfx-forge-panel'] = {
       content: (
@@ -2631,12 +2322,37 @@ function App() {
     if (isTextureLabMode) {
       controlPanelItems['texture-workflow'] = {
         content: (
+          <div className="space-y-4">
+            <section className="rounded-3xl border border-white/10 bg-black/20 p-4">
+              <h3 className="font-medium">Generate a source texture</h3>
+              <label className="mt-3 block text-sm">Texture description
+                <textarea aria-label="Texture description" className="mt-2 block w-full rounded-xl bg-zinc-900 p-3" value={state.prompt} onChange={event => dispatch({ type: 'set-prompt', prompt: event.target.value })} placeholder="Weathered basalt, flat lighting, no perspective" />
+              </label>
+              <label className="mt-3 flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={state.textureLab.sourceSeamlessMode}
+                  disabled={isForging || textureRunner.busy || textureRunner.pending}
+                  onChange={event => dispatch({ type: 'set-texture-source-seamless-mode', enabled: event.target.checked })} />
+                Seamless Mode for generated sources
+              </label>
+              <div className="mt-3" data-testid="texture-source-count"><BatchPanel generationCount={textureSourceCount} disabled={isForging || textureRunner.busy || textureRunner.pending} onSelect={setTextureSourceCount} label="Source texture output slots" /></div>
+              <button className="mt-3 rounded-xl border border-sky-400/40 px-3 py-2 disabled:opacity-40" aria-describedby="texture-generation-help" disabled={isForging || textureRunner.busy || textureRunner.pending || !state.prompt.trim() || serviceHealth?.generationConfigured !== true} onClick={() => void handleGenerateTexture()}>Generate source texture</button>
+              <p id="texture-generation-help" data-testid="texture-generation-help" role="status" className="mt-2 text-xs text-zinc-400">
+                {serviceHealth?.generationConfigured !== true
+                  ? codexStatusMessage(serviceHealth)
+                  : isForging || textureRunner.busy
+                    ? 'Wait for the current operation to finish before generating another texture.'
+                    : !state.prompt.trim()
+                      ? 'Enter a texture description above to enable generation. You can also import an existing texture.'
+                      : 'Ready to generate through the local Codex app bridge. Uses your Codex subscription usage and limits.'}
+              </p>
+              <button type="button" className="mt-2 text-xs text-sky-300 underline" onClick={() => void refreshHealth()}>Recheck Codex status</button>
+            </section>
           <TextureLabControls
             settings={state.textureLab.settings}
             onSettingsChange={(settings) => dispatch({ type: 'set-texture-settings', settings })}
             source={state.textureLab.expansionSource}
             modelId={activeModel}
-            disabled={textureRunner.busy}
+            disabled={textureRunner.busy || isForging}
             expansionTargetSize={state.textureLab.expansionTargetSize}
             onSeamlessModeChange={(enabled) =>
               dispatch({
@@ -2649,6 +2365,7 @@ function App() {
             }
             seamlessMode={state.textureLab.seamlessMode}
           />
+          </div>
         ),
         id: 'texture-workflow',
         label: panelItemLabels['texture-workflow'],
@@ -2680,13 +2397,16 @@ function App() {
     if (isTextureExpansionMode) {
       controlPanelItems['texture-expansion'] = {
         content: (
-          <TextureExpansionPanel
+          <fieldset disabled={isForging || textureRunner.busy || textureRunner.pending}><TextureExpansionPanel
             asset={state.textureLab.expansionSource}
             targetSize={state.textureLab.expansionTargetSize}
-            onFileSelect={(asset) =>
+            onFileSelect={(asset) => {
+              if (forgeRunInFlightRef.current || textureRunner.busy || textureRunner.pending) return
+              textureSelectionVersionRef.current += 1
+              setSelectedTextureCandidate(null)
               dispatch({ type: 'set-texture-expansion-source', asset })
-            }
-          />
+            }}
+          /></fieldset>
         ),
         id: 'texture-expansion',
         label: panelItemLabels['texture-expansion'],
@@ -2796,44 +2516,7 @@ function App() {
     },
   }
 
-  if (isUvLabMode) {
-    workspacePanelItems['uv-brief'] = {
-      content: (
-        <UvLabBrief
-          activeModelName={activeModelName}
-          asset={state.uvLab.mesh}
-          atlasSize={state.uvLab.atlasSize}
-          job={uvJob}
-          lastSavedAt={lastSavedAt}
-          paddingPx={state.uvLab.paddingPx}
-          uvEngineStatus={uvEngineStatus}
-        />
-      ),
-      id: 'uv-brief',
-      label: panelItemLabels['uv-brief'],
-      testId: 'layout-item-uv-brief',
-    }
-    workspacePanelItems['uv-workspace'] = {
-      content: (
-        <Suspense
-          fallback={
-            <div className="rounded-[30px] border border-white/10 bg-black/20 px-5 py-12 text-center text-sm text-zinc-300">
-              Loading UV workspace...
-            </div>
-          }
-        >
-          <UvLabWorkspace
-            activeModelName={activeModelName}
-            job={uvJob}
-            sourceAsset={state.uvLab.mesh}
-          />
-        </Suspense>
-      ),
-      id: 'uv-workspace',
-      label: panelItemLabels['uv-workspace'],
-      testId: 'layout-item-uv-workspace',
-    }
-  } else {
+  {
     workspacePanelItems['forge-brief'] = {
       content: (
         <ForgeBrief
@@ -2865,7 +2548,37 @@ function App() {
     }
     workspacePanelItems['result-grid'] = {
       content: isTextureLabMode ? (
-        <TextureLabWorkspace results={results.filter(result => result.texture)} runner={textureRunner} onDownload={handleDownload} />
+        <div className="space-y-5">
+          <section aria-label="Source texture output slots" className="space-y-3">
+            <h3 className="font-medium">Source texture output slots</h3>
+            <p className="text-xs text-zinc-400">Choose one source for expansion and PBR. Expansion variants below are separate.</p>
+            <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
+              {(textureSourceSlots ?? buildForgeBatchSlots(textureSourceCount)).map((slot, index) => {
+                const candidate = slot.result
+                if (!candidate) return <PlaceholderCard key={`source-slot-${index}`} index={index} mode={activeMode} detail={slot.detail ?? 'Ready to generate a source texture.'} progressTone={getForgeSlotProgressTone(slot.status)} state={slot.status === 'generating' ? 'loading' : 'idle'} statusLabel={getForgeSlotStatusLabel(slot.status)} title={slot.status === 'failed' ? 'Source texture slot needs attention' : 'Source texture output slot'} />
+                return <article key={candidate.id} className="rounded-2xl border border-white/10 p-4">
+                <h4>Source candidate {index + 1}</h4>
+                <img className="my-3 max-h-80 rounded-xl object-contain" src={candidate.dataUrl} alt={index === 0 ? 'Generated source texture' : `Generated source texture ${index + 1}`} />
+                <button type="button" aria-pressed={selectedTextureCandidate === candidate.id} disabled={isForging || textureRunner.busy || textureRunner.pending} className="rounded-xl border border-sky-400/40 px-3 py-2 disabled:opacity-40" onClick={() => void selectTextureCandidate(candidate).catch(error => setError(toForgeError(error)))}>{selectedTextureCandidate === candidate.id ? 'Selected source for expansion and PBR' : 'Use source for expansion and PBR'}</button>
+                <button type="button" className="mt-2 rounded-xl border border-white/20 px-3 py-2" onClick={() => handleDownload(candidate, index)}>Download source {index + 1}</button>
+                <button type="button" disabled={isForging || textureRunner.busy || textureRunner.pending} className="mt-2 rounded-xl border border-rose-400/30 px-3 py-2 text-rose-200 disabled:opacity-40" onClick={() => deleteTextureCandidate(candidate)}>Delete source {index + 1}</button>
+              </article>
+              })}
+            </div>
+          </section>
+          <TextureLabWorkspace
+            results={results.filter(result => result.texture)}
+            runner={textureRunner}
+            onDownload={handleDownload}
+            onUseForPbr={(result) => {
+              setPbrSource(result)
+              setPbrSourceRevision(previous => previous + 1)
+            }}
+          />
+          <Suspense fallback={<p>Loading material tools…</p>}>
+            <PbrMaterialWorkbench source={pbrSource?.dataUrl} sourceRevision={pbrSourceRevision} materialName="Foundry material" />
+          </Suspense>
+        </div>
       ) : (
         <div
           className={
@@ -3010,12 +2723,9 @@ function App() {
         <div className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.028),rgba(255,255,255,0.012))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-5">
           <HeaderSummary
             activeMode={activeMode}
-            currentSessionCount={currentSessionCount}
             generationCount={activeGenerationCount}
-            highlightedTelemetryRowId={highlightedTelemetryRowId}
             inputLabel={headerInputLabel}
             promptLoaded={isReadyForApi}
-            sessionMax={sessionMax}
           />
         </div>
       ),
@@ -3035,9 +2745,14 @@ function App() {
                 Reorder your workflows globally and drag this strip anywhere in the shell.
               </p>
             </div>
-            <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[10px] uppercase tracking-[0.28em] text-zinc-300">
-              Global Order
-            </div>
+            <button
+              type="button"
+              aria-haspopup="dialog"
+              className="inline-flex items-center gap-2 rounded-xl border border-sky-300/25 bg-sky-300/8 px-3 py-2 text-sm font-medium text-sky-100 transition hover:bg-sky-300/15"
+              onClick={() => setLibraryOpen(true)}
+            >
+              <Images aria-hidden="true" className="size-4" /> Image Library
+            </button>
           </div>
 
           <DndContext
@@ -3149,7 +2864,7 @@ function App() {
             </div>
           </div>
 
-          {!isUvLabMode && !selectedModelSupported ? (
+          {!selectedModelSupported ? (
             <div className="mt-6 rounded-[20px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
               {MODEL_LABELS[activeModel]} is not supported in {activeMode.label}.
               Choose one of the available models to continue.
@@ -3222,7 +2937,7 @@ function App() {
           <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
             <div>
               <p className="font-mono text-[11px] uppercase tracking-[0.34em] text-zinc-500">
-                {isUvLabMode ? 'UV Workspace' : 'Result Grid'}
+                Result Grid
               </p>
               <h2 className="mt-1 text-xl font-semibold text-white">
                 {resultGridTitle}
@@ -3230,11 +2945,7 @@ function App() {
             </div>
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-sm text-zinc-300">
               <ImagePlus className="size-4" strokeWidth={1.8} />
-              {isUvLabMode
-                ? activeModelName
-                  ? `${activeModelName} worker pipeline`
-                  : 'Ready for local unwrap execution'
-                : activeModelName
+              {activeModelName
                   ? `${activeModelName} response stream`
                   : 'Ready for model execution'}
             </div>
@@ -3244,12 +2955,12 @@ function App() {
             <ErrorPanel
               error={error}
               onUseMock={
-                !isUvLabMode && error.code === 'quota_exceeded'
+                error.code === 'quota_exceeded'
                   ? handleMockForge
                   : undefined
               }
               onRetry={isReadyForApi && !isForging ? () => void handleForge() : undefined}
-              showDocsLink={!isUvLabMode}
+              showDocsLink
             />
           ) : null}
 
@@ -3329,6 +3040,12 @@ function App() {
       </div>
 
       <main className="relative mx-auto flex min-h-screen max-w-[2160px] flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
+        {librarySaveFailed && (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+            <p role="alert">Some generated images could not be saved to the Image Library. Download those outputs from the result grid to keep them.</p>
+            <button type="button" className="rounded-lg border border-amber-400/30 px-3 py-1" onClick={() => setLibrarySaveFailed(false)}>Dismiss</button>
+          </div>
+        )}
         <div className="flex flex-1 flex-col overflow-hidden rounded-[34px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.015))] shadow-[0_40px_140px_rgba(0,0,0,0.55)] backdrop-blur-xl">
           <DndContext
             collisionDetection={closestCenter}
@@ -3437,831 +3154,10 @@ function App() {
           </DndContext>
         </div>
       </main>
+      {libraryOpen && <ImageLibrary initialMode={state.activeMode} modes={orderedModeTabs} onClose={() => setLibraryOpen(false)} />}
     </div>
   )
 
-  /*
-  return (
-    <div className="min-h-screen bg-[var(--surface-0)] text-zinc-100">
-      <div className="pointer-events-none fixed inset-0 overflow-hidden">
-        <div className="absolute left-[-10%] top-[-12%] size-[36rem] rounded-full bg-sky-500/8 blur-[140px]" />
-        <div className="absolute bottom-[-18%] right-[-8%] size-[34rem] rounded-full bg-cyan-400/6 blur-[160px]" />
-      </div>
-
-      <main className="relative mx-auto flex min-h-screen max-w-[2160px] flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
-        <div className="flex flex-1 flex-col overflow-hidden rounded-[34px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.015))] shadow-[0_40px_140px_rgba(0,0,0,0.55)] backdrop-blur-xl">
-          <header className="border-b border-white/10 px-5 py-5 sm:px-6 lg:px-8">
-            <div className="flex flex-col gap-6">
-              <HeaderSummary
-                activeMode={activeMode}
-                currentSessionCount={currentSessionCount}
-                generationCount={activeGenerationCount}
-                highlightedTelemetryRowId={highlightedTelemetryRowId}
-                inputLabel={headerInputLabel}
-                promptLoaded={isReadyForApi}
-                sessionMax={sessionMax}
-              />
-              <nav className="overflow-x-auto pb-1">
-                <div className="flex min-w-max gap-3">
-                  {(Object.entries(modeDefinitions) as [ForgeMode, ModeDefinition][]).map(
-                    ([modeKey, mode]) => {
-                      const TabIcon = mode.icon
-                      const isActive = state.activeMode === modeKey
-
-                      return (
-                        <button
-                          key={modeKey}
-                          type="button"
-                          onClick={() =>
-                            startTransition(() => {
-                              dispatch({ type: 'set-mode', mode: modeKey })
-                            })
-                          }
-                          className={`inline-flex min-w-[11rem] shrink-0 items-center gap-3 rounded-full border px-4 py-3 text-left transition duration-200 xl:min-w-[11.75rem] ${
-                            isActive
-                              ? 'border-sky-300/35 bg-sky-400/12 text-white shadow-[0_10px_30px_rgba(56,189,248,0.14)]'
-                              : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:border-white/20 hover:bg-white/[0.055] hover:text-zinc-200'
-                          }`}
-                        >
-                          <span
-                            className={`rounded-full border p-2 ${
-                              isActive
-                                ? 'border-sky-300/30 bg-sky-300/12 text-sky-200'
-                                : 'border-white/10 bg-black/20 text-zinc-400'
-                            }`}
-                          >
-                            <TabIcon className="size-4" strokeWidth={1.8} />
-                          </span>
-                          <span>
-                            <span className="block text-sm font-medium">{mode.label}</span>
-                            <span className="block font-mono text-[10px] uppercase tracking-[0.28em] opacity-70">
-                              {mode.eyebrow}
-                            </span>
-                          </span>
-                        </button>
-                      )
-                    },
-                  )}
-                </div>
-              </nav>
-            </div>
-          </header>
-
-          <div className="grid flex-1 items-start gap-5 p-4 xl:grid-cols-[minmax(540px,0.88fr)_minmax(0,1.22fr)] 2xl:grid-cols-[minmax(620px,0.92fr)_minmax(0,1.28fr)] lg:p-6">
-            <aside className="rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-6">
-              <div className="flex items-center gap-3">
-                <div className="rounded-[18px] border border-white/10 bg-black/20 p-3 text-zinc-200">
-                  <SlidersHorizontal className="size-5" strokeWidth={1.7} />
-                </div>
-                <div>
-                  <p className="font-mono text-[11px] uppercase tracking-[0.34em] text-zinc-500">
-                    Control Panel
-                  </p>
-                  <h2 className="mt-1 text-lg font-semibold text-white">
-                    {controlPanelTitle}
-                  </h2>
-                </div>
-              </div>
-
-              <div className={controlPanelLayoutClassName}>
-                {!isUvLabMode ? (
-                  <div className={controlPanelFullSpanClassName}>
-                      <ModelSelector
-                        activeModel={activeModel}
-                        availableModels={modeAvailableModels}
-                        mode={state.activeMode}
-                        openAiImageQuality={activeOpenAiImageQuality}
-                        onOpenAiImageQualityChange={handleOpenAiImageQualityChange}
-                        onSelect={handleModelSelect}
-                      />
-                  </div>
-                ) : null}
-
-                {!(isActionAnimatorMode ||
-                  isPortraitStudioMode ||
-                  isUvLabMode ||
-                  isVariantForgeMode ||
-                  isVfxForgeMode) ? (
-                  <StyleInputPanel
-                    value={activeStyleInput}
-                    onChange={handleStyleInputChange}
-                  />
-                ) : null}
-
-                {!isUvLabMode && !selectedModelSupported ? (
-                  <div className={controlPanelFullSpanClassName}>
-                    <div className="rounded-[20px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
-                      {MODEL_LABELS[activeModel]} is not supported in {activeMode.label}.
-                      Choose one of the available models to continue.
-                    </div>
-                  </div>
-                ) : null}
-
-                {isCharacterSheetMode ? (
-                  <div className={controlPanelFullSpanClassName}>
-                    <CharacterSheetPanel
-                      generationMode={state.characterSheet.generationMode}
-                      manifestPrompt={state.characterSheet.manifestPrompt}
-                      parentId={state.characterSheet.parentId}
-                      recentPrompts={recentPrompts}
-                      referencePrompt={state.characterSheet.referencePrompt}
-                      references={state.characterSheet.references}
-                      consistencyEnabled={state.characterSheet.consistencyEnabled}
-                      onConsistencyChange={(enabled) =>
-                        dispatch({
-                          type: 'set-character-sheet-consistency',
-                          enabled,
-                        })
-                      }
-                      onGenerationModeChange={(mode) =>
-                        dispatch({ type: 'set-character-sheet-mode', mode })
-                      }
-                      onManifestChange={(prompt) =>
-                        dispatch({ type: 'set-character-sheet-manifest', prompt })
-                      }
-                      onReferenceChange={(slot, asset) =>
-                        dispatch({
-                          type: 'set-character-sheet-reference',
-                          slot,
-                          asset,
-                        })
-                      }
-                      onReferencePromptChange={(prompt) =>
-                        dispatch({
-                          type: 'set-character-sheet-reference-prompt',
-                          prompt,
-                        })
-                      }
-                    />
-                  </div>
-                ) : isActionAnimatorMode ? (
-                  <div className={controlPanelFullSpanClassName}>
-                  <ActionAnimatorPanel
-                    actionType={state.actionAnimator.actionType}
-                    asset={state.actionAnimator.characterImage}
-                    artifacts={actionAnimatorArtifacts}
-                    canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
-                    customActionPrompt={state.actionAnimator.customActionPrompt}
-                    fps={state.actionAnimator.fps}
-                    firstFrameGuide={state.actionAnimator.firstFrameGuide}
-                    frameCount={state.actionAnimator.frameCount}
-                    keyColor={state.actionAnimator.keyColor}
-                    lastFrameGuide={state.actionAnimator.lastFrameGuide}
-                    normalizedSize={state.actionAnimator.normalizedSize}
-                    pipeline={state.actionAnimator.pipeline}
-                    onDownloadFrames={handleDownloadActionAnimatorFrames}
-                    onDownloadVideo={() => void handleDownloadActionAnimatorVideo()}
-                    onActionTypeChange={(actionType) =>
-                      dispatch({ type: 'set-action-animator-action', actionType })
-                    }
-                    onCustomActionPromptChange={(prompt) =>
-                      dispatch({
-                        type: 'set-action-animator-custom-prompt',
-                        prompt,
-                      })
-                    }
-                    onFileSelect={(asset) =>
-                      dispatch({ type: 'set-action-animator-image', asset })
-                    }
-                    onFirstFrameGuideChange={(asset) =>
-                      dispatch({ type: 'set-action-animator-first-frame-guide', asset })
-                    }
-                    onFpsChange={(fps) =>
-                      dispatch({ type: 'set-action-animator-fps', fps })
-                    }
-                    onFrameCountChange={(frameCount) =>
-                      dispatch({ type: 'set-action-animator-frame-count', frameCount })
-                    }
-                    onKeyColorChange={(keyColor) =>
-                      dispatch({ type: 'set-action-animator-key-color', keyColor })
-                    }
-                    onLastFrameGuideChange={(asset) =>
-                      dispatch({ type: 'set-action-animator-last-frame-guide', asset })
-                    }
-                    onNormalizedSizeChange={(size) =>
-                      dispatch({ type: 'set-action-animator-normalized-size', size })
-                    }
-                    onPipelineChange={(pipeline) =>
-                      dispatch({ type: 'set-action-animator-pipeline', pipeline })
-                    }
-                    onUseLatestCharacterSheet={() =>
-                      void hydrateLatestCharacterSheetInto({
-                        type: 'set-action-animator-image',
-                        })
-                      }
-                    />
-                  </div>
-                ) : isVariantForgeMode ? (
-                  <div className={controlPanelFullSpanClassName}>
-                    <VariantForgePanel
-                      key={state.variantForge.variantFamily}
-                      asset={state.variantForge.baseAsset}
-                      customDirection={getVariantForgeFamilyCustomDirection(
-                        state.variantForge.variantFamily,
-                        state.variantForge.familyCustomDirections,
-                      )}
-                      family={state.variantForge.variantFamily}
-                      ideaSuggestions={activeVariantForgeIdeaSuggestions}
-                      ideaSource={activeVariantForgeIdeaState.source}
-                      intensity={state.variantForge.intensity}
-                      isRefreshingIdeas={activeVariantForgeIdeaState.loading}
-                      optionStates={state.variantForge.optionStates}
-                      preservePalette={state.variantForge.preservePalette}
-                      preserveSilhouette={state.variantForge.preserveSilhouette}
-                      preset={state.variantForge.variantPreset}
-                      onApplyIdeaSuggestion={(idea) =>
-                        dispatch({
-                          type: 'set-variant-forge-custom-direction',
-                          customDirection: appendVariantForgeIdeaToDirection(
-                            getVariantForgeFamilyCustomDirection(
-                              state.variantForge.variantFamily,
-                              state.variantForge.familyCustomDirections,
-                            ),
-                            idea,
-                          ),
-                        })
-                      }
-                      onFileSelect={(asset) =>
-                        dispatch({ type: 'set-variant-forge-asset', asset })
-                      }
-                      onCustomDirectionChange={(customDirection) =>
-                        dispatch({
-                          type: 'set-variant-forge-custom-direction',
-                          customDirection,
-                        })
-                      }
-                      onFamilyChange={(family) =>
-                        dispatch({ type: 'set-variant-forge-family', family })
-                      }
-                      onIntensityChange={(intensity) =>
-                        dispatch({ type: 'set-variant-forge-intensity', intensity })
-                      }
-                      onPreservePaletteChange={(enabled) =>
-                        dispatch({
-                          type: 'set-variant-forge-preserve-palette',
-                          enabled,
-                        })
-                      }
-                      onPreserveSilhouetteChange={(enabled) =>
-                        dispatch({
-                          type: 'set-variant-forge-preserve-silhouette',
-                          enabled,
-                        })
-                      }
-                      onPresetChange={(preset) =>
-                        dispatch({ type: 'set-variant-forge-preset', preset })
-                      }
-                      onPresetCustomSettingChange={(preset, customSetting) =>
-                        dispatch({
-                          type: 'set-variant-forge-preset-custom-setting',
-                          customSetting,
-                          preset,
-                        })
-                      }
-                      onPresetToggle={(preset) =>
-                        dispatch({ type: 'toggle-variant-forge-preset', preset })
-                      }
-                      onRefreshIdeas={() => void refreshVariantForgeIdeas()}
-                    />
-                  </div>
-                ) : isPortraitStudioMode ? (
-                  <>
-                    <PortraitStudioPanel
-                      asset={state.portraitStudio.heroImage}
-                      canUseLatestCharacterSheet={Boolean(lastCharacterSheetResult)}
-                      onFileSelect={(asset) =>
-                        dispatch({ type: 'set-portrait-studio-image', asset })
-                      }
-                      onUseLatestCharacterSheet={() =>
-                        void hydrateLatestCharacterSheetInto({
-                          type: 'set-portrait-studio-image',
-                        })
-                      }
-                    />
-                    <PromptPanel
-                      activeMode={state.activeMode}
-                      description="Optional. Describe the portrait pack you want while keeping the uploaded identity locked."
-                      placeholder="Ex: scarred veteran ranger, leather mantle, stern heroic mood, semi-real painted game portrait."
-                      prompt={state.portraitStudio.prompt}
-                      recentPrompts={recentPrompts}
-                      title="Portrait Direction"
-                      onChange={(prompt) =>
-                        dispatch({ type: 'set-portrait-studio-prompt', prompt })
-                      }
-                    />
-                  </>
-                ) : isUvLabMode ? (
-                  <div className={controlPanelFullSpanClassName}>
-                    <UvLabPanel
-                      asset={state.uvLab.mesh}
-                      atlasSize={state.uvLab.atlasSize}
-                      errorMessage={uvUploadError}
-                      latestJob={uvJob}
-                      paddingPx={state.uvLab.paddingPx}
-                      onAtlasSizeChange={(size) =>
-                        dispatch({ type: 'set-uv-lab-atlas-size', size })
-                      }
-                      onFileSelect={(asset) => {
-                        dispatch({ type: 'set-uv-lab-mesh', asset })
-                        setUvJob(null)
-                        setUvUploadError(null)
-                      }}
-                      onInvalidSelection={(message) => {
-                        setUvUploadError(message)
-                        setError({
-                          message,
-                          title: 'Mesh Upload Rejected',
-                        })
-                      }}
-                      onPaddingChange={(paddingPx) =>
-                        dispatch({ type: 'set-uv-lab-padding-px', paddingPx })
-                      }
-                      uvEngineStatus={uvEngineStatus}
-                    />
-                  </div>
-                ) : isVfxForgeMode ? (
-                  <>
-                    <div className={controlPanelFullSpanClassName}>
-                      <VfxForgePanel
-                        canBuildRecipe={canBuildVfxRecipe}
-                        canDownloadBundle={canDownloadVfxBundle}
-                        effectLabel={state.vfxForge.effectLabel}
-                        exportTarget={state.vfxForge.exportTarget}
-                        frameCount={state.vfxForge.frameCount}
-                        generatedTextureCount={selectedVfxTextureResults.length}
-                        intensity={state.vfxForge.intensity}
-                        isBuildingRecipe={isBuildingVfxRecipe}
-                        isDownloadingBundle={isDownloadingVfxBundle}
-                        looping={state.vfxForge.looping}
-                        onBuildRecipe={() => void handleBuildVfxRecipe()}
-                        onDownloadBundle={() => void handleDownloadVfxBundle()}
-                        onEffectLabelChange={(effectLabel) =>
-                          dispatch({ type: 'set-vfx-effect-label', effectLabel })
-                        }
-                        onExportTargetChange={(exportTarget) =>
-                          dispatch({ type: 'set-vfx-export-target', exportTarget })
-                        }
-                        onFrameCountChange={(frameCount) =>
-                          dispatch({ type: 'set-vfx-frame-count', frameCount })
-                        }
-                        onIntensityChange={(intensity) =>
-                          dispatch({ type: 'set-vfx-intensity', intensity })
-                        }
-                        onLoopingChange={(enabled) =>
-                          dispatch({ type: 'set-vfx-looping', enabled })
-                        }
-                        onPromptChange={(prompt) =>
-                          dispatch({ type: 'set-vfx-prompt', prompt })
-                        }
-                        onTextureOutputChange={(kind, enabled) =>
-                          dispatch({ type: 'set-vfx-texture-output', enabled, kind })
-                        }
-                        prompt={state.vfxForge.prompt}
-                        recipeManifest={vfxRecipeManifest}
-                        textureOutputs={state.vfxForge.textureOutputs}
-                      />
-                    </div>
-                    <ImageUploadField
-                      label="Style Reference"
-                      helper="Optional. Guides palette energy, finish, and rendering language for the generated VFX textures."
-                      asset={state.references.style}
-                      icon={Palette}
-                      onFileSelect={(asset) =>
-                        dispatch({ type: 'set-reference', slot: 'style', asset })
-                      }
-                    />
-                  </>
-                ) : (
-                  <>
-                    {isTextureLabMode ? (
-                      <TextureLabWorkflowPanel
-                        expansionTargetSize={state.textureLab.expansionTargetSize}
-                        onSeamlessModeChange={(enabled) =>
-                          dispatch({
-                            type: 'set-texture-lab-seamless-mode',
-                            enabled,
-                          })
-                        }
-                        onTargetSizeChange={(size) =>
-                          dispatch({ type: 'set-texture-expansion-target-size', size })
-                        }
-                        onWorkflowChange={(workflow) =>
-                          dispatch({ type: 'set-texture-lab-workflow', workflow })
-                        }
-                        seamlessMode={state.textureLab.seamlessMode}
-                        workflow={state.textureLab.workflow}
-                      />
-                    ) : null}
-
-                    <div className={controlPanelFullSpanClassName}>
-                      <PromptPanel
-                        activeMode={state.activeMode}
-                        description={
-                          isTextureExpansionMode
-                            ? 'Optional material notes. The source texture drives the expansion pass even if this field is blank.'
-                            : isTextureGenerateMode && state.textureLab.seamlessMode
-                              ? 'Describe the material. Seamless Mode converts this into a tile-safe semantic tiling prompt at the selected texture size.'
-                              : isTextureGenerateMode
-                                ? 'Describe the material texture to generate at the selected texture size.'
-                                : 'Describe the asset or scene you want generated'
-                        }
-                        placeholder={
-                          isTextureExpansionMode
-                            ? 'Ex: weathered brick with subtle mortar variation and dry, neutral lighting.'
-                            : undefined
-                        }
-                        prompt={state.prompt}
-                        recentPrompts={recentPrompts}
-                        title={
-                          isTextureExpansionMode ? 'Expansion Notes' : 'Forge Prompt'
-                        }
-                        onChange={(prompt) => dispatch({ type: 'set-prompt', prompt })}
-                      />
-                    </div>
-
-                    {isTextureExpansionMode ? (
-                      <div className={controlPanelFullSpanClassName}>
-                        <TextureExpansionPanel
-                          asset={state.textureLab.expansionSource}
-                          targetSize={state.textureLab.expansionTargetSize}
-                          onFileSelect={(asset) =>
-                            dispatch({ type: 'set-texture-expansion-source', asset })
-                          }
-                        />
-                      </div>
-                    ) : (
-                      <>
-                        <ImageUploadField
-                          label="Style Reference"
-                          helper="Controls line weight, finish, palette, and rendering language."
-                          asset={state.references.style}
-                          icon={Palette}
-                          onFileSelect={(asset) =>
-                            dispatch({ type: 'set-reference', slot: 'style', asset })
-                          }
-                        />
-
-                        <ImageUploadField
-                          label="Subject / Content Reference"
-                          helper="Anchors silhouette, item identity, and the specific form to generate."
-                          asset={state.references.subject}
-                          icon={Box}
-                          onFileSelect={(asset) =>
-                            dispatch({ type: 'set-reference', slot: 'subject', asset })
-                          }
-                        />
-
-                        <BatchPanel
-                          generationCount={state.generationCount}
-                          onSelect={(count) =>
-                            dispatch({ type: 'set-generation-count', count })
-                          }
-                        />
-                      </>
-                    )}
-                  </>
-                )}
-
-                <div className={controlPanelFullSpanClassName}>
-                  <button
-                    type="button"
-                    onClick={() => void handleForge()}
-                    disabled={
-                      !isReadyForApi ||
-                      isForging ||
-                      !selectedModelSupported
-                    }
-                    className="inline-flex w-full items-center justify-between rounded-[24px] border border-sky-300/20 bg-[linear-gradient(135deg,rgba(56,189,248,0.2),rgba(10,14,20,0.92))] px-5 py-4 text-left shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)] transition duration-200 hover:border-sky-200/30 hover:shadow-[0_0_0_1px_rgba(125,211,252,0.12),0_28px_80px_rgba(14,165,233,0.24)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-sky-300/20 disabled:hover:shadow-[0_0_0_1px_rgba(125,211,252,0.08),0_22px_60px_rgba(14,165,233,0.18)]"
-                  >
-                    <span className="flex items-center gap-3">
-                      <span className="rounded-full border border-sky-200/20 bg-sky-300/12 p-2 text-sky-100">
-                        {isForging ? (
-                          <LoaderCircle className="size-4 animate-spin" strokeWidth={1.9} />
-                        ) : (
-                          <Sparkles className="size-4" strokeWidth={1.9} />
-                        )}
-                      </span>
-                      <span>
-                        <span className="block text-sm font-medium tracking-[0.18em] text-sky-50">
-                          {primaryActionLabel}
-                        </span>
-                        <span className="block text-xs text-sky-100/70">
-                          {primaryActionDescription}
-                        </span>
-                      </span>
-                    </span>
-                    <ChevronRight className="size-5 text-sky-100/80" strokeWidth={1.9} />
-                  </button>
-                </div>
-              </div>
-            </aside>
-
-            <section className="flex min-w-0 flex-col gap-5">
-              <TopPanel
-                activeMode={activeMode}
-                prompt={activePromptValue.trim() || promptPreview}
-                readinessLabel={readinessLabel}
-              />
-
-              <div className="flex flex-col gap-4 rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.015))] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-6">
-                <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                  <div>
-                    <p className="font-mono text-[11px] uppercase tracking-[0.34em] text-zinc-500">
-                      {isUvLabMode ? 'UV Workspace' : 'Result Grid'}
-                    </p>
-                    <h2 className="mt-1 text-xl font-semibold text-white">
-                      {resultGridTitle}
-                    </h2>
-                  </div>
-                  <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-sm text-zinc-300">
-                    <ImagePlus className="size-4" strokeWidth={1.8} />
-                    {isUvLabMode
-                      ? activeModelName
-                        ? `${activeModelName} worker pipeline`
-                        : 'Ready for local unwrap execution'
-                      : activeModelName
-                        ? `${activeModelName} response stream`
-                        : 'Ready for model execution'}
-                  </div>
-                </div>
-
-                {error ? (
-                  <ErrorPanel
-                    error={error}
-                    onUseMock={
-                      !isUvLabMode && error.code === 'quota_exceeded'
-                        ? handleMockForge
-                        : undefined
-                    }
-                    onRetry={isReadyForApi && !isForging ? () => void handleForge() : undefined}
-                    showDocsLink={!isUvLabMode}
-                  />
-                ) : null}
-
-                {notice ? (
-                  <div className="rounded-[22px] border border-emerald-300/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                    {notice}
-                  </div>
-                ) : null}
-
-                {isUvLabMode ? (
-                  <>
-                    <UvLabBrief
-                      activeModelName={activeModelName}
-                      asset={state.uvLab.mesh}
-                      atlasSize={state.uvLab.atlasSize}
-                      job={uvJob}
-                      lastSavedAt={lastSavedAt}
-                      paddingPx={state.uvLab.paddingPx}
-                      uvEngineStatus={uvEngineStatus}
-                    />
-                    <Suspense
-                      fallback={
-                        <div className="rounded-[30px] border border-white/10 bg-black/20 px-5 py-12 text-center text-sm text-zinc-300">
-                          Loading UV workspace...
-                        </div>
-                      }
-                    >
-                      <UvLabWorkspace
-                        activeModelName={activeModelName}
-                        job={uvJob}
-                        sourceAsset={state.uvLab.mesh}
-                      />
-                    </Suspense>
-                  </>
-                ) : (
-                  <>
-                    <ForgeBrief
-                      activeMode={activeMode}
-                      activeModelName={activeModelName}
-                      detailItems={briefItems}
-                      generationCount={activeGenerationCount}
-                      isForging={isForging}
-                      isReadyForApi={isReadyForApi}
-                      isShowingResults={isShowingResults}
-                      lastSavedAt={lastSavedAt}
-                      onRefreshHealth={() => void refreshHealth()}
-                      prompt={activePromptValue.trim()}
-                      referenceCount={referenceCount}
-                      resultsCount={visibleResultsCount}
-                      serviceHealth={serviceHealth}
-                      consistencyMessage={
-                        isCharacterSheetMode && state.characterSheet.consistencyEnabled
-                          ? state.characterSheet.parentId
-                            ? `Consistency reference staged locally: ${state.characterSheet.parentId}.`
-                            : 'Consistency is enabled. The next successful sheet will stage a reusable reference locally.'
-                          : null
-                      }
-                    />
-
-                    <div
-                      className={
-                        isSingleResultMode
-                          ? 'grid gap-4'
-                          : 'grid gap-4 md:grid-cols-2 2xl:grid-cols-4'
-                      }
-                    >
-                      {hasForgeSlots
-                          ? forgeSlots.map((slot, index) => {
-                            if (slot.result) {
-                              const result = slot.result
-                              const vfxTextureKind =
-                                isVfxForgeMode
-                                  ? (Object.entries(vfxTextureResults).find(
-                                      ([, entry]) => entry?.id === result.id,
-                                    )?.[0] as VfxTextureKind | undefined)
-                                  : undefined
-
-                              return (
-                                <GeneratedResultCard
-                                  key={result.id}
-                                  canRepairSeams={
-                                    isTextureLabMode &&
-                                    lastTextureLabRun?.seamlessMode === true &&
-                                    lastTextureLabRun.workflow === 'generate'
-                                  }
-                                  extraActionLabel={
-                                    isActionAnimatorMode
-                                      ? 'Download Frames'
-                                      : isPortraitStudioMode
-                                      ? 'Download Faces'
-                                      : isVfxForgeMode && vfxTextureKind === 'flipbook'
-                                        ? 'Download Frames'
-                                      : isTextureLabMode
-                                          ? 'Generate Maps'
-                                          : undefined
-                                  }
-                                  index={index}
-                                  isExpanded={
-                                    isTextureLabMode &&
-                                    materialPacksByResultId[result.id]?.isVisible === true
-                                  }
-                                  isExtraActionPending={
-                                    isTextureLabMode &&
-                                    materialPacksByResultId[result.id]?.status === 'loading'
-                                  }
-                                  isRepairing={repairingResultId === result.id}
-                                  mode={activeMode}
-                                  result={result}
-                                  onCopy={handleCopy}
-                                  onDownload={handleDownload}
-                                  onExtraAction={
-                                    isActionAnimatorMode
-                                      ? handleDownloadActionAnimatorFrames
-                                      : isPortraitStudioMode
-                                      ? handleDownloadPortraitFaces
-                                      : isVfxForgeMode && vfxTextureKind === 'flipbook'
-                                        ? handleDownloadVfxFrames
-                                      : isTextureLabMode
-                                          ? handleGenerateMaterialMaps
-                                          : undefined
-                                  }
-                                  onRepairSeams={handleRepairSeams}
-                                >
-                                  {isTextureLabMode && materialPacksByResultId[result.id]?.isVisible ? (
-                                    <TextureMaterialPack
-                                      error={materialPacksByResultId[result.id]?.error ?? null}
-                                      isDirty={Boolean(materialPacksByResultId[result.id]?.dirty)}
-                                      isLoading={materialPacksByResultId[result.id]?.status === 'loading'}
-                                      maps={materialPacksByResultId[result.id]?.maps ?? {}}
-                                      onDownloadAll={() => handleDownloadAllTextureMaterialMaps(result)}
-                                      onDownloadMap={(mapKey) =>
-                                        handleDownloadTextureMaterialMap(result, mapKey)
-                                      }
-                                      onRegenerate={() => void handleGenerateMaterialMaps(result)}
-                                      onStrengthChange={(key, value) =>
-                                        handleTextureMaterialStrengthChange(result.id, key, value)
-                                      }
-                                      sourceResult={result}
-                                      strengths={
-                                        materialPacksByResultId[result.id]?.strengths ??
-                                        state.textureLab.materialMapDefaults
-                                      }
-                                    />
-                                  ) : null}
-                                </GeneratedResultCard>
-                              )
-                            }
-
-                            return (
-                              <PlaceholderCard
-                                key={`slot-${index}`}
-                                detail={slot.detail ?? 'Waiting for this slot to start.'}
-                                index={index}
-                                mode={activeMode}
-                                progressTone={getForgeSlotProgressTone(slot.status)}
-                                state={
-                                  slot.status === 'failed' || slot.status === 'queued'
-                                    ? 'idle'
-                                    : 'loading'
-                                }
-                                statusLabel={getForgeSlotStatusLabel(slot.status)}
-                                title={
-                                  slot.status === 'failed'
-                                    ? `${activeMode.label} slot needs attention`
-                                    : `${activeMode.label} slot in progress`
-                                }
-                              />
-                            )
-                          })
-                        : isShowingResults
-                          ? results.map((result, index) => {
-                              const vfxTextureKind =
-                                isVfxForgeMode
-                                  ? (Object.entries(vfxTextureResults).find(
-                                      ([, entry]) => entry?.id === result.id,
-                                    )?.[0] as VfxTextureKind | undefined)
-                                  : undefined
-
-                              return (
-                                <GeneratedResultCard
-                                key={result.id}
-                                canRepairSeams={
-                                  isTextureLabMode &&
-                                  lastTextureLabRun?.seamlessMode === true &&
-                                  lastTextureLabRun.workflow === 'generate'
-                                }
-                                extraActionLabel={
-                                  isActionAnimatorMode
-                                    ? 'Download Frames'
-                                    : isPortraitStudioMode
-                                    ? 'Download Faces'
-                                    : isVfxForgeMode && vfxTextureKind === 'flipbook'
-                                      ? 'Download Frames'
-                                      : isTextureLabMode
-                                        ? 'Generate Maps'
-                                        : undefined
-                                }
-                                index={index}
-                                isExpanded={
-                                  isTextureLabMode &&
-                                  materialPacksByResultId[result.id]?.isVisible === true
-                                }
-                                isExtraActionPending={
-                                  isTextureLabMode &&
-                                  materialPacksByResultId[result.id]?.status === 'loading'
-                                }
-                                isRepairing={repairingResultId === result.id}
-                                mode={activeMode}
-                                result={result}
-                                onCopy={handleCopy}
-                                onDownload={handleDownload}
-                                onExtraAction={
-                                  isActionAnimatorMode
-                                    ? handleDownloadActionAnimatorFrames
-                                    : isPortraitStudioMode
-                                    ? handleDownloadPortraitFaces
-                                    : isVfxForgeMode && vfxTextureKind === 'flipbook'
-                                      ? handleDownloadVfxFrames
-                                      : isTextureLabMode
-                                        ? handleGenerateMaterialMaps
-                                        : undefined
-                                }
-                                onRepairSeams={handleRepairSeams}
-                              >
-                                {isTextureLabMode && materialPacksByResultId[result.id]?.isVisible ? (
-                                  <TextureMaterialPack
-                                    error={materialPacksByResultId[result.id]?.error ?? null}
-                                    isDirty={Boolean(materialPacksByResultId[result.id]?.dirty)}
-                                    isLoading={materialPacksByResultId[result.id]?.status === 'loading'}
-                                    maps={materialPacksByResultId[result.id]?.maps ?? {}}
-                                    onDownloadAll={() => handleDownloadAllTextureMaterialMaps(result)}
-                                    onDownloadMap={(mapKey) =>
-                                      handleDownloadTextureMaterialMap(result, mapKey)
-                                    }
-                                    onRegenerate={() => void handleGenerateMaterialMaps(result)}
-                                    onStrengthChange={(key, value) =>
-                                      handleTextureMaterialStrengthChange(result.id, key, value)
-                                    }
-                                    sourceResult={result}
-                                    strengths={
-                                      materialPacksByResultId[result.id]?.strengths ??
-                                      state.textureLab.materialMapDefaults
-                                    }
-                                  />
-                                ) : null}
-                              </GeneratedResultCard>
-                              )
-                            })
-                          : reservedOutputs.map((index) => (
-                              <PlaceholderCard
-                                key={index}
-                                index={index}
-                                mode={activeMode}
-                                state={isForging ? 'loading' : 'idle'}
-                              />
-                            ))}
-                    </div>
-                  </>
-                )}
-              </div>
-            </section>
-          </div>
-        </div>
-      </main>
-    </div>
-  )
-  */
 }
 
 type SortableDropZoneProps = {
@@ -4406,380 +3302,17 @@ function LayoutDragOverlay({ label }: { label: string | null }) {
 
 type HeaderSummaryProps = {
   activeMode: ModeDefinition
-  currentSessionCount: number
   generationCount: number
-  highlightedTelemetryRowId: string | null
   inputLabel: string
   promptLoaded: boolean
-  sessionMax: number
 }
-
-function HeaderSummary({
-  activeMode,
-  currentSessionCount,
-  generationCount,
-  highlightedTelemetryRowId,
-  inputLabel,
-  promptLoaded,
-  sessionMax,
-}: HeaderSummaryProps) {
-  const [telemetrySnapshot, setTelemetrySnapshot] = useState<TelemetrySnapshot | null>(
-    null,
-  )
-  const [telemetryError, setTelemetryError] = useState<string | null>(null)
-
-  const refreshTelemetry = useEffectEvent(async (cancelState?: { cancelled: boolean }) => {
-    await fetch('/api/usage/telemetry', { cache: 'no-store' })
-      .then(async (response) => {
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => null)) as
-            | {
-                error?: {
-                  message?: string
-                }
-              }
-            | null
-          throw new Error(payload?.error?.message || 'Telemetry endpoint failed.')
-        }
-
-        return (await response.json()) as TelemetrySnapshot
-      })
-      .then((payload) => {
-        if (!cancelState?.cancelled) {
-          setTelemetrySnapshot(payload)
-          setTelemetryError(payload.error?.message ?? null)
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelState?.cancelled) {
-          setTelemetrySnapshot(null)
-          setTelemetryError(
-            error instanceof Error ? error.message : 'Telemetry is unavailable right now.',
-          )
-        }
-      })
-  })
-
-  useEffect(() => {
-    const cancelState = { cancelled: false }
-    const intervalId = window.setInterval(() => {
-      void refreshTelemetry(cancelState)
-    }, telemetryRefreshIntervalMs)
-
-    void refreshTelemetry(cancelState)
-
-    return () => {
-      cancelState.cancelled = true
-      window.clearInterval(intervalId)
-    }
-  }, [refreshTelemetry])
-
-  return (
-    <div className="grid gap-5 xl:grid-cols-[minmax(320px,0.72fr)_minmax(0,1.28fr)] xl:items-start">
-      <div className="flex flex-col gap-5">
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(340px,420px)] xl:items-start">
-          <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4 text-sky-300 shadow-[0_16px_30px_rgba(14,165,233,0.12)]">
-            <div className="flex items-start gap-4">
-              <Hammer className="size-6" strokeWidth={1.7} />
-              <div>
-                <p className="font-mono text-[11px] uppercase tracking-[0.42em] text-sky-300/70">
-                  Workspace
-                </p>
-                <h1 className="mt-3 max-w-5xl text-4xl font-semibold tracking-[-0.04em] text-white sm:text-5xl xl:text-[3.35rem] xl:leading-[1.02]">
-                  The Foundry
-                </h1>
-              </div>
-            </div>
-          </div>
-          <TelemetryStatusCard
-            currentSessionCount={currentSessionCount}
-            sessionMax={sessionMax}
-            telemetryError={telemetryError}
-            telemetrySnapshot={telemetrySnapshot}
-          />
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-3">
-          <MetricCard label="Mode" value={activeMode.label} />
-          <MetricCard label={inputLabel} value={promptLoaded ? 'Loaded' : 'Missing'} />
-          <MetricCard label="Batch Count" value={`${generationCount} outputs`} />
-        </div>
-      </div>
-
-      <TelemetryTableCard
-        highlightedTelemetryRowId={highlightedTelemetryRowId}
-        telemetryError={telemetryError}
-        telemetrySnapshot={telemetrySnapshot}
-      />
-    </div>
-  )
-}
-
-type TelemetryStatusCardProps = {
-  currentSessionCount: number
-  sessionMax: number
-  telemetryError: string | null
-  telemetrySnapshot: TelemetrySnapshot | null
-}
-
-function TelemetryStatusCard({
-  currentSessionCount,
-  sessionMax,
-  telemetryError,
-  telemetrySnapshot,
-}: TelemetryStatusCardProps) {
-  const telemetryStatusLabel = telemetrySnapshot
-    ? telemetrySnapshot.source === 'hybrid'
-      ? `Hybrid ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-      : telemetrySnapshot.source === 'google-cloud-monitoring'
-        ? `Google ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-        : `Local ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-    : telemetryError
-      ? 'Telemetry degraded'
-      : 'Telemetry offline'
-  const telemetrySourceLabel =
-    telemetrySnapshot?.source === 'hybrid'
-      ? 'Hybrid'
-      : telemetrySnapshot?.source === 'google-cloud-monitoring'
-        ? 'Google'
-        : telemetrySnapshot
-          ? 'Local'
-          : 'Unavailable'
-
-  return (
-    <section className="self-start rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(7,9,12,0.88),rgba(7,9,12,0.96))] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-            Live Telemetry
-          </p>
-          <p className="mt-2 text-sm text-zinc-300">
-            Auto-refreshing usage from the local log, with provider telemetry folded in when it
-            catches up.
-          </p>
-        </div>
-        <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-300">
-          {telemetryStatusLabel}
-        </span>
-      </div>
-
-      {telemetryError ? (
-        <div className="mt-4 whitespace-pre-line rounded-[16px] border border-amber-300/20 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
-          {telemetryError}
-        </div>
-      ) : null}
-
-      <div className="mt-4 grid grid-cols-2 gap-2 text-xs lg:grid-cols-3">
-        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Session</p>
-          <p className="mt-1 text-zinc-100">{currentSessionCount} req</p>
-        </div>
-        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">24h Peak</p>
-          <p className="mt-1 text-zinc-100">
-            {sessionMax} req
-          </p>
-        </div>
-        <div className="rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2">
-          <p className="font-mono uppercase tracking-[0.2em] text-zinc-500">Source</p>
-          <p className="mt-1 text-zinc-100">{telemetrySourceLabel}</p>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-type TelemetryTableCardProps = {
-  highlightedTelemetryRowId: string | null
-  telemetryError: string | null
-  telemetrySnapshot: TelemetrySnapshot | null
-}
-
-function TelemetryTableCard({
-  highlightedTelemetryRowId,
-  telemetryError,
-  telemetrySnapshot,
-}: TelemetryTableCardProps) {
-  const telemetryRefreshLabel = telemetrySnapshot
-    ? telemetrySnapshot.source === 'hybrid'
-      ? `Hybrid refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-      : telemetrySnapshot.source === 'google-cloud-monitoring'
-        ? `Google refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-        : `Local refresh ${new Date(telemetrySnapshot.generatedAt).toLocaleTimeString()}`
-    : 'Waiting for telemetry'
-
-  return (
-    <section className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(4,8,12,0.88),rgba(3,6,9,0.98))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-5">
-      <div className="flex flex-col gap-3 border-b border-white/8 pb-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-            Model Limits
-          </p>
-          <h2 className="mt-2 text-lg font-semibold text-white">
-            Requests per minute and per day update live
-          </h2>
-          <p className="mt-2 max-w-3xl text-sm text-zinc-400">
-            RPM and RPD numbers shift from green to red as usage climbs. TPM uses live
-            token totals when the active provider returns usage metadata.
-          </p>
-        </div>
-        <p className="text-xs text-zinc-500">{telemetryRefreshLabel}</p>
-      </div>
-
-      {telemetryError ? (
-        <div className="mt-4 whitespace-pre-line rounded-[18px] border border-rose-300/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
-          Provider telemetry is delayed or unavailable. Showing the live local usage log instead.
-          {' '}
-          {telemetryError}
-        </div>
-      ) : null}
-
-      <div className="mt-4 overflow-x-auto">
-        <div className="min-w-[1120px]">
-          <div className="grid grid-cols-[minmax(260px,1.3fr)_minmax(220px,0.9fr)_minmax(220px,0.8fr)_minmax(220px,0.8fr)_minmax(220px,0.8fr)_88px] gap-4 px-3 pb-3 text-[11px] font-medium uppercase tracking-[0.28em] text-zinc-500">
-            <span>Model</span>
-            <span>Category</span>
-            <span>RPM</span>
-            <span>TPM</span>
-            <span>RPD</span>
-            <span className="text-right">Charts</span>
-          </div>
-
-          <div className="space-y-2">
-            {telemetrySnapshot?.rows.map((row) => {
-              const isHighlighted = row.id === highlightedTelemetryRowId
-
-              return (
-                <div
-                  key={row.id}
-                  className={`grid grid-cols-[minmax(260px,1.3fr)_minmax(220px,0.9fr)_minmax(220px,0.8fr)_minmax(220px,0.8fr)_minmax(220px,0.8fr)_88px] gap-4 rounded-[22px] border px-3 py-3 transition ${
-                    isHighlighted
-                      ? 'border-sky-300/25 bg-sky-400/[0.08] shadow-[0_12px_30px_rgba(56,189,248,0.08)]'
-                      : 'border-white/8 bg-white/[0.02]'
-                  }`}
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-base font-medium text-zinc-100">{row.label}</p>
-                    <p className="mt-1 text-xs text-zinc-500">
-                      {row.lastRequestAt
-                        ? `Last request ${new Date(row.lastRequestAt).toLocaleTimeString()}`
-                        : 'No requests recorded yet'}
-                    </p>
-                  </div>
-                  <div className="flex items-center text-sm text-zinc-400">{row.category}</div>
-                  <TelemetryMetricCell metric={row.metrics.rpm} />
-                  <TelemetryMetricCell metric={row.metrics.tpm} />
-                  <TelemetryMetricCell metric={row.metrics.rpd} />
-                  <div className="flex items-center justify-end">
-                    <TelemetryMiniChart
-                      accentRatio={
-                        Math.max(row.metrics.rpm.ratio ?? 0, row.metrics.rpd.ratio ?? 0)
-                      }
-                      points={row.chartPoints}
-                    />
-                  </div>
-                </div>
-              )
-            })}
-
-            {!telemetrySnapshot ? (
-              <div className="rounded-[22px] border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-zinc-500">
-                Live telemetry is unavailable right now.
-              </div>
-            ) : null}
-          </div>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-function TelemetryMetricCell({ metric }: { metric?: TelemetryMetric | null }) {
-  if (!metric) {
-    return <div className="flex items-center text-sm font-medium text-zinc-500">N/A</div>
-  }
-
-  if (
-    typeof metric.current !== 'number' ||
-    typeof metric.limit !== 'number' ||
-    typeof metric.ratio !== 'number'
-  ) {
-    return <div className="flex items-center text-sm font-medium text-zinc-500">N/A</div>
-  }
-
-  const accentColor = buildTelemetryAccentColor(metric.ratio)
-  const barWidth =
-    metric.current > 0 ? Math.max(metric.ratio * 100, 8) : Math.max(metric.ratio * 100, 0)
-
-  return (
-    <div className="flex items-center gap-3">
-      <div className="h-2 w-[5.5rem] overflow-hidden rounded-full bg-white/[0.06]">
-        <div
-          className="h-full rounded-full transition-all duration-300"
-          style={{
-            backgroundColor: accentColor,
-            width: `${Math.min(barWidth, 100)}%`,
-          }}
-        />
-      </div>
-      <span
-        className="min-w-[98px] text-right text-sm font-semibold tabular-nums"
-        style={{ color: accentColor }}
-      >
-        {formatTelemetryMetricValue(metric.current)} / {formatTelemetryMetricValue(metric.limit)}
-      </span>
-    </div>
-  )
-}
-
-function TelemetryMiniChart({
-  accentRatio,
-  points,
-}: {
-  accentRatio: number
-  points: number[]
-}) {
-  const peak = Math.max(...points, 1)
-  const accentColor = buildTelemetryAccentColor(accentRatio)
-
-  return (
-    <div className="flex h-9 items-end gap-1 rounded-full border border-white/8 bg-black/20 px-2 py-1">
-      {points.map((point, index) => (
-        <span
-          key={`${index}-${point}`}
-          className="w-1.5 rounded-full transition-all duration-300"
-          style={{
-            backgroundColor: accentColor,
-            height: `${Math.max((point / peak) * 100, point > 0 ? 24 : 12)}%`,
-            opacity: point > 0 ? 1 : 0.22,
-          }}
-        />
-      ))}
-    </div>
-  )
-}
-
-function buildTelemetryAccentColor(ratio: number) {
-  const clampedRatio = Math.max(0, Math.min(ratio, 1))
-  const hue = 120 - clampedRatio * 120
-  return `hsl(${hue} 82% 60%)`
-}
-
-function formatTelemetryMetricValue(value: number) {
-  if (value >= 1000000) {
-    return `${trimTrailingZeros((value / 1000000).toFixed(value < 10000000 ? 2 : 1))}M`
-  }
-
-  if (value >= 1000) {
-    const fractionDigits = value < 10000 ? 2 : value < 100000 ? 1 : 0
-    return `${trimTrailingZeros((value / 1000).toFixed(fractionDigits))}K`
-  }
-
-  return value.toLocaleString()
-}
-
-function trimTrailingZeros(value: string) {
-  return value.replace(/\.0+$|(\.\d*[1-9])0+$/, '$1')
+function HeaderSummary({ activeMode, generationCount, inputLabel, promptLoaded }: HeaderSummaryProps) {
+  return <div className="space-y-4">
+    <div><p className="font-mono text-xs uppercase tracking-widest text-sky-300">The Foundry · Web Edition</p>
+    <h1 className="mt-2 text-2xl font-semibold">{activeMode.label}</h1>
+    <p className="mt-2 text-sm text-zinc-400">Create, refine, and export production assets. Generation runs through the local Codex app bridge using your Codex subscription usage and limits.</p></div>
+    <div className="grid grid-cols-3 gap-3"><MetricCard label="Workflow" value={activeMode.label} /><MetricCard label={inputLabel} value={promptLoaded ? 'Ready' : 'Add input'} /><MetricCard label="Outputs" value={String(generationCount)} /></div>
+  </div>
 }
 
 type MetricCardProps = {
@@ -4798,120 +3331,9 @@ function MetricCard({ label, value }: MetricCardProps) {
   )
 }
 
-type ModelSelectorProps = {
-  activeModel: ModelId
-  availableModels: ModelId[]
-  mode: ForgeMode
-  onOpenAiImageQualityChange: (quality: OpenAiImageQuality) => void
-  onSelect: (model: ModelId) => void
-  openAiImageQuality: OpenAiImageQuality
-}
-
-function ModelSelector({
-  activeModel,
-  availableModels,
-  mode,
-  onOpenAiImageQualityChange,
-  onSelect,
-  openAiImageQuality,
-}: ModelSelectorProps) {
-  const modelOverrideLabel =
-    mode === 'uv-lab'
-      ? 'Built-in Only'
-      : availableModels.length <= 1
-        ? 'Locked for This Workflow'
-        : 'Smart Default + Manual'
-  const showOpenAiImageQuality = activeModel === 'openai-gpt-image-2'
-  const activeModelPrice = GEMINI_MODEL_PRICES[activeModel]
-  const priceId = useId()
-
-  return (
-    <section className="rounded-[22px] border border-white/10 bg-black/20 p-4">
-      <div className="flex items-center justify-between">
-        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-          Model Override
-        </p>
-        <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-400">
-          {modelOverrideLabel}
-        </span>
-      </div>
-      <div className="mt-3 flex w-full flex-wrap gap-2 rounded-[16px] border border-white/10 bg-white/[0.02] p-1.5">
-        {availableModels.map((model) => {
-          const isActive = activeModel === model
-          const price = GEMINI_MODEL_PRICES[model]
-
-          return (
-            <button
-              key={model}
-              type="button"
-              aria-label={MODEL_LABELS[model]}
-              aria-describedby={price ? `${priceId}-${model}` : undefined}
-              aria-pressed={isActive}
-              onClick={() => onSelect(model)}
-              className={`min-w-32 flex-1 rounded-[12px] px-3 py-2 text-xs font-medium transition ${
-                isActive
-                  ? 'border border-sky-300/35 bg-sky-400/14 text-sky-100'
-                  : 'border border-transparent text-zinc-400 hover:border-white/20 hover:bg-white/[0.04] hover:text-zinc-200'
-              }`}
-            >
-              {MODEL_LABELS[model]}
-              {price ? (
-                <span id={`${priceId}-${model}`} className="mt-1 block text-[11px] tabular-nums text-zinc-300">
-                  {price.rate}
-                  {price.tier ? <span className="block text-zinc-400">{price.tier}</span> : null}
-                </span>
-              ) : null}
-            </button>
-          )
-        })}
-      </div>
-      {availableModels.some((model) => GEMINI_MODEL_PRICES[model]) ? (
-        <p className="mt-2 text-[11px] text-zinc-400">
-          {activeModelPrice?.higherResolutions ? (
-            <span className="block tabular-nums text-zinc-300">
-              {activeModelPrice.higherResolutions}
-            </span>
-          ) : null}
-          Gemini output prices in USD. Input and other token charges may apply.
-        </p>
-      ) : null}
-      {showOpenAiImageQuality ? (
-        <div className="mt-4 space-y-2 rounded-[16px] border border-white/10 bg-white/[0.03] p-3">
-          <div className="flex items-center justify-between gap-3">
-            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-              GPT Image 2 Quality
-            </p>
-            <span className="text-[11px] text-zinc-400">
-              Per-tab output cost and detail
-            </span>
-          </div>
-          <div className="grid grid-cols-4 gap-2">
-            {openAiImageQualityOptions.map((quality) => {
-              const isActive = openAiImageQuality === quality
-
-              return (
-                <button
-                  key={quality}
-                  type="button"
-                  onClick={() => onOpenAiImageQualityChange(quality)}
-                  className={`rounded-[12px] px-3 py-2 text-xs font-medium capitalize transition ${
-                    isActive
-                      ? 'border border-amber-300/35 bg-amber-300/12 text-amber-100'
-                      : 'border border-white/10 bg-black/20 text-zinc-400 hover:border-white/20 hover:bg-white/[0.04] hover:text-zinc-200'
-                  }`}
-                >
-                  {quality}
-                </button>
-              )
-            })}
-          </div>
-          <p className="text-xs text-zinc-400">
-            Low is cheapest, high is slowest and most expensive, and auto lets OpenAI choose.
-          </p>
-        </div>
-      ) : null}
-    </section>
-  )
+type OutputQualityProps = { onOpenAiImageQualityChange: (quality: OpenAiImageQuality) => void; openAiImageQuality: OpenAiImageQuality }
+function OutputQuality({ onOpenAiImageQualityChange, openAiImageQuality }: OutputQualityProps) {
+  return <section className="rounded-[22px] border border-white/10 bg-black/20 p-4"><p className="text-sm font-medium">Image quality</p><div className="mt-3 grid grid-cols-4 gap-2">{openAiImageQualityOptions.map(quality => <button key={quality} type="button" aria-pressed={openAiImageQuality === quality} onClick={() => onOpenAiImageQualityChange(quality)} className={`rounded-xl border p-2 text-sm capitalize ${openAiImageQuality === quality ? 'border-sky-300 bg-sky-400/15' : 'border-white/10'}`}>{quality}</button>)}</div><p className="mt-2 text-xs text-zinc-400">Quality is a generation instruction to Codex, not a guaranteed output setting. Higher quality can take longer and use more of your Codex limits.</p></section>
 }
 
 type StyleInputPanelProps = {
@@ -4946,200 +3368,6 @@ function StyleInputPanel({ value, onChange }: StyleInputPanelProps) {
         </p>
       </div>
     </section>
-  )
-}
-
-type UvLabPanelProps = {
-  asset: ModelAsset | null
-  atlasSize: UvLabAtlasSize
-  errorMessage: string | null
-  latestJob: UvJobStatusResponse | null
-  paddingPx: number
-  onAtlasSizeChange: (size: UvLabAtlasSize) => void
-  onFileSelect: (asset: ModelAsset | null) => void
-  onInvalidSelection: (message: string) => void
-  onPaddingChange: (paddingPx: number) => void
-  uvEngineStatus: UvEngineStatus
-}
-
-function UvLabPanel({
-  asset,
-  atlasSize,
-  errorMessage,
-  latestJob,
-  paddingPx,
-  onAtlasSizeChange,
-  onFileSelect,
-  onInvalidSelection,
-  onPaddingChange,
-  uvEngineStatus,
-}: UvLabPanelProps) {
-  return (
-    <div className="space-y-4">
-      <ModelUploadField
-        asset={asset}
-        error={errorMessage}
-        helper="Required. UV Lab stages the mesh locally, previews it in-browser, then unwraps and exports it in this browser session."
-        label="Mesh Upload"
-        onFileSelect={onFileSelect}
-        onInvalidSelection={onInvalidSelection}
-      />
-
-      <div className="grid gap-4 xl:grid-cols-2">
-        <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-                Atlas Size
-              </p>
-              <p className="mt-2 text-sm font-medium text-white">
-                Choose the output UV layout resolution.
-              </p>
-            </div>
-            <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-400">
-              PNG Export
-            </span>
-          </div>
-
-          <div className="mt-4 grid gap-2 sm:grid-cols-3">
-            {([1024, 2048, 4096] as UvLabAtlasSize[]).map((size) => (
-              <ModeToggleButton
-                key={size}
-                icon={Box}
-                isActive={atlasSize === size}
-                label={`${size}px`}
-                onClick={() => onAtlasSizeChange(size)}
-              />
-            ))}
-          </div>
-        </section>
-
-        <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-                Packing Margin
-              </p>
-              <p className="mt-2 text-sm font-medium text-white">
-                Control the island padding used during pack.
-              </p>
-            </div>
-            <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] text-zinc-300">
-              {paddingPx}px
-            </span>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={64}
-            step={1}
-            value={paddingPx}
-            onChange={(event) => onPaddingChange(Number(event.target.value))}
-            className="mt-4 w-full"
-          />
-          <p className="mt-3 text-sm leading-6 text-zinc-400">
-            Higher padding reduces texture bleeding risk at the cost of atlas coverage.
-          </p>
-        </section>
-
-        <section className="rounded-[24px] border border-white/10 bg-black/20 p-4 xl:col-span-2">
-          <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-            Engine Status
-          </p>
-          <div className="mt-4 grid gap-3 text-sm text-zinc-300 xl:grid-cols-2">
-            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
-              Built-in UV engine: {uvEngineStatus.state}.
-            </div>
-            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
-              Latest job:{' '}
-              {latestJob
-                ? `${latestJob.status} (${formatUvStep(latestJob.step).toLowerCase()})`
-                : 'none yet.'}
-            </div>
-            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3 xl:col-span-2">
-              {uvEngineStatus.message ?? 'Waiting to initialize the local UV engine.'}
-            </div>
-            <div className="rounded-[18px] border border-white/10 bg-white/[0.03] px-4 py-3">
-              Output format: {asset ? asset.format.toUpperCase() : 'staged mesh required.'}
-            </div>
-          </div>
-        </section>
-      </div>
-    </div>
-  )
-}
-
-type UvLabBriefProps = {
-  activeModelName: string | null
-  asset: ModelAsset | null
-  atlasSize: UvLabAtlasSize
-  job: UvJobStatusResponse | null
-  lastSavedAt: string | null
-  paddingPx: number
-  uvEngineStatus: UvEngineStatus
-}
-
-function UvLabBrief({
-  activeModelName,
-  asset,
-  atlasSize,
-  job,
-  lastSavedAt,
-  paddingPx,
-  uvEngineStatus,
-}: UvLabBriefProps) {
-  const description = job
-    ? isTerminalUvJobStatus(job.status)
-      ? job.status === 'succeeded'
-        ? 'The last UV job completed successfully. Review the processed preview, inspect island coverage, and download the new mesh artifacts.'
-        : 'The last UV job failed. Review the error panel above, adjust the mesh or settings, and retry.'
-      : `The built-in UV engine is ${formatUvStep(job.step).toLowerCase()} for the current mesh.`
-    : asset
-      ? 'The staged mesh is ready for a one-click unwrap pass using the built-in UV engine.'
-      : 'Upload an OBJ or FBX mesh to stage a UV unwrap request.'
-
-  return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.75fr)]">
-      <div className="rounded-[28px] border border-white/10 bg-black/20 p-5">
-        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-          UV Brief
-        </p>
-        <p className="mt-4 text-sm leading-7 text-zinc-300">{description}</p>
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          <MetricCard label="Mesh" value={asset?.name ?? 'Not attached'} />
-          <MetricCard label="Atlas" value={`${atlasSize}px`} />
-          <MetricCard label="Padding" value={`${paddingPx}px`} />
-          <MetricCard
-            label="Triangles"
-            value={formatTriangleCount(job?.stats?.triangleCount)}
-          />
-        </div>
-      </div>
-
-      <div className="rounded-[28px] border border-white/10 bg-black/20 p-5">
-        <p className="font-mono text-[10px] uppercase tracking-[0.32em] text-zinc-500">
-          Engine Status
-        </p>
-        <ul className="mt-4 space-y-3">
-          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
-            Runtime: {uvEngineStatus.state}.{' '}
-            {activeModelName ? `Engine: ${activeModelName}.` : ''}
-          </li>
-          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
-            {uvEngineStatus.message ?? 'The local UV runtime has not been warmed yet.'}
-          </li>
-          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
-            Job state: {job ? `${job.status} / ${job.step}.` : 'idle.'}
-          </li>
-          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
-            Last saved session: {lastSavedAt ? new Date(lastSavedAt).toLocaleString() : 'none yet'}.
-          </li>
-          <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
-            Generated outputs stay in memory only and are not persisted into browser local storage.
-          </li>
-        </ul>
-      </div>
-    </div>
   )
 }
 
@@ -5427,7 +3655,6 @@ type ActionAnimatorPanelProps = {
   onActionTypeChange: (actionType: ActionAnimatorActionType) => void
   onCustomActionPromptChange: (prompt: string) => void
   onDownloadFrames: () => void
-  onDownloadVideo: () => void
   onFileSelect: (asset: ReferenceAsset | null) => void
   onFirstFrameGuideChange: (asset: ReferenceAsset | null) => void
   onFpsChange: (fps: number) => void
@@ -5435,7 +3662,6 @@ type ActionAnimatorPanelProps = {
   onKeyColorChange: (keyColor: ActionAnimatorKeyColor) => void
   onLastFrameGuideChange: (asset: ReferenceAsset | null) => void
   onNormalizedSizeChange: (size: ActionAnimatorNormalizedSize) => void
-  onPipelineChange: (pipeline: ActionAnimatorPipeline) => void
   onUseLatestCharacterSheet: () => void
 }
 
@@ -5455,7 +3681,6 @@ function ActionAnimatorPanel({
   onActionTypeChange,
   onCustomActionPromptChange,
   onDownloadFrames,
-  onDownloadVideo,
   onFileSelect,
   onFirstFrameGuideChange,
   onFpsChange,
@@ -5463,34 +3688,41 @@ function ActionAnimatorPanel({
   onKeyColorChange,
   onLastFrameGuideChange,
   onNormalizedSizeChange,
-  onPipelineChange,
   onUseLatestCharacterSheet,
 }: ActionAnimatorPanelProps) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [previewIndex, setPreviewIndex] = useState(0)
-  const frames = artifacts?.frames ?? []
+  const previewPosition = useRef(0)
+  const frames = useMemo(() => artifacts?.frames ?? [], [artifacts])
   const currentFrame = frames[previewIndex] ?? null
+  const atlasStyles = useMemo(() => getActionAnimatorAtlasPreviewFrames(artifacts), [artifacts])
+  const atlasStyle = atlasStyles?.[previewIndex]
+  const previewFps = artifacts?.metadata.fps ?? fps
   const normalizedSizeOptions = getActionAnimatorNormalizedSizeOptions()
   const isImageStripPipeline = pipeline === 'image-strip'
-
-  useEffect(() => {
-    setPreviewIndex(0)
-    setIsPlaying(false)
-  }, [artifacts?.spriteSheet.id, frameCount, pipeline])
 
   useEffect(() => {
     if (!isPlaying || frames.length <= 1) {
       return undefined
     }
 
-    const intervalId = window.setInterval(() => {
-      setPreviewIndex((previousIndex) => (previousIndex + 1) % frames.length)
-    }, Math.max(33, Math.round(1000 / Math.max(1, fps))))
-
-    return () => {
-      window.clearInterval(intervalId)
+    const startPosition = previewPosition.current
+    let startTime: number | undefined
+    let lastIndex = Math.floor(startPosition)
+    function tick(timestamp: number) {
+      startTime ??= timestamp
+      const position = getActionAnimatorPreviewPosition(startPosition, timestamp - startTime, previewFps, frames.length)
+      previewPosition.current = position
+      const index = Math.floor(position)
+      if (index !== lastIndex) {
+        lastIndex = index
+        setPreviewIndex(index)
+      }
+      animationId = window.requestAnimationFrame(tick)
     }
-  }, [fps, frames, isPlaying])
+    let animationId = window.requestAnimationFrame(tick)
+    return () => window.cancelAnimationFrame(animationId)
+  }, [previewFps, frames, isPlaying])
 
   function handleFrameDownload(frame: ForgeResult, index: number) {
     const actionSlug =
@@ -5513,38 +3745,13 @@ function ActionAnimatorPanel({
           </p>
           <p className="mt-2 text-sm font-medium text-white">
             {isImageStripPipeline
-              ? 'Generate a guided sprite strip with image models, then split and normalize the returned frames for preview and export.'
-              : 'Generate a Gemini Omni clip, extract keyed frames server-side, and review the normalized sprite output before export.'}
+              ? 'Generate a guided 2D sprite grid with transparent frame and atlas exports. This is not a 3D rig or animation clip.'
+              : 'Generate and export sprite frames.'}
           </p>
         </div>
         <div className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 font-mono text-xs text-cyan-100">
-          {isImageStripPipeline ? 'Image strip pipeline' : 'Gemini Omni video pipeline'}
+          2D Sprite Grid
         </div>
-      </div>
-
-      <div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-4">
-        <label className="block font-mono text-[10px] uppercase tracking-[0.28em] text-zinc-500">
-          Generation Type
-        </label>
-        <div className="mt-4 grid gap-2 sm:grid-cols-2">
-          <ModeToggleButton
-            icon={Play}
-            isActive={pipeline === 'veo-video'}
-            label="Video"
-            onClick={() => onPipelineChange('veo-video')}
-          />
-          <ModeToggleButton
-            icon={ImagePlus}
-            isActive={pipeline === 'image-strip'}
-            label="Image Strip"
-            onClick={() => onPipelineChange('image-strip')}
-          />
-        </div>
-        <p className="mt-3 text-sm leading-6 text-zinc-400">
-          {isImageStripPipeline
-            ? 'Use Gemini or ChatGPT image models to return a guided sprite strip. Optional first and last frame references help lock the endpoints.'
-            : 'Use Gemini Omni to animate the source character into a short keyed video before frame extraction.'}
-        </p>
       </div>
 
       <ImageUploadField
@@ -5552,7 +3759,7 @@ function ActionAnimatorPanel({
         helper={
           isImageStripPipeline
             ? 'Upload the source character image the sprite strip should preserve across every frame.'
-            : 'Upload the source character image Gemini Omni should preserve while generating motion.'
+            : 'Upload the source character image to preserve throughout the animation.'
         }
         asset={asset}
         icon={ImagePlus}
@@ -5613,7 +3820,7 @@ function ActionAnimatorPanel({
             actionType === 'custom'
               ? isImageStripPipeline
                 ? 'Describe the exact motion you want the image models to stage across the strip.'
-                : 'Describe the exact motion you want Gemini Omni to animate.'
+                : 'Describe the exact motion to animate.'
               : 'Optional motion notes. Ex: heavier footfalls, stronger anticipation, aggressive lean.'
           }
           rows={4}
@@ -5648,8 +3855,8 @@ function ActionAnimatorPanel({
           />
           <p className="mt-3 text-sm leading-6 text-zinc-400">
             {isImageStripPipeline
-              ? 'Request this many evenly spaced frames in the returned strip.'
-              : 'Sample this many frames evenly across the generated video.'}
+              ? 'Request this many distinct poses across an evenly spaced grid.'
+              : 'Generate this many ordered animation frames.'}
           </p>
         </div>
 
@@ -5672,7 +3879,7 @@ function ActionAnimatorPanel({
           />
           <p className="mt-3 text-sm leading-6 text-zinc-400">
             {isImageStripPipeline
-              ? 'Controls the local preview speed and tells the model how the action should pace across the strip.'
+              ? 'Sets the timing of the next generated asset. Changing this will not relabel earlier exports.'
               : 'Controls the local preview speed and the target motion pacing.'}
           </p>
         </div>
@@ -5716,7 +3923,7 @@ function ActionAnimatorPanel({
             ))}
           </div>
           <p className="mt-3 text-sm leading-6 text-zinc-400">
-            Frames are normalized onto square keyed canvases after extraction.
+            Frames share one crop and scale, with a transparent background.
           </p>
         </div>
       </div>
@@ -5728,13 +3935,7 @@ function ActionAnimatorPanel({
               Preview
             </p>
             <p className="mt-2 text-sm text-zinc-400">
-              {artifacts
-                ? artifacts.video
-                  ? `${artifacts.metadata.frameCount} frames extracted with even sampling on a ${artifacts.metadata.keyColor} key.`
-                  : `${artifacts.metadata.frameCount} strip frames prepared on a ${artifacts.metadata.keyColor} key.`
-                : isImageStripPipeline
-                  ? 'Run Action Animator to preview the returned sprite strip frames.'
-                  : 'Run Action Animator to preview the returned frames and download the source video.'}
+              {artifacts ? `${artifacts.metadata.frameCount} frames at ${artifacts.metadata.fps} fps · ${(artifacts.metadata.frameCount / artifacts.metadata.fps).toFixed(2)} s loop` : 'Generate 2D sprites to preview the loop.'}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -5754,23 +3955,21 @@ function ActionAnimatorPanel({
             >
               Download Frames
             </button>
-            {!isImageStripPipeline ? (
-              <button
-                type="button"
-                disabled={!artifacts?.video}
-                onClick={onDownloadVideo}
-                className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-4 py-2 text-sm text-cyan-50 transition hover:border-cyan-300/35 hover:bg-cyan-400/16 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Download Video
-              </button>
-            ) : null}
+
           </div>
         </div>
 
         <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(260px,0.85fr)]">
           <div className="rounded-[20px] border border-white/10 bg-black/30 p-4">
             <div className="aspect-square overflow-hidden rounded-[18px] border border-white/10 bg-black/40">
-              {currentFrame ? (
+              {atlasStyle && artifacts ? (
+                <div
+                  role="img"
+                  aria-label={`Action Animator preview frame ${previewIndex + 1}`}
+                  className="h-full w-full bg-no-repeat"
+                  style={{ ...atlasStyle, backgroundImage: `url("${artifacts.spriteSheet.dataUrl}")` }}
+                />
+              ) : currentFrame ? (
                 <img
                   alt={`Action Animator preview frame ${previewIndex + 1}`}
                   className="h-full w-full object-contain"
@@ -5806,6 +4005,8 @@ function ActionAnimatorPanel({
                   type="button"
                   disabled={!frame.dataUrl}
                   onClick={() => {
+                    setIsPlaying(false)
+                    previewPosition.current = index
                     setPreviewIndex(index)
                     if (frame.dataUrl) {
                       handleFrameDownload(frame, index)
@@ -6698,15 +4899,17 @@ function RecentPromptChips({
 type BatchPanelProps = {
   generationCount: number
   onSelect: (count: number) => void
+  disabled?: boolean
+  label?: string
 }
 
-function BatchPanel({ generationCount, onSelect }: BatchPanelProps) {
+function BatchPanel({ generationCount, onSelect, disabled = false, label = 'Generation Count' }: BatchPanelProps) {
   return (
     <section className="rounded-[24px] border border-white/10 bg-black/20 p-4">
       <div className="flex items-center justify-between">
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-500">
-            Generation Count
+            {label}
           </p>
           <p className="mt-2 text-sm font-medium text-white">
             {generationCount} candidate outputs
@@ -6720,6 +4923,8 @@ function BatchPanel({ generationCount, onSelect }: BatchPanelProps) {
       <div className="mt-5">
         <input
           type="range"
+          aria-label={label}
+          disabled={disabled}
           min={1}
           max={4}
           step={1}
@@ -6732,6 +4937,7 @@ function BatchPanel({ generationCount, onSelect }: BatchPanelProps) {
             <button
               key={count}
               type="button"
+              disabled={disabled}
               onClick={() => onSelect(count)}
               className={`rounded-full border px-0 py-2 text-sm transition ${
                 generationCount === count
@@ -6760,9 +4966,8 @@ function TopPanel({
   readinessLabel,
 }: TopPanelProps) {
   const ModeIcon = activeMode.icon
-  const profileLabel = activeMode.label === 'UV Lab' ? 'workflow profile' : 'prompt profile'
-  const previewLabel =
-    activeMode.label === 'UV Lab' ? 'Prepared workflow summary' : 'Composed request preview'
+  const profileLabel = 'prompt profile'
+  const previewLabel = 'Composed request preview'
 
   return (
     <div
@@ -6897,7 +5102,7 @@ function ForgeBrief({
             {activeModelName ? ` Model: ${activeModelName}.` : ''}
           </li>
           <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
-            Server health only exposes availability status. Credential state stays server-side.
+            {codexStatusMessage(serviceHealth)}
           </li>
           <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
             If live provider access is blocked, use mock forge outputs to keep iterating on layout, downloads, palette extraction, and review flow.
@@ -6908,21 +5113,21 @@ function ForgeBrief({
           <li className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
             Troubleshooting:{' '}
             <a
-              href="https://ai.google.dev/gemini-api/docs/rate-limits"
+              href="https://developers.openai.com/codex/"
               target="_blank"
               rel="noreferrer"
               className="text-sky-300 underline decoration-sky-300/40 underline-offset-4"
             >
-              rate limits
+              Codex documentation
             </a>{' '}
             and{' '}
             <a
-              href="https://aistudio.google.com/app/apikey"
+              href="https://developers.openai.com/codex/auth/"
               target="_blank"
               rel="noreferrer"
               className="text-sky-300 underline decoration-sky-300/40 underline-offset-4"
             >
-              API key settings
+              local sign-in help
             </a>
             .
           </li>
@@ -7325,7 +5530,7 @@ const textureProfiles: Record<
   rogue: emptyProfile,
 }
 
-const visualizerProfiles: Record<
+const conceptProfiles: Record<
   PromptArchetype,
   { detail: string[]; enhance: string[]; remix: string[] }
 > = {
@@ -7449,11 +5654,9 @@ function buildPromptVariant({
         : activeMode === 'texture-lab'
           ? textureProfiles
         : activeMode === 'action-animator' || activeMode === 'portrait-studio'
-          ? visualizerProfiles
-          : activeMode === 'visualizer'
-            ? visualizerProfiles
+          ? conceptProfiles
           : activeMode === 'vfx-forge'
-            ? visualizerProfiles
+            ? conceptProfiles
             : characterSheetProfiles
 
   const profile = profilesByMode[archetype] ?? profilesByMode.general
@@ -7700,12 +5903,12 @@ function ErrorPanel({
               ) : null}
               {showDocsLink ? (
                 <a
-                  href="https://ai.google.dev/gemini-api/docs/rate-limits"
+                  href="https://developers.openai.com/codex/"
                   target="_blank"
                   rel="noreferrer"
                   className="rounded-full border border-rose-100/20 px-4 py-2 text-sm text-rose-100/90 transition hover:border-rose-100/35 hover:bg-black/10"
                 >
-                  Open Gemini Quota Docs
+                  Open Codex Help
                 </a>
               ) : null}
             </div>

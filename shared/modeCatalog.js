@@ -4,9 +4,7 @@ const allForgeModes = Object.freeze([
   'variant-forge',
   'portrait-studio',
   'texture-lab',
-  'uv-lab',
   'vfx-forge',
-  'visualizer',
   'character-sheet',
 ])
 
@@ -16,7 +14,6 @@ const forgeApiModes = Object.freeze([
   'texture-lab',
   'variant-forge',
   'vfx-forge',
-  'visualizer',
 ])
 
 const specialApiModes = Object.freeze([
@@ -25,7 +22,6 @@ const specialApiModes = Object.freeze([
 ])
 
 const localWorkflowModes = Object.freeze([
-  'uv-lab',
 ])
 
 const modeExecutionKindByMode = Object.freeze({
@@ -34,10 +30,8 @@ const modeExecutionKindByMode = Object.freeze({
   'character-sheet': 'special-api',
   'portrait-studio': 'forge-api',
   'texture-lab': 'forge-api',
-  'uv-lab': 'local-workflow',
   'variant-forge': 'forge-api',
   'vfx-forge': 'forge-api',
-  visualizer: 'forge-api',
 })
 
 function isForgeMode(value) {

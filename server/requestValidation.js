@@ -39,7 +39,7 @@ const allowedStandardReferenceSlots = new Set(['style', 'subject'])
 const allowedCharacterReferenceSlots = new Set(['face', 'outfit', 'art-style'])
 const allowedResponseModalities = new Set(['IMAGE', 'TEXT'])
 const allowedActionAnimatorKeyColors = new Set(['green', 'blue'])
-const allowedActionAnimatorPipelines = new Set(['veo-video', 'image-strip'])
+const allowedActionAnimatorPipelines = new Set(['image-strip'])
 const allowedOpenAiImageQualities = new Set(['auto', 'low', 'medium', 'high'])
 
 function buildValidationError(message, details) {
@@ -653,7 +653,7 @@ export function validateActionAnimatorRequest(body) {
     normalizedSize: readActionAnimatorFrameSize(body?.normalizedSize, 'normalizedSize'),
     pipeline:
       readOptionalEnum(body?.pipeline, 'pipeline', allowedActionAnimatorPipelines) ??
-      'veo-video',
+      'image-strip',
     prompt: readOptionalTrimmedString(body?.prompt, 'prompt', maxPromptLength),
     quality: readOptionalOpenAiImageQuality(body?.quality),
   }

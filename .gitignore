@@ -13,6 +13,7 @@ node_modules
 dist
 dist-ssr
 release
+/The Foundry Web.exe
 public/wasm
 *.local
 .env

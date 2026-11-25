@@ -1,9 +1,11 @@
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
 export default defineConfig({
+  root: fileURLToPath(new URL('.', import.meta.url)),
   plugins: [react(), tailwindcss()],
   build: {
     chunkSizeWarningLimit: 800,
@@ -33,7 +35,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:3001',
+      '/api': 'http://127.0.0.1:3001',
     },
     watch: {
       ignored: ['**/server/data/**'],
@@ -41,6 +43,6 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    setupFiles: ['./src/test/setup.ts'],
+    setupFiles: [fileURLToPath(new URL('./src/test/setup.ts', import.meta.url))],
   },
 })

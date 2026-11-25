@@ -181,8 +181,8 @@ export function TextureLabControls({
       <p className="text-xs text-zinc-400">
         {settings.technique === 'faithful'
           ? 'Rearranges source patches locally. Distinctive marks may recur; large cracks and brick courses may fragment.'
-          : modelId === 'openai-gpt-image-2'
-            ? 'Native edit mask plus protected compositing.'
+          : modelId === 'codex'
+            ? 'Codex reference-guided edit plus protected compositing.'
             : 'Reference-guided edit plus protected compositing; this provider has no enabled native mask.'}
       </p>
       <p className="text-xs">
@@ -237,10 +237,12 @@ export function TextureLabWorkspace({
   results,
   runner,
   onDownload,
+  onUseForPbr,
 }: {
   results: ForgeResult[]
   runner: ReturnType<typeof useTextureLabRun>
   onDownload: (result: ForgeResult, index: number) => void
+  onUseForPbr: (result: ForgeResult) => void
 }) {
   const [selected, setSelected] = useState(''),
     [repeats, setRepeats] = useState(1),
@@ -342,6 +344,9 @@ export function TextureLabWorkspace({
               onClick={() => onDownload(result, results.indexOf(result))}
             >
               Export selected candidate
+            </button>
+            <button type="button" className={button} onClick={() => onUseForPbr(result)}>
+              Use selected texture for PBR
             </button>
           </div>
           <div

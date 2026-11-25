@@ -1,4 +1,6 @@
 import JSZip from 'jszip'
+import sharp from 'sharp'
+import { unityVfxImporter } from './vfxUnityImporter.js'
 
 import {
   getVfxExportTargetLabel,
@@ -12,6 +14,11 @@ const recipeVersion = '1.0.0'
 const defaultShader = 'Universal Render Pipeline/Particles/Unlit'
 const defaultMaterialKey = 'urp_particles_unlit_generic'
 const defaultGraphTemplate = 'urp_vfx_generic'
+function boundedNumber(value, fallback, min, max) {
+  const number = value === undefined || value === null || value === '' ? fallback : Number(value)
+  return Math.max(min, Math.min(max, Math.round(Number.isFinite(number) ? number : fallback)))
+}
+
 const baseMapFallbackOrder = ['flipbook', 'swirl', 'noise', 'dissolve-mask']
 
 function sanitizeFileSegment(value, fallback) {
@@ -42,11 +49,8 @@ function buildPreviewFileName(effectLabel, kind) {
 
 function buildTextureSlotMap(kinds) {
   const selectedKinds = new Set(kinds)
-  const textureSlots = {
-    _DissolveMask: selectedKinds.has('dissolve-mask') ? 'dissolve-mask' : null,
-    _NoiseTex: selectedKinds.has('noise') ? 'noise' : null,
-    _SwirlTex: selectedKinds.has('swirl') ? 'swirl' : null,
-  }
+  // URP Particles/Unlit exposes _BaseMap, not custom noise/dissolve/swirl slots.
+  const textureSlots = {}
   const baseMapKind = baseMapFallbackOrder.find((kind) => selectedKinds.has(kind)) ?? null
 
   if (baseMapKind) {
@@ -57,8 +61,8 @@ function buildTextureSlotMap(kinds) {
 }
 
 function buildParticleSystemConfig({ frameCount, intensity, looping, hasFlipbook }) {
-  const normalizedIntensity = Math.max(0, Math.min(100, Math.round(Number(intensity) || 60)))
-  const normalizedFrameCount = Math.max(4, Math.min(30, Math.round(Number(frameCount) || 8)))
+  const normalizedIntensity = boundedNumber(intensity, 60, 0, 100)
+  const normalizedFrameCount = boundedNumber(frameCount, 8, 4, 30)
   const intensityScale = normalizedIntensity / 100
 
   return {
@@ -70,10 +74,10 @@ function buildParticleSystemConfig({ frameCount, intensity, looping, hasFlipbook
           { count: 8 + Math.round(intensityScale * 12), time: 0.06 },
         ],
     colorOverLife: [
-      { color: '#FFF5D8FF', time: 0 },
-      { color: '#FFAF59FF', time: 0.4 },
-      { color: '#FF5A1FCC', time: 0.8 },
-      { color: '#00000000', time: 1 },
+      { color: '#FFFFFFFF', time: 0 },
+      { color: '#FFFFFFFF', time: 0.4 },
+      { color: '#FFFFFFCC', time: 0.8 },
+      { color: '#FFFFFF00', time: 1 },
     ],
     emission: looping
       ? {
@@ -96,7 +100,8 @@ function buildParticleSystemConfig({ frameCount, intensity, looping, hasFlipbook
           min: 0.35 + intensityScale * 0.2,
         },
     looping,
-    rendererMode: hasFlipbook ? 'stretched-billboard' : 'billboard',
+    rendererMode: 'billboard',
+    textureSheetAnimation: hasFlipbook ? { columns: normalizedFrameCount, rows: 1, cycles: 1 } : null,
     size: hasFlipbook
       ? {
           max: 0.42 + intensityScale * 0.3,
@@ -158,7 +163,7 @@ function buildVfxGraphExposedProperties(textures, { intensity, looping }) {
       type: 'float',
     },
     {
-      defaultValue: 0.7 + Math.max(0, Math.min(100, Math.round(Number(intensity) || 60))) / 100,
+      defaultValue: 0.7 + boundedNumber(intensity, 60, 0, 100) / 100,
       name: 'Lifetime',
       type: 'float',
     },
@@ -168,7 +173,7 @@ function buildVfxGraphExposedProperties(textures, { intensity, looping }) {
       type: 'float',
     },
     {
-      defaultValue: Math.max(0, Math.min(100, Math.round(Number(intensity) || 60))),
+      defaultValue: boundedNumber(intensity, 60, 0, 100),
       name: 'Intensity',
       type: 'float',
     },
@@ -196,7 +201,7 @@ function buildVfxImportNotes({
       ? 'The bundle includes flipbook content prepared as a horizontal sprite strip on a pure black background.'
       : 'The bundle contains standalone utility textures without a sprite-strip flipbook.',
     exportTarget === 'particle-system'
-      ? 'Create a URP Particles Unlit material and bind the exported textures to the listed slots before tuning the particle system values.'
+      ? 'Use Tools > Foundry > Import VFX Recipe in Unity to create a URP additive material and particle prefab. Noise, swirl and dissolve textures are independent ingredients; custom modulation requires a custom shader.'
       : 'Use the exported VFX Graph property names as importer bindings; v1 does not emit a native .vfx asset.',
   ]
 }
@@ -215,8 +220,8 @@ export function buildVfxForgePrompt({
   const normalizedEffectLabel = normalizeEffectLabel(effectLabel)
   const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
   const normalizedStyleText = typeof styleText === 'string' ? styleText.trim() : ''
-  const normalizedFrameCount = Math.max(4, Math.min(30, Math.round(Number(frameCount) || 8)))
-  const normalizedIntensity = Math.max(0, Math.min(100, Math.round(Number(intensity) || 60)))
+  const normalizedFrameCount = boundedNumber(frameCount, 8, 4, 30)
+  const normalizedIntensity = boundedNumber(intensity, 60, 0, 100)
   const exportTargetLine =
     exportTarget && exportTarget !== 'none'
       ? `Planned export target: ${getVfxExportTargetLabel(exportTarget)}.`
@@ -297,7 +302,7 @@ export function resolveVfxForgeSystemInstruction(
   customInstruction,
   { frameCount, looping, textureKind },
 ) {
-  const normalizedFrameCount = Math.max(4, Math.min(30, Math.round(Number(frameCount) || 8)))
+  const normalizedFrameCount = boundedNumber(frameCount, 8, 4, 30)
   const normalizedLooping = Boolean(looping)
   const textureRules =
     textureKind === 'flipbook'
@@ -341,6 +346,10 @@ export function resolveVfxForgeSystemInstruction(
 }
 
 export function buildVfxRecipeManifest(request) {
+  request = { ...request, frameCount: boundedNumber(request.frameCount, 8, 4, 30), intensity: boundedNumber(request.intensity, 60, 0, 100), looping: typeof request.looping === 'boolean' ? request.looping : true }
+  if (!Array.isArray(request.textures) || request.textures.length < 1 || request.textures.length > 4 || new Set(request.textures.map(t => t?.kind)).size !== request.textures.length || request.textures.some(t => !vfxTextureKinds.includes(t?.kind))) {
+    throw Object.assign(new Error('Provide one to four unique supported VFX textures.'), { status: 400, statusCode: 400 })
+  }
   const effectLabel = normalizeEffectLabel(request.effectLabel)
   const textures = [...request.textures]
     .sort(
@@ -350,7 +359,10 @@ export function buildVfxRecipeManifest(request) {
       fileName: buildTextureFileName(effectLabel, texture.kind),
       kind: texture.kind,
       materialSlots: [],
-      mimeType: texture.mimeType,
+      mimeType: 'image/png',
+      sourceMimeType: texture.mimeType,
+      width: texture.width,
+      height: texture.height,
       previewFileName: buildPreviewFileName(effectLabel, texture.kind),
     }))
   const textureSlots = buildTextureSlotMap(textures.map((texture) => texture.kind))
@@ -416,77 +428,75 @@ export function buildVfxRecipeManifest(request) {
   }
 }
 
+function exportError(message) {
+  return Object.assign(new Error(message), { status: 400, statusCode: 400 })
+}
+
+async function decodeExportImage(image, frameCount) {
+  if (typeof image.data !== 'string' || image.data.length > 32 * 1024 * 1024 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)) {
+    throw exportError('VFX export requires bounded base64 image data.')
+  }
+  try {
+    const input = Buffer.from(image.data, 'base64')
+    const decoder = sharp(input, { limitInputPixels: 64 * 1024 * 1024, failOn: 'error' })
+    const metadata = await decoder.metadata()
+    if (!['png', 'jpeg', 'webp'].includes(metadata.format) || (metadata.pages ?? 1) > 1 || !metadata.width || !metadata.height || metadata.width > 16384 || metadata.height > 16384) {
+      throw exportError('VFX images must be static PNG, JPEG or WebP, at most 16384 pixels per side.')
+    }
+    if (image.kind === 'flipbook' && (metadata.width < frameCount || metadata.width % frameCount !== 0)) {
+      throw exportError(`Flipbook width must be evenly divisible by its ${frameCount} horizontal frames. Rebuild the sprite strip before export.`)
+    }
+    const data = await decoder.png().toBuffer()
+    return { ...image, data, width: metadata.width, height: metadata.height, mimeType: 'image/png' }
+  } catch (error) {
+    if (error.status === 400) throw error
+    throw exportError('A VFX export image is corrupt, unsupported, or exceeds the decoded pixel limit.')
+  }
+}
+
 export async function buildVfxExportBundle(request) {
-  const effectLabel = normalizeEffectLabel(request.effectLabel)
-  const recipeManifest = buildVfxRecipeManifest({
-    ...request,
-    effectLabel,
-  })
+  // Validate metadata before decoding. Serial decoding bounds peak image memory.
+  const initialRecipe = buildVfxRecipeManifest(request)
+  const previews = request.previews ?? []
+  if (!Array.isArray(previews) || previews.length > 4) throw exportError('At most four VFX previews may be exported.')
+  const textures = []
+  for (const texture of request.textures) textures.push(await decodeExportImage(texture, initialRecipe.frameCount))
+  const recipeManifest = buildVfxRecipeManifest({ ...request, textures })
+  const effectLabel = recipeManifest.effectLabel
   const zip = new JSZip()
-  const previewEntries =
-    request.previews.length > 0
-      ? request.previews.map((preview, index) => ({
-          data: preview.data,
-          fileName: `preview/preview-${String(index + 1).padStart(2, '0')}.png`,
-          label: preview.label || `Preview ${index + 1}`,
-        }))
-      : request.textures.map((texture) => ({
-          data: texture.data,
-          fileName: buildPreviewFileName(effectLabel, texture.kind),
-          label: getVfxTextureLabel(texture.kind),
-        }))
-
-  zip.file(
-    'manifest.json',
-    JSON.stringify(
-      {
-        bundleKind: 'vfx-forge-export',
-        effectLabel,
-        exportTarget: request.exportTarget,
-        previewFiles: previewEntries.map((entry) => entry.fileName),
-        recipeFile: 'recipe.json',
-        recipeVersion,
-        textureFiles: recipeManifest.textures.map((texture) => texture.fileName),
-        unityPipeline: request.unityPipeline,
-      },
-      null,
-      2,
-    ),
-  )
+  const previewFiles = []
+  for (const texture of textures) {
+    zip.file(buildTextureFileName(effectLabel, texture.kind), texture.data)
+    const previewName = buildPreviewFileName(effectLabel, texture.kind)
+    zip.file(previewName, texture.data)
+    previewFiles.push(previewName)
+  }
+  for (const [index, preview] of previews.entries()) {
+    const decoded = await decodeExportImage(preview, initialRecipe.frameCount)
+    const fileName = `preview/preview-${String(index + 1).padStart(2, '0')}.png`
+    zip.file(fileName, decoded.data)
+    previewFiles.push(fileName)
+  }
+  zip.file('manifest.json', JSON.stringify({
+    bundleKind: 'vfx-forge-export', effectLabel,
+    exportTarget: request.exportTarget, previewFiles, recipeFile: 'recipe.json',
+    recipeVersion, textureFiles: recipeManifest.textures.map(texture => texture.fileName),
+    unityPipeline: request.unityPipeline,
+    unityImporterFile: 'Editor/FoundryVfxImporter.cs',
+  }, null, 2))
   zip.file('recipe.json', JSON.stringify(recipeManifest, null, 2))
-
-  request.textures.forEach((texture) => {
-    zip.file(buildTextureFileName(effectLabel, texture.kind), texture.data, {
-      base64: true,
-    })
-  })
-
-  previewEntries.forEach((preview) => {
-    zip.file(preview.fileName, preview.data, {
-      base64: true,
-    })
-  })
-
-  zip.file(
-    'README.md',
-    [
-      '# VFX Forge Export Bundle',
-      '',
-      'This bundle contains generic Unity config data and generated texture ingredients.',
-      '',
-      'Included files:',
-      '- `recipe.json`: generic Unity recipe manifest',
-      '- `manifest.json`: bundle metadata',
-      '- `textures/*.png`: generated effect textures',
-      '- `preview/*.png`: preview images for quick inspection',
-      '',
-      'Import notes:',
-      ...recipeManifest.importNotes.map((note) => `- ${note}`),
-    ].join('\n'),
-  )
-
-  return zip.generateAsync({
-    compression: 'DEFLATE',
-    type: 'nodebuffer',
-  })
+  zip.file('Editor/FoundryVfxImporter.cs', unityVfxImporter)
+  zip.file('README.md', [
+    '# VFX Forge Export Bundle', '',
+    'Extract textures, previews, recipe.json and manifest.json into a new folder inside a Unity project Assets folder. Requires URP.',
+    'Install Editor/FoundryVfxImporter.cs once at Assets/Editor/FoundryVfxImporter.cs. Do not install duplicate copies when importing additional bundles.',
+    'After scripts compile, choose Tools > Foundry > Import VFX Recipe and select recipe.json.',
+    'Particle System recipes create a new material and prefab without overwriting existing assets.',
+    'VFX Graph recipes provide texture ingredients and exposed-property guidance, not a native .vfx graph. Build the graph manually using recipe.json.',
+    'Utility maps are not automatically wired into URP Particles/Unlit; that shader only supports the base texture.',
+    'The flipbook uses a horizontal row with one cycle over each particle lifetime. Inspect generated frames for visual consistency before shipping.', '',
+    'Included: recipe.json, manifest.json, textures/*.png, preview/*.png, Editor/FoundryVfxImporter.cs.', '',
+    ...recipeManifest.importNotes.map(note => `- ${note}`),
+  ].join('\n'))
+  return zip.generateAsync({ compression: 'DEFLATE', compressionOptions: { level: 3 }, type: 'nodebuffer' })
 }

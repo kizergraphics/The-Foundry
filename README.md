@@ -1,173 +1,58 @@
-# The Foundry
+# The Foundry — Codex Edition
 
-The Foundry is a local Vite + React asset tool backed by an Express API and an optional Electron desktop shell. It is built for experimenting with image generation, character sheets, texture workflows, VFX texture/recipe output, UV tooling, and visual asset iteration.
+The Foundry is a local browser app for asset generation and PBR material finishing. The `main` branch is the Codex-only edition. All AI generation and prompt assistance run through your signed-in local Codex runtime. Workflows include Armory, Character Sheet, Variant Forge, Portrait Studio, Texture Lab, Action Animator, and VFX Forge.
 
-This project is still early and very much open to improvement. If you try it, break it, fix it, or have ideas for making the workflows smoother, contributions are welcome.
+## Run locally
 
-## Screenshots
+Requires Node.js 20.19+ (or a supported newer LTS) and npm.
 
-![The Foundry workspace overview](assets/screenshots/foundry-overview.jpg)
+On Windows, run `npm ci` and `npm run build:exe`, then double-click **The Foundry Web.exe** in the repository root. The launcher starts the local server and opens your default browser. Leave the launcher window open while you work. Click **Stop and Exit** or close the launcher window to stop the server and any Codex workers it started. Your browser stays open.
 
-![Texture Lab controls and output workspace](assets/screenshots/texture-lab-workflow.jpg)
+To start from a terminal:
 
-![Texture Lab expansion input and output slot](assets/screenshots/texture-lab-expansion.jpg)
+1. Open a terminal in the repository root.
+2. Run `npm ci`.
+3. Run `npm run build` and then `npm start`.
+4. Open http://127.0.0.1:3001 in your browser.
 
-## Current Status
+For editing, `npm run dev` runs Vite and the API together. The default is local-only; the desktop does not need Electron. This is not a deployed public website.
 
-The main generation flows work, but a few areas need extra attention:
+## Codex connection
 
-- The 3D viewer still needs work before that workflow feels reliable and polished.
-- The Visualizer tab has not been thoroughly checked yet.
-- Drag and drop works, but the implementation is not as clean or smooth as it should be.
+All AI generation and text assistance use the local Codex app-server bridge. There is no API-key provider, model picker, browser login form or direct browser access to your Codex credentials. Usage is charged against your signed-in Codex subscription usage and limits; availability of image generation depends on the installed runtime and account.
 
-## Requirements
+Install the official Codex runtime and sign in locally with your ChatGPT account before generating. The Windows Codex app runtime is discovered automatically; if needed, set `FOUNDRY_CODEX_PATH` to its absolute executable path on the server. `FOUNDRY_CODEX_TIMEOUT_MS` sets the generation timeout between 600000 and 1800000 ms. Start this web server on the same computer. The provider status and source texture panel report runtime availability and sign-in readiness. They refresh every 15 seconds, on window focus, or when you click Recheck Codex status; signing in does not require restarting the browser. Importing images, local PBR derivation and deterministic recipe export do not require sign-in.
 
-- Node.js
-- npm
-- A Gemini API key for Gemini-backed generation
-- Optional OpenAI credentials for OpenAI-backed image generation and telemetry
+The browser sends requests only to the local Foundry server, which starts Codex through its supported app-server interface. Image-quality controls are prompt instructions, not guaranteed API settings. Review generated assets before use. Legacy saved model selections migrate to Codex automatically; existing source images and historical result metadata are preserved.
 
-## Setup
+## Image Library
 
-Install dependencies:
+Open **Image Library** beside the workflow tabs to browse generated outputs by tab or view all images. Select individual images or use **Select all shown**, then choose **Delete selected** and confirm. Selection carries across categories. Open or download the full-resolution PNG from any card.
 
-```bash
-npm install
-```
+The local server saves each completed image, including Action Animator frames and visible Texture Lab edits. Windows stores the library in `%LOCALAPPDATA%\The Foundry\Image Library`. Set `FOUNDRY_IMAGE_LIBRARY_DIR` before launching to use a different local folder.
 
-Create a local environment file:
+## Texture to PBR
 
-```bash
-copy .env.example .env
-```
+Generate or import a texture, refine it with the existing expansion, region-edit and seamless finishing controls, then choose a finished texture for PBR. The PBR editor also accepts a standalone approved albedo. Adjust six aligned maps: albedo, normal, roughness, metallic, ambient occlusion and height. Replace any map with an authored image. Choose OpenGL or DirectX normal convention and inspect the tiled sphere/plane preview.
 
-Then fill in the keys you want to use:
+Native square images are uniformly resized to the requested texture canvas before protected-source compositing. For example, a 1254×1254 Codex image can produce a 1024×1024 or 512×512 expansion. The source-preservation mask and seam-finishing layout stay in their original coordinates. Non-square responses fail explicitly rather than silently cropping or stretching reference geometry. Seamless Mode feathers the finish into the surrounding texture, matches opposite tile edges, and softens the join around a preserved source. Use the 3×3 preview to check feature continuity and repetition.
 
-```text
-GEMINI_API_KEY=
-GEMINI_FLASH_MODEL=gemini-3.1-flash-image
-GEMINI_FLASH_LITE_MODEL=gemini-3.1-flash-lite-image
-GEMINI_PRO_MODEL=gemini-3-pro-image
-OPENAI_API_KEY=
-OPENAI_ADMIN_KEY=
-OPENAI_ORGANIZATION_ID=
-OPENAI_PROJECT_ID=
-OPENAI_IMAGE_MODEL=gpt-image-2
-```
+Maps derived from a single color photograph are artistic estimates, not measured physical properties. The editor caps resolution at 2048, cancels stale work, and exports lossless 8-bit PNGs. The ZIP includes individual maps, ORM, Unity HDRP mask, metallic/smoothness, metadata and import notes. Export metadata records normal convention and channel packing.
 
-The default image lineup uses OpenAI GPT Image 2 plus Gemini 3.1 Flash Image,
-Gemini 3.1 Flash Lite Image, and Gemini 3 Pro Image. The optional model variables
-above can pin different provider model IDs when needed.
+## Reliable animation and VFX
 
-`.env` is intentionally ignored by git. Do not commit real API keys, auth tokens, signing certificates, local usage logs, or generated release builds.
+Action Animator generates 2D sprites only, not a rig or skeletal animation. It slices a row-major landscape grid before scaling and shares one crop/transform across frames to preserve motion. Blank, tiny or clipped cells fail clearly rather than silently exporting broken frames. Its ZIP contains ordered transparent PNGs, atlas.png and animation.json with timing and atlas positions. Visual identity, pose spacing and loop closure still need review.
 
-## Development
+VFX preserves completed textures when another output fails and exports against the settings that created those textures. The bundle validates image bytes, writes actual PNGs and coherent preview paths, and includes an Editor importer for a Unity URP particle material/prefab. VFX Graph output is explicit manual setup guidance, not a generated `.vfx` asset. Generated C# still needs verification in your target Unity version.
 
-Run the client and API server together:
+## Security and deployment boundary
 
-```bash
-npm run dev
-```
+This edition is local-only. The server binds to loopback and rejects foreign browser origins. Generation POSTs include an app-specific request header to prevent ordinary cross-site form submissions. Never expose or proxy this server to the public Internet: it runs work using your local Codex account. Credentials remain managed by Codex, not this app. There are no API keys to enter in the browser or `.env`.
 
-If you want both processes in the current shell:
+## Checks
 
-```bash
-npm run dev:inline
-```
+- `npm test` runs automated unit, mocked API, component and pixel/ZIP regression tests.
+- `npm run lint` checks sources.
+- `npm run build` typechecks and creates the production client.
 
-## Desktop App
-
-Launch the Electron desktop shell locally:
-
-```bash
-npm run desktop
-```
-
-This builds the frontend and opens The Foundry in a native desktop window with the Express API embedded inside the app process. The app icon is generated from `assets/branding/the-foundry-icon.jpg`.
-
-You can also use the browser-app launcher:
-
-```bash
-npm run app
-```
-
-On Windows, a shortcut can point at:
-
-```text
-scripts\launch-desktop-hidden.vbs
-```
-
-That launcher will build the frontend if needed, start the local production server on `http://127.0.0.1:3001`, open the UI in an Edge/Chrome/Brave app window when available, and fall back to the default browser otherwise.
-
-To force a specific browser executable, set `FOUNDRY_DESKTOP_BROWSER` before launch.
-
-## Build A Portable EXE
-
-Build a portable Windows executable with:
-
-```bash
-npm run build:exe
-```
-
-The packaged app is written to:
-
-```text
-release\
-```
-
-The executable looks for a `.env` file in these places, in this order:
-
-- the project root during local development
-- the packaged app resources directory
-- the same folder as the built `.exe`
-
-For distribution, copy `.env.example` to `.env` next to the packaged `.exe` and fill in your own keys. For cheaper OpenAI character-sheet runs, the default values in `.env.example` keep `OPENAI_CHARACTER_SHEET_QUALITY=low` and `OPENAI_CHARACTER_SHEET_REFERENCE_MAX_EDGE_PX=1024`.
-
-## Windows Signing
-
-The packaging flow is ready for standard Electron Builder code signing.
-
-If you have a Windows code-signing certificate, set these environment variables before running `npm run build:exe`:
-
-```text
-WIN_CSC_LINK=path-or-base64-to-your-pfx
-WIN_CSC_KEY_PASSWORD=your-pfx-password
-```
-
-Optional:
-
-```text
-REQUIRE_WINDOWS_SIGNING=true
-```
-
-With `REQUIRE_WINDOWS_SIGNING=true`, the build will fail instead of silently producing an unsigned executable. Without a signing certificate, Windows SmartScreen may warn when the `.exe` is opened on other machines.
-
-## Commands
-
-```bash
-npm run build
-npm run test
-npm run lint
-```
-
-## Contributing
-
-Issues and pull requests are welcome. The best places to help right now are Texture Lab, the 3D viewer, the Visualizer tab, drag-and-drop polish, tests around rough workflows, and clearer setup documentation.
-
-
-### Texture Lab expansion and editing
-
-Texture Lab offers creative provider editing or local faithful patch synthesis, 1.5×/2×/4× expansion, directional placement, 512/1024 PNG exports, and 1–4 sequential variants. Preserve-original protects the source **after proportional scaling**; Blend allows changes only in its displayed boundary band. The 4× option uses two stages. Seamless adds a localized wrap-offset finishing pass; it does not guarantee that distinctive internal marks disappear in a tiled view.
-
-Use the candidate selector to choose what is previewed and exported. Drag a rectangle in the 1× preview (or use the accessible corner selection and coordinate fields) to regenerate a region. Green outlines the protected interior. The 3×3 and 5×5 previews use browser background tiling without allocating oversized images. Stop takes effect after the active operation; Resume retries only the failed/interrupted operation and then continues queued work. Completed candidates survive failures. Finishing failures retain an explicitly unfinished candidate with Retry Finish.
-
-Creative requests currently generate at 1024×1024 and are explicitly resized to the chosen export size before protected compositing. Native masks are enabled only for the verified GPT Image 2 edit endpoint; other selected providers use reference guidance and deterministic compositing. Mask semantics were verified against https://developers.openai.com/api/reference/python/resources/images/methods/edit on 2026-11-11. Provider dimensions are validated; unexpected sizes are reported rather than cropped. Local synthesis requires no provider key and uses no GPU model. Settings persist, while editing checkpoints and original images remain session-local.
-
-#### Repeatable comparison
-
-Run `npm run compare:textures` first: it processes one synthetic stone fixture with two local variants and spends no credits. `npm run compare:textures -- --all` checks stone, dirt, wood, cloth, and brick. Synthetic fixtures exercise algorithms; use `--fixtures <directory>` with those PNG filenames for real visual evaluation. `--fixture <name>` supports individual failing examples. Import original-pipeline outputs with `--baselines <directory>` using names such as `stone-baseline-1.png` and `stone-baseline-2.png`; missing baselines stay marked missing.
-
-Results, timings, memory samples, metadata, editable visual review fields, and a 1×/tiled HTML gallery are written under `.codex-logs/texture-lab-comparison`. For a single live creative comparison against a running Foundry server, explicitly add `--live --max-calls 4`; this permits exactly two expansion-plus-finish variants, without retries. Use `--url` and `--model` to select the server/model. A configured internal token can be supplied as `FOUNDRY_INTERNAL_TOKEN`. No live batch starts by default. Usage is recorded when available; unknown provider cost stays null. Real failed examples, original baseline images, and human quality review are required before claiming improved appearance.
-
-
-Initial offline review (2026-11-11): ten seeded local outputs completed across the five synthetic materials. Dirt retained a consistent granular appearance; wood and cloth retained overall direction but showed join/phase artifacts. Large stone cracks and brick courses fragmented outside the protected source, and the preserved source footprint remained recognizable in tiled views. Faithful synthesis is therefore unsuitable for assuming structural continuation on those examples. These observations are not a baseline comparison or a live creative-provider assessment. Use creative expansion for evaluation of newly invented larger features; its visual quality still needs real-texture testing.
+The automated suite uses mocked Codex responses. Live generation requires a signed-in local Codex runtime.

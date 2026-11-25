@@ -100,6 +100,7 @@ type StoredSettings = {
   textureLab: {
     settings?: TextureSettings
     expansionTargetSize: TextureExpansionTargetSize
+    sourceSeamlessMode: boolean
     seamlessMode: boolean
     workflow: TextureLabWorkflow
   }
@@ -133,9 +134,10 @@ type StoredState = {
   session: StoredSession | null
 }
 
-const storageKey = 'kizer-forge-state'
+const storageKey = 'foundry-web-state-v1'
 const maxRecentPrompts = 6
-const storedModelIds: ModelId[] = [
+const storedModelIds: string[] = [
+  'codex',
   'browser-uv-engine',
   'gemini-nano-banana-2.1',
   'gemini-3-flash',
@@ -147,15 +149,15 @@ const storedModelIds: ModelId[] = [
 
 function normalizeStoredModelId(value: unknown): ModelId | null {
   if (value === 'gemini-2.5-flash-image') {
-    return 'gemini-3-flash-lite'
+    return 'codex'
   }
 
   if (value === 'veo-3.1-fast') {
-    return 'gemini-omni-1.2-flash'
+    return 'codex'
   }
 
-  return typeof value === 'string' && storedModelIds.includes(value as ModelId)
-    ? (value as ModelId)
+  return typeof value === 'string' && storedModelIds.includes(value)
+    ? 'codex'
     : null
 }
 
@@ -418,7 +420,7 @@ export function loadStoredState(): StoredState | null {
           pipeline:
             parsed.settings?.actionAnimator?.pipeline === 'image-strip'
               ? 'image-strip'
-              : 'veo-video',
+              : 'image-strip',
         },
         characterSheet: {
           consistencyEnabled: Boolean(
@@ -468,6 +470,7 @@ export function loadStoredState(): StoredState | null {
           expansionTargetSize: clampTextureLabOutputSize(
             parsed.settings?.textureLab?.expansionTargetSize ?? 1024,
           ),
+          sourceSeamlessMode: parsed.settings?.textureLab?.sourceSeamlessMode !== false,
           seamlessMode: Boolean(parsed.settings?.textureLab?.seamlessMode),
           workflow: 'expand',
         },

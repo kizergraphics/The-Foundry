@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { allForgeModes } from '../../shared/modeCatalog.js'
 import { initialState } from '../lib/forge'
 import {
   buildActiveVariantForgeOptions,
@@ -7,6 +8,9 @@ import {
 } from './registry'
 
 describe('mode registry helpers', () => {
+  it('exposes only retained web workflows', () => {
+    expect(allForgeModes).toEqual(['armory', 'action-animator', 'variant-forge', 'portrait-studio', 'texture-lab', 'vfx-forge', 'character-sheet'])
+  })
   it('builds variant forge active options from enabled presets', () => {
     expect(buildActiveVariantForgeOptions(initialState.variantForge)).toEqual([
       {
@@ -51,7 +55,7 @@ describe('mode registry helpers', () => {
 
     expect(presentation.controlPanelTitle).toBe('Variant settings')
     expect(presentation.primaryActionLabel).toBe('FORGE VARIANT')
-    expect(presentation.resultGridTitle).toBe('Variant Forge output slot')
+    expect(presentation.resultGridTitle).toBe('Variant Forge output slots')
   })
 
   it('derives VFX forge readiness and copy from the new recipe flow', () => {

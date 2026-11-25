@@ -5,13 +5,6 @@ function normalizeHeaderValue(value) {
 }
 
 function isLoopbackRequest(request) {
-  const forwardedFor = normalizeHeaderValue(request.headers['x-forwarded-for'])
-
-  if (forwardedFor) {
-    const firstIp = forwardedFor.split(',')[0]?.trim()
-    return isLoopbackIp(firstIp)
-  }
-
   return isLoopbackIp(request.ip) || isLoopbackIp(request.socket?.remoteAddress)
 }
 
@@ -58,13 +51,20 @@ export function createCorsMiddleware({ allowedOrigin } = {}) {
 
   return function corsMiddleware(request, response, next) {
     const requestOrigin = normalizeHeaderValue(request.headers.origin)
+    let hostIsLoopback = false
+    try { hostIsLoopback = ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(new URL(`http://${request.headers.host}`).hostname) } catch { /* Reject malformed hosts below. */ }
+    if (!normalizedAllowedOrigin && !hostIsLoopback) {
+      response.status(403).json({ error: { code: 'host_forbidden', message: 'This local server requires a loopback host.', title: 'Host Forbidden' } })
+      return
+    }
 
     if (!requestOrigin) {
       next()
       return
     }
 
-    if (!normalizedAllowedOrigin || requestOrigin === normalizedAllowedOrigin) {
+    const sameOrigin = requestOrigin === `${request.protocol}://${request.headers.host}`
+    if ((normalizedAllowedOrigin && requestOrigin === normalizedAllowedOrigin) || (!normalizedAllowedOrigin && sameOrigin)) {
       response.setHeader('Access-Control-Allow-Origin', requestOrigin)
       response.setHeader('Vary', 'Origin')
       response.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Api-Token, X-Internal-Api-Token')

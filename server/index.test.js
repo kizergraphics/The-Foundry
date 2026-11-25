@@ -1,772 +1,60 @@
+// @vitest-environment node
 import JSZip from 'jszip'
-import { spawn } from 'node:child_process'
-import os from 'node:os'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
-import fs from 'node:fs/promises'
 import request from 'supertest'
 import sharp from 'sharp'
-import ffmpegPath from 'ffmpeg-static'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const codex = vi.hoisted(() => ({ getCodexStatus: vi.fn(), generateCodexImages: vi.fn(), generateCodexText: vi.fn() }))
+vi.mock('./codexRuntime.js', () => codex)
 const originalEnv = { ...process.env }
-
-vi.mock('@google/genai/node', () => {
-  const generateContent = vi.fn()
-  const createInteraction = vi.fn()
-  const GoogleGenAI = vi.fn(function GoogleGenAI() {
-    this.models = {
-      generateContent,
-    }
-    this.interactions = {
-      create: createInteraction,
-    }
-  })
-
-  return {
-    GoogleGenAI,
-    __mock: {
-      createInteraction,
-      generateContent,
-    },
-  }
-})
-
-async function loadApp(env = {}) {
-  const module = await loadServerModule(env)
-  return module.app
-}
-
+let libraryDir
 async function loadServerModule(env = {}) {
   vi.resetModules()
-  process.env = {
-    ...originalEnv,
-    NODE_ENV: 'test',
-    ...env,
-  }
-
+  process.env = { ...originalEnv, NODE_ENV: 'test', OPENAI_API_KEY: '', CODEX_API_KEY: '', FORGE_API_TOKEN: '', CORS_ORIGIN: '', ENABLE_PROMPT_ORCHESTRATION: 'false', FOUNDRY_IMAGE_LIBRARY_DIR: libraryDir, ...env }
   return import('./index.js')
 }
-
-afterEach(() => {
+async function loadApp(env = {}) { return (await loadServerModule(env)).app }
+// Fail closed: neither an unmocked runtime job nor fetch may generate or spend credit.
+beforeEach(async () => {
+  libraryDir = await mkdtemp(path.join(tmpdir(), 'foundry-test-library-'))
+  vi.resetAllMocks()
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Unexpected external request in offline test')))
+  codex.getCodexStatus.mockResolvedValue({ available: true, authenticated: true, ready: true, provider: 'codex', message: 'Codex is ready.' })
+  codex.generateCodexImages.mockRejectedValue(new Error('Unexpected Codex image job in offline test'))
+  codex.generateCodexText.mockRejectedValue(new Error('Unexpected Codex text job in offline test'))
+})
+afterEach(async () => {
+  await rm(libraryDir, { recursive: true, force: true })
+  expect(fetch).not.toHaveBeenCalled()
   process.env = { ...originalEnv }
   vi.unstubAllGlobals()
   vi.resetModules()
 })
-
+function post(app, route) { return request(app).post(route).set('X-Foundry-Request', '1') }
 async function createPngBase64(width, height, channelValues) {
-  return sharp(Buffer.alloc(width * height * 3, Buffer.from(channelValues)), {
-    raw: {
-      channels: 3,
-      height,
-      width,
-    },
-  })
-    .png()
-    .toBuffer()
-    .then((buffer) => buffer.toString('base64'))
+  return (await sharp(Buffer.alloc(width * height * 3, Buffer.from(channelValues)), { raw: { channels: 3, height, width } }).png().toBuffer()).toString('base64')
 }
-
-async function createActionAnimatorVideoBuffer() {
-  if (!ffmpegPath) {
-    throw new Error('ffmpeg-static is required for action animator route tests.')
-  }
-
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foundry-action-animator-test-'))
-  const framePattern = path.join(tempDir, 'frame-%02d.png')
-  const videoPath = path.join(tempDir, 'fixture.mp4')
-  const background = { alpha: 1, b: 0, g: 255, r: 0 }
-
-  try {
-    await Promise.all([
-      sharp({
-        create: {
-          background,
-          channels: 4,
-          height: 512,
-          width: 512,
-        },
-      })
-        .composite([
-          {
-            input: await sharp({
-              create: {
-                background: { alpha: 1, b: 255, g: 255, r: 255 },
-                channels: 4,
-                height: 220,
-                width: 140,
-              },
-            })
-              .png()
-              .toBuffer(),
-            left: 180,
-            top: 250,
-          },
-        ])
-        .png()
-        .toFile(path.join(tempDir, 'frame-01.png')),
-      sharp({
-        create: {
-          background,
-          channels: 4,
-          height: 512,
-          width: 512,
-        },
-      })
-        .composite([
-          {
-            input: await sharp({
-              create: {
-                background: { alpha: 1, b: 255, g: 255, r: 255 },
-                channels: 4,
-                height: 220,
-                width: 140,
-              },
-            })
-              .png()
-              .toBuffer(),
-            left: 210,
-            top: 250,
-          },
-        ])
-        .png()
-        .toFile(path.join(tempDir, 'frame-02.png')),
-    ])
-
-    await runBinaryProcess(ffmpegPath, [
-      '-y',
-      '-framerate',
-      '1',
-      '-i',
-      framePattern,
-      '-pix_fmt',
-      'yuv420p',
-      '-vf',
-      'format=yuv420p',
-      videoPath,
-    ])
-
-    return await fs.readFile(videoPath)
-  } finally {
-    await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
-  }
-}
-
-function buildImageGeneration(base64, mimeType = 'image/png') {
-  return {
-    candidates: [
-      {
-        content: {
-          parts: [
-            {
-              inlineData: {
-                data: base64,
-                mimeType,
-              },
-            },
-          ],
-        },
-      },
-    ],
-    usageMetadata: {
-      totalTokenCount: 123,
-    },
-  }
-}
-
-function buildTextOnlyGeneration(text) {
-  return {
-    candidates: [
-      {
-        content: {
-          parts: [
-            {
-              text,
-            },
-          ],
-        },
-      },
-    ],
-    text,
-    usageMetadata: {
-      totalTokenCount: 123,
-    },
-  }
-}
-
 function buildBinaryParser() {
-  return (response, callback) => {
-    const chunks = []
-    response.on('data', (chunk) => {
-      chunks.push(chunk)
-    })
-    response.on('end', () => {
-      callback(null, Buffer.concat(chunks))
-    })
-  }
+  return (response, callback) => { const chunks = []; response.on('data', chunk => chunks.push(chunk)); response.on('end', () => callback(null, Buffer.concat(chunks))) }
+}
+async function mockImageProvider(width = 1, height = 1) {
+  const buffer = Buffer.from(await createPngBase64(width, height, [120, 80, 40]), 'base64')
+  codex.generateCodexImages.mockResolvedValue({ provider: 'codex', images: [{ buffer, mimeType: 'image/png', revisedPrompt: 'Codex concept render' }] })
+  return buffer
 }
 
-async function runBinaryProcess(binaryPath, args) {
-  await new Promise((resolve, reject) => {
-    const child = spawn(binaryPath, args, {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    })
-    let stderr = ''
-
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString()
-    })
-
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve(undefined)
-        return
-      }
-
-      reject(new Error(stderr || `Process exited with code ${code}.`))
-    })
-  })
-}
-
-describe('Texture Lab batch scheduling', () => {
-  it('caps Texture Lab worker count at 2 by default', async () => {
-    const serverModule = await loadServerModule({
-      TEXTURE_LAB_MAX_PARALLEL_REQUESTS: '9',
-    })
-
-    expect(serverModule.resolveForgeBatchWorkerCount('texture-lab', 'generate', 1)).toBe(1)
-    expect(serverModule.resolveForgeBatchWorkerCount('texture-lab', 'generate', 4)).toBe(2)
-    expect(serverModule.resolveForgeBatchWorkerCount('armory', 'generate', 4)).toBe(4)
-  })
-
-  it('applies startup delay only to Texture Lab workers after the first slot', async () => {
-    const serverModule = await loadServerModule({
-      TEXTURE_LAB_BATCH_START_STAGGER_MS: '1500',
-    })
-
-    expect(serverModule.resolveForgeWorkerStartDelayMs('texture-lab', 'generate', 0)).toBe(0)
-    expect(serverModule.resolveForgeWorkerStartDelayMs('texture-lab', 'generate', 1)).toBe(1500)
-    expect(serverModule.resolveForgeWorkerStartDelayMs('texture-lab', 'generate', 2)).toBe(3000)
-    expect(serverModule.resolveForgeWorkerStartDelayMs('armory', 'generate', 1)).toBe(0)
-  })
-
-  it('adds bounded retry jitter only for Texture Lab generate requests', async () => {
-    const serverModule = await loadServerModule({
-      TEXTURE_LAB_RETRY_JITTER_MS: '800',
-    })
-
-    expect(
-      serverModule.resolveForgeRetryDelay({
-        mode: 'texture-lab',
-        workflow: 'generate',
-        randomValue: 0,
-      }),
-    ).toEqual({
-      baseDelayMs: 1200,
-      effectiveDelayMs: 1200,
-      jitterMs: 0,
-    })
-
-    const maxJitterDelay = serverModule.resolveForgeRetryDelay({
-      mode: 'texture-lab',
-      workflow: 'generate',
-      randomValue: 0.9999,
-      retryAfterSeconds: 3,
-    })
-    expect(maxJitterDelay.baseDelayMs).toBe(3000)
-    expect(maxJitterDelay.jitterMs).toBeGreaterThanOrEqual(0)
-    expect(maxJitterDelay.jitterMs).toBeLessThanOrEqual(800)
-    expect(maxJitterDelay.effectiveDelayMs).toBeGreaterThanOrEqual(3000)
-    expect(maxJitterDelay.effectiveDelayMs).toBeLessThanOrEqual(3800)
-
-    expect(
-      serverModule.resolveForgeRetryDelay({
-        mode: 'armory',
-        workflow: 'generate',
-        randomValue: 0.9999,
-        retryAfterSeconds: 3,
-      }),
-    ).toEqual({
-      baseDelayMs: 3000,
-      effectiveDelayMs: 3000,
-      jitterMs: 0,
-    })
-  })
-
-  it('stagger-starts initial Texture Lab worker requests without affecting result order', async () => {
-    const { __mock } = await import('@google/genai/node')
-    __mock.generateContent.mockReset()
-    const generatedBase64 = await createPngBase64(1, 1, [40, 80, 120])
-    const callTimes = []
-
-    __mock.generateContent.mockImplementation(async () => {
-      callTimes.push(Date.now())
-      return buildImageGeneration(generatedBase64)
-    })
-
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-      TEXTURE_LAB_BATCH_START_STAGGER_MS: '25',
-      TEXTURE_LAB_MAX_PARALLEL_REQUESTS: '2',
-    })
-
-    const response = await request(app)
-      .post('/api/forge')
-      .send({
-        generationCount: 2,
-        modelId: 'gemini-3-flash',
-        mode: 'texture-lab',
-        prompt: 'weathered basalt floor tile',
-        workflow: 'generate',
-      })
-
-    expect(response.status).toBe(200)
-    expect(response.body.images).toHaveLength(2)
-    expect(callTimes).toHaveLength(2)
-    expect(callTimes[1] - callTimes[0]).toBeGreaterThanOrEqual(20)
-  })
-
-  it('does not apply the Texture Lab startup stagger to other forge modes', async () => {
-    const { __mock } = await import('@google/genai/node')
-    __mock.generateContent.mockReset()
-    const generatedBase64 = await createPngBase64(1, 1, [90, 60, 30])
-    const callTimes = []
-
-    __mock.generateContent.mockImplementation(async () => {
-      callTimes.push(Date.now())
-      return buildImageGeneration(generatedBase64)
-    })
-
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-      TEXTURE_LAB_BATCH_START_STAGGER_MS: '40',
-    })
-
-    const response = await request(app)
-      .post('/api/forge')
-      .send({
-        generationCount: 2,
-        modelId: 'gemini-3-flash',
-        mode: 'armory',
-        prompt: 'iron longsword concept',
-        workflow: 'generate',
-      })
-
-    expect(response.status).toBe(200)
-    expect(response.body.images).toHaveLength(2)
-    expect(callTimes).toHaveLength(2)
-    expect(callTimes[1] - callTimes[0]).toBeLessThan(30)
-  })
-})
-
-describe('API hardening', () => {
-  it('uses stable Gemini image models and migrates the legacy 2.5 alias', async () => {
-    const { __mock } = await import('@google/genai/node')
-    __mock.generateContent.mockReset()
-    const generatedBase64 = await createPngBase64(1, 1, [80, 120, 160])
-    __mock.generateContent.mockResolvedValue(buildImageGeneration(generatedBase64))
-
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-    })
-    const cases = [
-      ['gemini-nano-banana-2.1', 'gemini-nano-banana-2.1', 'gemini-nano-banana-2.1'],
-      ['gemini-3-flash', 'gemini-3-flash', 'gemini-3.1-flash-image'],
-      ['gemini-3-pro', 'gemini-3-pro', 'gemini-3-pro-image'],
-      ['gemini-3-flash-lite', 'gemini-3-flash-lite', 'gemini-3.1-flash-lite-image'],
-      ['gemini-2.5-flash-image', 'gemini-3-flash-lite', 'gemini-3.1-flash-lite-image'],
-    ]
-
-    for (const [requestedModel, expectedModel, providerModel] of cases) {
-      const response = await request(app)
-        .post('/api/forge')
-        .send({
-          generationCount: 1,
-          modelId: requestedModel,
-          mode: 'armory',
-          prompt: 'current model smoke test',
-          workflow: 'generate',
-        })
-
-      expect(response.status).toBe(200)
-      expect(response.body.model).toBe(expectedModel)
-      expect(response.body.providerModel).toBe(providerModel)
-      expect(__mock.generateContent.mock.calls.at(-1)?.[0]?.model).toBe(providerModel)
-    }
-  })
-
-  it('supports OpenAI GPT Image 2 on forge routes', async () => {
-    const { __mock } = await import('@google/genai/node')
-    __mock.generateContent.mockReset()
-    const generatedBase64 = await createPngBase64(1, 1, [120, 80, 40])
-    const fetchMock = vi.fn().mockResolvedValue({
-      headers: new Headers({
-        'x-ratelimit-limit-requests': '20',
-        'x-ratelimit-limit-tokens': '250000',
-        'x-ratelimit-remaining-requests': '19',
-        'x-ratelimit-remaining-tokens': '249100',
-      }),
-      json: async () => ({
-        data: [
-          {
-            b64_json: generatedBase64,
-            revised_prompt: 'Studio-lit bronze gauntlet concept render',
-          },
-        ],
-        usage: {
-          input_tokens: 34,
-          output_tokens: 1200,
-          total_tokens: 1234,
-        },
-      }),
-      ok: true,
-      status: 200,
-    })
-
-    vi.stubGlobal('fetch', fetchMock)
-
-    const app = await loadApp({
-      OPENAI_API_KEY: 'openai-test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/forge')
-      .send({
-        mode: 'armory',
-        modelId: 'openai-gpt-image-2',
-        prompt: 'bronze gauntlet concept',
-        quality: 'high',
-        workflow: 'generate',
-      })
-
-    expect(response.status).toBe(200)
-    expect(response.body.model).toBe('openai-gpt-image-2')
-    expect(response.body.providerModel).toBe('gpt-image-2')
-    expect(response.body.images).toHaveLength(1)
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.openai.com/v1/images/generations',
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer openai-test-key',
-          'Content-Type': 'application/json',
-        }),
-        method: 'POST',
-      }),
-    )
-    const [, requestOptions] = fetchMock.mock.calls[0]
-    expect(JSON.parse(requestOptions.body)).toMatchObject({
-      model: 'gpt-image-2',
-      quality: 'high',
-    })
-    expect(__mock.generateContent).not.toHaveBeenCalled()
-  })
-
-  it('passes optional OpenAI project scoping headers on forge routes', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      headers: new Headers(),
-      json: async () => ({
-        data: [
-          {
-            b64_json: await createPngBase64(1, 1, [80, 120, 160]),
-            revised_prompt: 'Silver signet ring product render',
-          },
-        ],
-      }),
-      ok: true,
-      status: 200,
-    })
-
-    vi.stubGlobal('fetch', fetchMock)
-
-    const app = await loadApp({
-      OPENAI_API_KEY: 'openai-test-key',
-      OPENAI_ORGANIZATION_ID: 'org_test_123',
-      OPENAI_PROJECT_ID: 'proj_test_456',
-    })
-
-    const response = await request(app)
-      .post('/api/forge')
-      .send({
-        mode: 'armory',
-        modelId: 'openai-gpt-image-2',
-        prompt: 'silver signet ring',
-        workflow: 'generate',
-      })
-
-    expect(response.status).toBe(200)
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.openai.com/v1/images/generations',
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer openai-test-key',
-          'OpenAI-Organization': 'org_test_123',
-          'OpenAI-Project': 'proj_test_456',
-        }),
-      }),
-    )
-  })
-
-  it('uses low-quality OpenAI edits and downscales oversized character-sheet references', async () => {
-    const generatedBase64 = await createPngBase64(1, 1, [120, 80, 160])
-    const largeReferenceBase64 = await sharp({
-      create: {
-        background: { b: 180, g: 90, r: 30 },
-        channels: 3,
-        height: 512,
-        width: 2048,
-      },
-    })
-      .png()
-      .toBuffer()
-      .then((buffer) => buffer.toString('base64'))
-    const fetchMock = vi.fn().mockResolvedValue({
-      headers: new Headers(),
-      json: async () => ({
-        data: [
-          {
-            b64_json: generatedBase64,
-            revised_prompt: 'Three-view turnaround sheet',
-          },
-        ],
-        usage: {
-          input_tokens: 48,
-          output_tokens: 620,
-          total_tokens: 668,
-        },
-      }),
-      ok: true,
-      status: 200,
-    })
-
-    vi.stubGlobal('fetch', fetchMock)
-
-    const app = await loadApp({
-      OPENAI_API_KEY: 'openai-test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/character-sheet')
-      .send({
-        aspectRatio: '16:9',
-        generationMode: 'reference',
-        modelId: 'openai-gpt-image-2',
-        prompt: 'Build a cel-shaded turnaround.',
-        references: [
-          {
-            data: largeReferenceBase64,
-            mimeType: 'image/png',
-            role: 'Identity_Reference',
-            slot: 'face',
-          },
-          {
-            data: largeReferenceBase64,
-            mimeType: 'image/png',
-            role: 'Clothing_Reference',
-            slot: 'outfit',
-          },
-          {
-            data: largeReferenceBase64,
-            mimeType: 'image/png',
-            role: 'Style_Reference',
-            slot: 'art-style',
-          },
-        ],
-        responseModalities: ['IMAGE', 'TEXT'],
-      })
-
-    expect(response.status).toBe(200)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-
-    const [, requestOptions] = fetchMock.mock.calls[0]
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.openai.com/v1/images/edits',
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer openai-test-key',
-        }),
-        method: 'POST',
-      }),
-    )
-
-    const formData = requestOptions.body
-    expect(formData.get('quality')).toBe('low')
-    expect(formData.get('size')).toBe('1536x1024')
-
-    const uploadedImages = formData.getAll('image[]')
-    expect(uploadedImages).toHaveLength(3)
-
-    const resizedMetadata = await sharp(
-      Buffer.from(await uploadedImages[0].arrayBuffer()),
-    ).metadata()
-
-    expect(Math.max(resizedMetadata.width ?? 0, resizedMetadata.height ?? 0)).toBe(1024)
-  })
-
-  it('builds a protected expansion canvas for Gemini', async () => {
-    const { __mock } = await import('@google/genai/node')
-    __mock.generateContent.mockReset()
-    const canvasImageBase64 = await createPngBase64(1, 1, [20, 80, 140])
-    const sourceImageBase64 = await createPngBase64(1, 1, [220, 180, 40])
-    const generatedBase64 = await createPngBase64(1024, 1024, [60, 120, 180])
-    __mock.generateContent.mockResolvedValue(buildImageGeneration(generatedBase64))
-
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/forge')
-      .send({
-        mode: 'texture-lab',
-        modelId: 'gemini-3-flash',
-        prompt: 'weathered basalt floor tile',
-        textureExpansion: {
-          canvasImage: {
-            data: canvasImageBase64,
-            mimeType: 'image/png',
-          },
-          sourceImage: {
-            data: sourceImageBase64,
-            mimeType: 'image/png',
-          },
-        },
-        workflow: 'expand-texture',
-      })
-
-    expect(response.status).toBe(200)
-    expect(__mock.generateContent).toHaveBeenCalledTimes(1)
-
-    const [requestBody] = __mock.generateContent.mock.calls[0]
-    const inlineParts = requestBody.contents.filter((part) => part.inlineData)
-    expect(inlineParts).toHaveLength(1)
-    expect((await sharp(Buffer.from(inlineParts[0].inlineData.data,'base64')).metadata()).width).toBe(1024)
-    expect(requestBody.contents[0].text).toContain('varied plausible new detail')
-    expect(response.body.images[0].texture.maskMode).toContain('reference guidance')
-    expect(requestBody.contents[0].text).not.toContain(sourceImageBase64)
-  })
-
-  it('sends a native mask and authoritative canvas to OpenAI texture edits', async () => {
-    const canvasImageBase64 = await createPngBase64(1, 1, [30, 90, 150])
-    const sourceImageBase64 = await createPngBase64(1, 1, [230, 190, 50])
-    const generatedBase64 = await createPngBase64(1024, 1024, [70, 130, 190])
-    const fetchMock = vi.fn().mockResolvedValue({
-      headers: new Headers(),
-      json: async () => ({
-        data: [
-          {
-            b64_json: generatedBase64,
-            revised_prompt: 'Expanded basalt texture',
-          },
-        ],
-      }),
-      ok: true,
-      status: 200,
-    })
-
-    vi.stubGlobal('fetch', fetchMock)
-
-    const app = await loadApp({
-      OPENAI_API_KEY: 'openai-test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/forge')
-      .send({
-        mode: 'texture-lab',
-        modelId: 'openai-gpt-image-2',
-        prompt: 'weathered basalt floor tile',
-        textureExpansion: {
-          canvasImage: {
-            data: canvasImageBase64,
-            mimeType: 'image/png',
-          },
-          sourceImage: {
-            data: sourceImageBase64,
-            mimeType: 'image/png',
-          },
-        },
-        workflow: 'expand-texture',
-      })
-
-    expect(response.status).toBe(200)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.openai.com/v1/images/edits',
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer openai-test-key',
-        }),
-        method: 'POST',
-      }),
-    )
-
-    const [, requestOptions] = fetchMock.mock.calls[0]
-    const formData = requestOptions.body
-    const uploadedImages = formData.getAll('image[]')
-    expect(uploadedImages).toHaveLength(1)
-    expect((await sharp(Buffer.from(await uploadedImages[0].arrayBuffer())).metadata()).width).toBe(1024)
-    expect(formData.get('mask')).toBeTruthy()
-    expect(response.body.images[0].texture.maskMode).toContain('native mask')
-    expect(formData.get('prompt')).toContain('varied plausible new detail')
-    expect(formData.get('size')).toBe('1024x1024')
-  })
-
-  it('requires the internal token for usage telemetry when configured', async () => {
-    const app = await loadApp({
-      INTERNAL_API_TOKEN: 'top-secret',
-    })
-
-    const unauthorizedResponse = await request(app).get('/api/usage')
-
-    expect(unauthorizedResponse.status).toBe(401)
-    expect(unauthorizedResponse.body.error.code).toBe('auth_required')
-
-    const authorizedResponse = await request(app)
-      .get('/api/usage')
-      .set('x-internal-api-token', 'top-secret')
-
-    expect(authorizedResponse.status).toBe(200)
-    expect(authorizedResponse.body).toHaveProperty('todayTotal')
-  })
-
-  it('sanitizes google telemetry failures before returning them to clients', async () => {
-    const app = await loadApp({
-      GOOGLE_APPLICATION_CREDENTIALS: 'C:\\missing-service-account.json',
-      GOOGLE_CLOUD_PROJECT: 'private-project-id',
-      INTERNAL_API_TOKEN: 'top-secret',
-    })
-
-    const response = await request(app)
-      .get('/api/usage/telemetry')
-      .set('x-internal-api-token', 'top-secret')
-
-    expect(response.status).toBe(200)
-    expect(response.body.source).toBe('local')
-    expect(response.body.rows.map((row) => row.label)).toEqual([
-      'OpenAI GPT Image 2',
-      'Gemini 3 Pro Image',
-      'Gemini Omni 1.2 Flash',
-      'Nano Banana 2.1',
-      'Gemini 3.1 Flash Image',
-      'Gemini 3.1 Flash Lite Image',
-      'Gemini 3.5 Flash-Lite',
-    ])
-    expect(response.body.error).toEqual({
-      code: 'telemetry_unavailable',
-      message: 'Google quota telemetry is unavailable right now. Local telemetry is still active.',
-    })
-    expect(JSON.stringify(response.body)).not.toContain('private-project-id')
-    expect(JSON.stringify(response.body)).not.toContain('missing-service-account')
-  })
-
+describe('retained validation and deterministic exports', () => {
   it('rejects oversized inline media on forge requests', async () => {
     const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
+      OPENAI_API_KEY: 'offline-test-key',
     })
 
     const oversizedImageData = 'A'.repeat(8 * 1024 * 1024)
     const response = await request(app)
-      .post('/api/forge')
+      .post('/api/forge').set('X-Foundry-Request', '1')
       .send({
         mode: 'texture-lab',
         references: [
@@ -783,14 +71,13 @@ describe('API hardening', () => {
       expect(response.body.error.code).toMatch(/invalid_request|payload_too_large/)
     }
   })
-
   it('rejects invalid variant forge idea-refresh payloads before attempting generation', async () => {
     const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
+      OPENAI_API_KEY: 'offline-test-key',
     })
 
     const response = await request(app)
-      .post('/api/variant-forge-ideas')
+      .post('/api/variant-forge-ideas').set('X-Foundry-Request', '1')
       .send({
         variantFamily: 'damage',
         variantPreset: 'legendary',
@@ -799,222 +86,6 @@ describe('API hardening', () => {
     expect(response.status).toBe(400)
     expect(response.body.error.code).toBe('invalid_request')
   })
-
-  it('includes a staged consistency reference in character sheet generation requests', async () => {
-    const { __mock } = await import('@google/genai/node')
-    __mock.generateContent.mockReset()
-    const generatedBase64 = await createPngBase64(1, 1, [40, 80, 120])
-    __mock.generateContent.mockResolvedValue(buildImageGeneration(generatedBase64))
-
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/character-sheet')
-      .send({
-        consistencyReference: {
-          data: generatedBase64,
-          mimeType: 'image/png',
-        },
-        generationMode: 'manifest',
-        modelId: 'gemini-3-pro',
-        prompt: 'Create a calm hero turnaround.',
-        responseModalities: ['IMAGE', 'TEXT'],
-      })
-
-    expect(response.status).toBe(200)
-    expect(__mock.generateContent).toHaveBeenCalledTimes(1)
-    expect(__mock.generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        contents: [
-          expect.objectContaining({
-            text: expect.stringContaining('staged prior sheet reference'),
-          }),
-          {
-            inlineData: {
-              data: generatedBase64,
-              mimeType: 'image/png',
-            },
-          },
-        ],
-      }),
-    )
-  })
-
-  it('includes style-reference guidance in VFX forge generation requests when a style image is attached', async () => {
-    const { __mock } = await import('@google/genai/node')
-    __mock.generateContent.mockReset()
-    const generatedBase64 = await createPngBase64(1, 1, [80, 120, 255])
-    __mock.generateContent.mockResolvedValue(buildImageGeneration(generatedBase64))
-
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/forge')
-      .send({
-        modelId: 'gemini-3-flash',
-        mode: 'vfx-forge',
-        references: [
-          {
-            data: generatedBase64,
-            mimeType: 'image/png',
-            slot: 'style',
-          },
-        ],
-        textureKind: 'flipbook',
-      })
-
-    expect(response.status).toBe(200)
-    expect(response.body.prompt).toContain('A style reference image is attached;')
-    expect(__mock.generateContent).toHaveBeenCalledTimes(1)
-    expect(__mock.generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        contents: [
-          expect.objectContaining({
-            text: expect.stringContaining('A style reference image is attached;'),
-          }),
-          {
-            inlineData: {
-              data: generatedBase64,
-              mimeType: 'image/png',
-            },
-          },
-        ],
-      }),
-    )
-  })
-
-})
-
-describe('Action Animator route', () => {
-  it('routes saved Veo selections through Omni and extracts keyed frames', async () => {
-    const { __mock } = await import('@google/genai/node')
-    __mock.createInteraction.mockReset()
-    const videoBuffer = await createActionAnimatorVideoBuffer()
-
-    __mock.createInteraction.mockResolvedValue({
-      output_video: { data: videoBuffer.toString('base64') },
-    })
-
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/action-animator')
-      .send({
-        actionType: 'walk',
-        fps: 8,
-        frameCount: 4,
-        image: {
-          data: await createPngBase64(1, 1, [255, 255, 255]),
-          mimeType: 'image/png',
-        },
-        keyColor: 'green',
-        modelId: 'veo-3.1-fast',
-        normalizedSize: 512,
-        pipeline: 'veo-video',
-        prompt: 'Side-profile walk cycle on a green key background.',
-      })
-
-    expect(response.status).toBe(200)
-    expect(__mock.createInteraction).toHaveBeenCalledTimes(1)
-    expect(__mock.createInteraction).toHaveBeenCalledWith(
-      {
-        model: 'gemini-omni-1.2-flash',
-        input: [
-          { type: 'image', data: expect.any(String), mime_type: 'image/png' },
-          { type: 'text', text: expect.stringContaining('green') },
-        ],
-        response_format: { type: 'video', duration: '4s', resolution: '720p' },
-      },
-      expect.objectContaining({ maxRetries: 0 }),
-    )
-    expect(response.body.model).toBe('gemini-omni-1.2-flash')
-    expect(response.body.providerModel).toBe('gemini-omni-1.2-flash')
-    expect(response.body.artifacts.metadata).toMatchObject({
-      fps: 8,
-      frameCount: 4,
-      keyColor: 'green',
-      normalizedSize: 512,
-      sampleStrategy: 'even',
-      sourceModel: 'gemini-omni-1.2-flash',
-    })
-    expect(response.body.artifacts.video.mimeType).toBe('video/mp4')
-    expect(response.body.artifacts.spriteSheet.mimeType).toBe('image/png')
-    expect(response.body.artifacts.frames).toHaveLength(4)
-    expect(response.body.prompt).toContain('green')
-  })
-
-  it('returns sprite-strip frames without video for image-strip generation', async () => {
-    const { __mock } = await import('@google/genai/node')
-    __mock.generateContent.mockReset()
-    __mock.generateContent.mockResolvedValue(
-      buildImageGeneration(
-        await createPngBase64(4, 1, [
-          255, 255, 255,
-          240, 240, 240,
-          225, 225, 225,
-          210, 210, 210,
-        ]),
-      ),
-    )
-
-    const app = await loadApp({
-      GEMINI_API_KEY: 'test-key',
-    })
-
-    const response = await request(app)
-      .post('/api/action-animator')
-      .send({
-        actionType: 'idle',
-        firstFrame: {
-          data: await createPngBase64(1, 1, [255, 255, 255]),
-          mimeType: 'image/png',
-          name: 'first-frame.png',
-        },
-        fps: 8,
-        frameCount: 4,
-        image: {
-          data: await createPngBase64(1, 1, [255, 255, 255]),
-          mimeType: 'image/png',
-          name: 'hero.png',
-        },
-        keyColor: 'blue',
-        lastFrame: {
-          data: await createPngBase64(1, 1, [255, 255, 255]),
-          mimeType: 'image/png',
-          name: 'last-frame.png',
-        },
-        modelId: 'gemini-3-flash',
-        normalizedSize: 512,
-        pipeline: 'image-strip',
-        prompt: 'Side-profile idle strip on a blue key background.',
-      })
-
-    expect(response.status).toBe(200)
-    expect(__mock.generateContent).toHaveBeenCalledTimes(1)
-    expect(response.body.model).toBe('gemini-3-flash')
-    expect(response.body.artifacts.metadata).toMatchObject({
-      fps: 8,
-      frameCount: 4,
-      keyColor: 'blue',
-      normalizedSize: 512,
-      pipeline: 'image-strip',
-      sampleStrategy: 'strip',
-      sourceModel: 'gemini-3-flash',
-    })
-    expect(response.body.artifacts.video).toBeNull()
-    expect(response.body.artifacts.spriteSheet.mimeType).toBe('image/png')
-    expect(response.body.artifacts.frames).toHaveLength(4)
-    expect(response.body.prompt).toContain('sprite strip')
-  })
-})
-
-describe('VFX recipe export routes', () => {
   it('returns deterministic VFX recipe manifests for both solution types', async () => {
     const app = await loadApp()
 
@@ -1041,13 +112,13 @@ describe('VFX recipe export routes', () => {
     }
 
     const particleResponse = await request(app)
-      .post('/api/vfx-recipe')
+      .post('/api/vfx-recipe').set('X-Foundry-Request', '1')
       .send({
         ...basePayload,
         exportTarget: 'particle-system',
       })
     const graphResponse = await request(app)
-      .post('/api/vfx-recipe')
+      .post('/api/vfx-recipe').set('X-Foundry-Request', '1')
       .send({
         ...basePayload,
         exportTarget: 'vfx-graph',
@@ -1070,11 +141,10 @@ describe('VFX recipe export routes', () => {
     expect(particleResponse.body.recipe.textures[0].fileName).toContain('textures/fireball-flipbook.png')
     expect(graphResponse.body.recipe.vfxGraphConfig.exposedProperties.length).toBeGreaterThan(0)
   })
-
   it('packages VFX export bundles with sanitized filenames and required files', async () => {
     const app = await loadApp()
     const response = await request(app)
-      .post('/api/vfx-export')
+      .post('/api/vfx-export').set('X-Foundry-Request', '1')
       .buffer(true)
       .parse(buildBinaryParser())
       .send({
@@ -1129,16 +199,246 @@ describe('VFX recipe export routes', () => {
   })
 })
 
-function isGrayscale(buffer, channels) {
-  if (channels <= 1) {
-    return true
-  }
+describe('managed Codex generation', () => {
+  it.each([undefined, 'codex', 'openai-gpt-image-2'])('uses Codex for model alias %s without API credentials or fetch', async modelId => {
+    await mockImageProvider()
+    const app = await loadApp({ OPENAI_IMAGE_MODEL: 'must-not-be-used', OPENAI_BASE_URL: 'https://must-not-be-used.example' })
+    const response = await post(app, '/api/forge').send({ mode: 'armory', modelId, prompt: 'bronze gauntlet', quality: 'high' })
+    expect(response.status).toBe(200)
+    expect(response.body.model).toBe('codex')
+    expect(response.body.images).toHaveLength(1)
+    expect(codex.generateCodexImages).toHaveBeenCalledTimes(1)
+    expect(codex.generateCodexImages.mock.calls[0][0]).toMatchObject({ prompt: expect.stringContaining('bronze gauntlet'), count: 1 })
+  })
+  it('rejects unknown model overrides before generation', async () => {
+    const app = await loadApp()
+    const response = await post(app, '/api/forge').send({ mode: 'armory', modelId: 'untrusted-custom-model', prompt: 'sword' })
+    expect(response.status).toBe(400)
+    expect(codex.generateCodexImages).not.toHaveBeenCalled()
+  })
+  it('uses Codex text for idea refresh', async () => {
+    codex.generateCodexText.mockResolvedValue('wind-carved fuller\ndrifting pollen halo\nseedpod pommel wrap\nthorn-vein filigree')
+    const response = await post(await loadApp(), '/api/variant-forge-ideas').send({ variantFamily: 'elemental', variantPreset: 'burning' })
+    expect(response.status).toBe(200)
+    expect(response.body.source).toBe('ai')
+    expect(response.body.ideas).toHaveLength(4)
+    expect(codex.generateCodexText).toHaveBeenCalledTimes(1)
+    expect(codex.generateCodexText.mock.calls[0][0]).toMatchObject({ prompt: expect.any(String), systemInstruction: expect.any(String) })
+    expect(codex.generateCodexImages).not.toHaveBeenCalled()
+  })
+  it('passes all original character reference buffers to Codex', async () => {
+    await mockImageProvider()
+    const data = await createPngBase64(2048, 512, [50, 90, 130])
+    const response = await post(await loadApp(), '/api/character-sheet').send({ generationMode: 'reference', prompt: 'cel-shaded turnaround', references: [['face', 'Identity_Reference'], ['outfit', 'Clothing_Reference'], ['art-style', 'Style_Reference']].map(([slot, role]) => ({ data, mimeType: 'image/png', role, slot })) })
+    expect(response.status).toBe(200)
+    const job = codex.generateCodexImages.mock.calls[0][0]
+    expect(job.references).toHaveLength(3)
+    expect(Buffer.isBuffer(job.references[0])).toBe(true)
+    const metadata = await sharp(job.references[0]).metadata()
+    expect(Math.max(metadata.width, metadata.height)).toBe(2048)
+  })
+  it('retains staged character and VFX style reference instructions', async () => {
+    const buffer = await mockImageProvider()
+    const image = { data: buffer.toString('base64'), mimeType: 'image/png' }
+    const app = await loadApp()
+    const character = await post(app, '/api/character-sheet').send({ generationMode: 'manifest', prompt: 'calm hero turnaround', consistencyReference: image })
+    expect(character.status).toBe(200)
+    expect(codex.generateCodexImages.mock.calls[0][0].prompt).toContain('staged prior sheet reference')
+    const vfx = await post(app, '/api/forge').send({ mode: 'vfx-forge', textureKind: 'flipbook', references: [{ ...image, slot: 'style' }] })
+    expect(vfx.status).toBe(200)
+    expect(codex.generateCodexImages.mock.calls[1][0].prompt).toContain('A style reference image is attached;')
+    const library = await request(app).get('/api/library').expect(200)
+    expect(library.body.images.map(image => image.mode)).toEqual(['vfx-forge', 'character-sheet'])
+  })
+  it('routes Animator source and guide frames to Codex and exports complete frame artifacts', async () => {
+    const tile = Buffer.from(await createPngBase64(32, 56, [120, 80, 40]), 'base64')
+    const buffer = await sharp({ create: {width: 192, height: 128, channels: 3, background: '#0000FF'} }).composite([0,1,2,3].map(index => ({input: tile, left: index % 2 * 96 + 32, top: Math.floor(index / 2) * 64 + 4}))).png().toBuffer()
+    codex.generateCodexImages.mockResolvedValue({ provider: 'codex', images: [{ buffer, mimeType: 'image/png' }] })
+    const image = { data: buffer.toString('base64'), mimeType: 'image/png', name: 'hero.png' }
+    const app = await loadApp()
+    const response = await post(app, '/api/action-animator').send({ actionType: 'jump', pipeline: 'image-strip', image, firstFrame: image, lastFrame: image, frameCount: 4, fps: 8, normalizedSize: 512, keyColor: 'blue', quality: 'high' })
+    expect(response.status).toBe(200)
+    expect(response.body.artifacts.frames).toHaveLength(4)
+    expect(response.body.artifacts).not.toHaveProperty('video')
+    expect(response.body.artifacts.metadata).toMatchObject({ pipeline: 'image-strip', sampleStrategy: 'strip', frameCount: 4, keyColor: 'blue' })
+    expect(codex.generateCodexImages).toHaveBeenCalledTimes(1)
+    expect(codex.generateCodexImages.mock.calls[0][0].references).toHaveLength(3)
+    const library = await request(app).get('/api/library').expect(200)
+    expect(library.body.images).toHaveLength(5)
+    expect(library.body.images.every(image => image.mode === 'action-animator')).toBe(true)
+  })
+  it('requests one Codex batch and preserves output order', async () => {
+    const buffer = await mockImageProvider()
+    codex.generateCodexImages.mockResolvedValue({ provider: 'codex', images: ['first', 'second'].map(revisedPrompt => ({ buffer, mimeType: 'image/png', revisedPrompt })) })
+    const response = await post(await loadApp(), '/api/forge').send({ generationCount: 2, mode: 'texture-lab', prompt: 'basalt floor', workflow: 'generate' })
+    expect(response.status).toBe(200)
+    expect(response.body.images.map(image => image.text)).toEqual(['first', 'second'])
+    expect(response.body).toMatchObject({ requestedCount: 2, completedCount: 2, partial: false })
+    expect(response.body).not.toHaveProperty('warning')
+    expect(codex.generateCodexImages).toHaveBeenCalledTimes(1)
+    expect(codex.generateCodexImages.mock.calls[0][0].count).toBe(2)
+  })
+  it('preserves partial output without retrying generation', async () => {
+    await mockImageProvider()
+    const response = await post(await loadApp(), '/api/forge').send({ mode: 'armory', generationCount: 3, prompt: 'bronze gauntlet' })
+    expect(response.status).toBe(200)
+    expect(response.body.images).toHaveLength(1)
+    expect(response.body).toMatchObject({ requestedCount: 3, completedCount: 1, partial: true })
+    expect(response.body.warning).toMatch(/no automatic.*retry/i)
+    expect(codex.generateCodexImages).toHaveBeenCalledTimes(1)
+    expect(codex.generateCodexImages.mock.calls[0][0].count).toBe(3)
+  })
+  it('rejects empty output rather than claiming partial success', async () => {
+    codex.generateCodexImages.mockResolvedValue({ provider: 'codex', images: [] })
+    const response = await post(await loadApp(), '/api/forge').send({ mode: 'armory', generationCount: 2, prompt: 'bronze gauntlet' })
+    expect(response.status).toBe(422)
+    expect(codex.generateCodexImages).toHaveBeenCalledTimes(1)
+  })
+  it.each([['CODEX_BUSY', 409, 'Codex is busy. Try again after the current job finishes.'], ['CODEX_NOT_AUTHENTICATED', 401, 'Sign in to Codex with ChatGPT to generate images.']])('returns readable %s errors without fallback or retry', async (code, status, message) => {
+    codex.generateCodexImages.mockRejectedValue(Object.assign(new Error(message), { code, status }))
+    const response = await post(await loadApp(), '/api/forge').send({ mode: 'armory', prompt: 'bronze gauntlet' })
+    expect(response.status).toBe(status)
+    expect(response.text).toContain(message)
+    expect(codex.generateCodexImages).toHaveBeenCalledTimes(1)
+    expect(codex.generateCodexText).not.toHaveBeenCalled()
+  })
+})
 
-  for (let index = 0; index < buffer.length; index += channels) {
-    if (buffer[index] !== buffer[index + 1] || buffer[index] !== buffer[index + 2]) {
-      return false
+describe('image library', () => {
+  it('keeps completed images across app restarts and removes a selection across categories', async () => {
+    const original = await mockImageProvider()
+    const app = await loadApp()
+    await request(app).get('/api/library').expect(200, { images: [] })
+    for (const [mode, prompt] of [['armory', 'bronze lantern'], ['armory', 'stone lantern'], ['variant-forge', 'aged metal lantern']]) {
+      await post(app, '/api/forge').send({ mode, prompt }).expect(200).expect('X-Foundry-Library', 'saved')
     }
-  }
 
-  return true
-}
+    const restarted = await loadApp()
+    const response = await request(restarted).get('/api/library').expect(200)
+    expect(response.body.images).toHaveLength(3)
+    const entries = Object.fromEntries(response.body.images.map(entry => [entry.title, entry]))
+    const bronze = entries['bronze lantern']
+    const stone = entries['stone lantern']
+    const variant = response.body.images.find(entry => entry.mode === 'variant-forge')
+    const originalResponse = await request(restarted).get(`/api/library/${bronze.id}/image.png`).expect(200)
+    expect(originalResponse.body).toEqual(original)
+    await request(restarted).get(`/api/library/${bronze.id}/thumbnail.webp`).expect(200).expect('Content-Type', 'image/webp')
+    await request(restarted).post('/api/library/delete').send({ ids: [bronze.id] }).expect(403)
+    await post(restarted, '/api/library/delete').send({ ids: [bronze.id, '../invalid'] }).expect(400)
+    await post(restarted, '/api/library/delete').send({ ids: [bronze.id, variant.id] }).expect(204)
+    await request(restarted).get(`/api/library/${bronze.id}/image.png`).expect(404)
+    await request(restarted).get('/api/library').expect(200, { images: [stone] })
+  })
+
+  it('still returns the original result and reports a library write failure', async () => {
+    const original = await mockImageProvider()
+    const invalidDirectory = path.join(libraryDir, 'file')
+    await writeFile(invalidDirectory, '')
+    const app = await loadApp({ FOUNDRY_IMAGE_LIBRARY_DIR: invalidDirectory })
+    const response = await post(app, '/api/forge').send({ mode: 'armory', prompt: 'stone lantern' })
+    expect(response.status).toBe(200)
+    expect(response.headers['x-foundry-library']).toBe('failed')
+    expect(response.body.images[0].data).toBe(original.toString('base64'))
+  })
+})
+
+describe('local API security and readiness', () => {
+  it('reports Codex readiness without leaking API secrets', async () => {
+    const response = await request(await loadApp({ OPENAI_API_KEY: 'private-provider-secret' })).get('/api/health')
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({ ok: true, provider: 'codex', generationConfigured: true })
+    expect(response.text).not.toContain('private-provider-secret')
+    expect(codex.getCodexStatus).toHaveBeenCalled()
+  })
+  it('reports an unavailable runtime truthfully', async () => {
+    codex.getCodexStatus.mockResolvedValue({ available: false, authenticated: false, ready: false, provider: 'codex', message: 'Install Codex to generate.' })
+    const response = await request(await loadApp()).get('/api/health')
+    expect(response.body).toMatchObject({ provider: 'codex', generationConfigured: false })
+    expect(response.text).toContain('Install Codex')
+    expect(codex.generateCodexImages).not.toHaveBeenCalled()
+  })
+  it('rejects missing same-origin request headers before generation', async () => {
+    const response = await request(await loadApp()).post('/api/forge').send({ mode: 'armory', prompt: 'sword' })
+    expect(response.status).toBe(403)
+    expect(codex.generateCodexImages).not.toHaveBeenCalled()
+  })
+  it('enforces a configured generation token', async () => {
+    const response = await post(await loadApp({ FORGE_API_TOKEN: 'test-secret' }), '/api/forge').send({ mode: 'armory', prompt: 'sword' })
+    expect(response.status).toBe(401)
+    expect(codex.generateCodexImages).not.toHaveBeenCalled()
+  })
+  it('rejects untrusted origins and forged host headers', async () => {
+    const app = await loadApp()
+    expect((await post(app, '/api/forge').set('Origin', 'https://evil.example').send({ mode: 'armory' })).status).toBe(403)
+    const forged = await post(app, '/api/forge').set('Host', 'attacker.example:3001').set('Origin', 'http://attacker.example:3001').send({ mode: 'armory' })
+    expect(forged.status).toBe(403)
+    expect((await request(app).get('/api/health').set('Host', 'not a host')).status).toBe(403)
+    expect((await request(app).get('/api/health').set('Host', 'localhost:3001').set('Origin', 'http://localhost:3001')).status).toBe(200)
+    expect(codex.generateCodexImages).not.toHaveBeenCalled()
+  })
+  it('binds loopback and disallows remote hosting even with a token and trusted origin', async () => {
+    const server = await loadServerModule({ HOST: '127.0.0.1' })
+    const listen = vi.spyOn(server.app, 'listen').mockImplementation(() => ({ mocked: true }))
+    server.startServer()
+    expect(listen).toHaveBeenCalledWith(expect.any(Number), '127.0.0.1', expect.any(Function))
+    for (const FORGE_API_TOKEN of ['', 'test-token', '   ']) {
+      const remote = await loadServerModule({ HOST: '0.0.0.0', FORGE_API_TOKEN, CORS_ORIGIN: 'https://foundry.example' })
+      const remoteListen = vi.spyOn(remote.app, 'listen').mockImplementation(() => ({ mocked: true }))
+      expect(() => remote.startServer()).toThrow(/loopback/i)
+      expect(remoteListen).not.toHaveBeenCalled()
+    }
+  })
+  it('keeps removed telemetry and video routes unavailable', async () => {
+    const app = await loadApp()
+    for (const route of ['/api/usage', '/api/usage/telemetry', '/api/telemetry', '/api/google-telemetry', '/api/openai-telemetry', '/api/uv-lab']) expect((await request(app).get(route)).status).toBe(404)
+    const response = await post(app, '/api/action-animator').send({ pipeline: 'veo-video', image: { data: await createPngBase64(1, 1, [255, 0, 0]), mimeType: 'image/png' } })
+    expect(response.status).toBe(400)
+    expect(codex.generateCodexImages).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('Codex texture expansion', () => {
+  it('uses an authoritative visual canvas and local compositing instead of an API mask', async () => {
+    await mockImageProvider(1254, 1254)
+    const image = { data: await createPngBase64(2, 2, [30, 90, 150]), mimeType: 'image/png' }
+    const response = await post(await loadApp(), '/api/forge').send({ mode: 'texture-lab', prompt: 'weathered basalt floor tile', textureExpansion: { canvasImage: image, sourceImage: image }, workflow: 'expand-texture' })
+    expect(response.status).toBe(200)
+    expect(response.body.model).toBe('codex')
+    expect(codex.generateCodexImages).toHaveBeenCalledTimes(1)
+    const job = codex.generateCodexImages.mock.calls[0][0]
+    expect(job.references).toHaveLength(1)
+    expect((await sharp(job.references[0]).metadata()).width).toBe(1024)
+    expect(job.prompt).toContain('varied plausible new detail')
+    expect(job).not.toHaveProperty('mask')
+    expect(response.body.images[0].texture.maskMode).not.toContain('native mask')
+  })
+})
+
+
+
+describe('native texture output geometry', () => {
+  it.each([512, 1024])('delivers requested %i square source candidates from native1254 images', async textureSize => {
+    const buffer = await mockImageProvider(1254, 1254)
+    codex.generateCodexImages.mockResolvedValue({provider:'codex', images:['first','second'].map(revisedPrompt => ({buffer, mimeType:'image/png', revisedPrompt}))})
+    const response = await post(await loadApp(), '/api/forge').send({mode:'texture-lab', prompt:'weathered stone', textureSize, generationCount:2})
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({requestedCount:2,completedCount:2,partial:false})
+    expect(response.body.images.map(image => image.text)).toEqual(['first','second'])
+    for (const image of response.body.images) {
+      expect(await sharp(Buffer.from(image.data,'base64')).metadata()).toMatchObject({width:textureSize,height:textureSize,format:'png'})
+      expect(image.providerDimensions).toEqual({width:1254,height:1254})
+    }
+    expect(codex.generateCodexImages).toHaveBeenCalledTimes(1)
+  })
+  it('preserves valid candidates if another native output has the wrong aspect ratio', async () => {
+    const square = await mockImageProvider(1254,1254)
+    const landscape = Buffer.from(await createPngBase64(1536,1024,[90,90,90]),'base64')
+    codex.generateCodexImages.mockResolvedValue({provider:'codex',images:[{buffer:square,mimeType:'image/png'},{buffer:landscape,mimeType:'image/png'}]})
+    const response = await post(await loadApp(), '/api/forge').send({mode:'texture-lab',prompt:'stone',generationCount:2})
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({requestedCount:2,completedCount:1,partial:true})
+    expect(response.body.warning).toMatch(/aspect|square/i)
+    expect(codex.generateCodexImages).toHaveBeenCalledTimes(1)
+  })
+})

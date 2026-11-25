@@ -1,4 +1,5 @@
 import { createDataUrl, fileToBase64, parseBase64DataUrl } from './browser'
+import { reportLibrarySave } from './imageLibrary'
 import type {
   CharacterSheetGenerationMode,
   CharacterSheetReferenceSlot,
@@ -7,7 +8,7 @@ import type {
   OpenAiImageQuality,
 } from './forge'
 
-export const defaultCharacterSheetModel = 'openai-gpt-image-2'
+export const defaultCharacterSheetModel = 'codex'
 
 export type CharacterSheetReferenceRole =
   | 'Identity_Reference'
@@ -165,7 +166,7 @@ export async function generateCharacterSheet({
   const response = await fetch('/api/character-sheet', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json', 'X-Foundry-Request': '1',
     },
     body: JSON.stringify(request),
   })
@@ -195,6 +196,7 @@ export async function generateCharacterSheet({
   if (!response.ok || !payload?.images?.length) {
     throw payload?.error ?? 'Character Sheet generation failed.'
   }
+  reportLibrarySave(response)
 
   return {
     model: payload.model ?? null,

@@ -1,16 +1,16 @@
-import { processTexture } from './textureLab.js'
-import fs from 'node:fs/promises'
-import os from 'node:os'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { getCodexStatus, generateCodexImages, generateCodexText } from './codexRuntime.js'
+import { createActionAnimatorArtifactsFromImageStrip } from './actionAnimator.js'
+import { animatorCanvas, describeActionAnimatorGrid } from '../shared/actionAnimatorLayout.js'
+import { processTexture, normalizeTextureProviderImage } from './textureLab.js'
+import { createImageLibrary, createImageLibraryRouter } from './imageLibrary.js'
+
 import path from 'node:path'
-import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import dotenv from 'dotenv'
 import express from 'express'
-import { GoogleGenAI } from '@google/genai/node'
-import ffmpegPath from 'ffmpeg-static'
-import sharp from 'sharp'
-import { telemetryModelIdByAlias } from './telemetryModelCatalog.js'
+
 import {
   createConcurrencyLimiter,
   createCorsMiddleware,
@@ -34,20 +34,6 @@ import {
   resolveVfxForgeSystemInstruction as resolveVfxForgeSystemInstructionForRequest,
 } from './vfxForge.js'
 import {
-  getTelemetrySnapshot,
-  getUsageSummary,
-  recordUsageEvent,
-} from './usageStore.js'
-import {
-  getGoogleTelemetrySnapshot,
-  isGoogleTelemetryConfigured,
-} from './googleQuotaTelemetry.js'
-import {
-  getOpenAiTelemetrySnapshot,
-  isOpenAiTelemetryConfigured,
-  recordOpenAiRateLimitSnapshot,
-} from './openaiTelemetry.js'
-import {
   formatVariantForgeLabel,
   isVariantForgeFamily,
   isVariantForgePresetForFamily,
@@ -55,8 +41,8 @@ import {
   variantForgeDefaultPresetByFamily,
 } from '../shared/variantForgeCatalog.js'
 import { forgeApiModes } from '../shared/modeCatalog.js'
-import { MODEL_LABELS } from '../shared/modelLabels.js'
-import { resolveVfxEffectLabel } from '../shared/vfxForgeCatalog.js'
+
+import { getVfxTextureLabel, resolveVfxEffectLabel } from '../shared/vfxForgeCatalog.js'
 import { variantForgeIdeaSuggestionCount } from '../shared/variantForgeIdeas.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -99,119 +85,38 @@ export function buildEnvSearchPaths(options = {}) {
   return candidateDirectories.map((directory) => path.join(directory, '.env'))
 }
 
-const envSearchPaths = buildEnvSearchPaths({
-  cwd: process.cwd(),
-  execPath: process.execPath,
-  portableExecutableDirectory: process.env.PORTABLE_EXECUTABLE_DIR,
-  resourcesPath: process.resourcesPath,
-  rootDir,
-})
-
-for (const envPath of envSearchPaths) {
-  dotenv.config({
-    path: envPath,
-    override: false,
-  })
-}
+dotenv.config({ path: path.join(rootDir, '.env'), override: false, quiet: true })
 
 const port = Number(process.env.PORT ?? 3001)
-const apiKey =
-  process.env.GEMINI_API_KEY ??
-  process.env.GOOGLE_API_KEY
-const openAiApiKey = process.env.OPENAI_API_KEY
-const openAiOrganizationId = process.env.OPENAI_ORGANIZATION_ID
-const openAiProjectId = process.env.OPENAI_PROJECT_ID
-const openAiImageQuality = normalizeOpenAiImageQuality(
-  process.env.OPENAI_IMAGE_QUALITY,
-  'auto',
-)
-const openAiCharacterSheetQuality = normalizeOpenAiImageQuality(
-  process.env.OPENAI_CHARACTER_SHEET_QUALITY,
-  'low',
-)
-const openAiCharacterSheetReferenceMaxEdgePx = clampOpenAiReferenceMaxEdgePx(
-  process.env.OPENAI_CHARACTER_SHEET_REFERENCE_MAX_EDGE_PX,
-  1024,
-)
-const allowedCorsOrigin = process.env.CORS_ORIGIN
-const generationApiToken = process.env.FORGE_API_TOKEN
-const internalApiToken = process.env.INTERNAL_API_TOKEN
+const allowedCorsOrigin = undefined // Codex subscription access is local-only, never exposed by CORS.
+const generationApiToken = process.env.FORGE_API_TOKEN?.trim()
 const enablePromptOrchestration = process.env.ENABLE_PROMPT_ORCHESTRATION === 'true'
 const forgeJsonLimit = process.env.FORGE_JSON_LIMIT ?? '12mb'
 const characterSheetJsonLimit = process.env.CHARACTER_SHEET_JSON_LIMIT ?? '14mb'
 const actionAnimatorJsonLimit = process.env.ACTION_ANIMATOR_JSON_LIMIT ?? '14mb'
-const modelRegistry = {
-  'gemini-nano-banana-2.1': 'gemini-nano-banana-2.1',
-  'gemini-3.5-flash-lite': process.env.GEMINI_TEXT_MODEL ?? 'gemini-3.5-flash-lite',
-  'gemini-3-flash':
-    process.env.GEMINI_FLASH_MODEL ?? 'gemini-3.1-flash-image',
-  'gemini-3-flash-lite':
-    process.env.GEMINI_FLASH_LITE_MODEL ??
-    process.env.GEMINI_IMAGE_MODEL ??
-    'gemini-3.1-flash-lite-image',
-  'gemini-3-pro':
-    process.env.GEMINI_PRO_MODEL ?? 'gemini-3-pro-image',
-  'openai-gpt-image-2':
-    process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
-  'gemini-omni-1.2-flash': 'gemini-omni-1.2-flash',
-}
-const modelProviderRegistry = {
-  'gemini-nano-banana-2.1': 'google',
-  'gemini-3.5-flash-lite': 'google',
-  'gemini-3-flash': 'google',
-  'gemini-3-flash-lite': 'google',
-  'gemini-3-pro': 'google',
-  'openai-gpt-image-2': 'openai',
-  'gemini-omni-1.2-flash': 'google',
-}
+const modelRegistry = { codex: 'codex-native' }
+const modelProviderRegistry = { codex: 'codex' }
 const routeModelDefaults = {
-  '/api/action-animator': 'gemini-omni-1.2-flash',
-  '/api/character-sheet': 'openai-gpt-image-2',
-  '/api/forge': 'openai-gpt-image-2',
-  '/api/variant-forge-ideas': 'gemini-3.5-flash-lite',
+  '/api/action-animator': 'codex', '/api/character-sheet': 'codex',
+  '/api/forge': 'codex', '/api/variant-forge-ideas': 'codex',
 }
-const actionAnimatorImageModels = [
-  'openai-gpt-image-2',
-  'gemini-nano-banana-2.1',
-  'gemini-3-pro',
-  'gemini-3-flash',
-  'gemini-3-flash-lite',
-]
-const routeModelAllowlist = {
-  '/api/action-animator': [
-    routeModelDefaults['/api/action-animator'],
-    ...actionAnimatorImageModels,
-  ],
-  '/api/character-sheet': [
-    'openai-gpt-image-2',
-    'gemini-nano-banana-2.1',
-    'gemini-3-pro',
-    'gemini-3-flash',
-  ],
-  '/api/forge': [
-    'openai-gpt-image-2',
-    'gemini-nano-banana-2.1',
-    'gemini-3-pro',
-    'gemini-3-flash',
-    'gemini-3-flash-lite',
-  ],
-  '/api/variant-forge-ideas': [routeModelDefaults['/api/variant-forge-ideas']],
-}
+const actionAnimatorImageModels = ['codex']
+const routeModelAllowlist = Object.fromEntries(Object.keys(routeModelDefaults).map(route => [route, ['codex']]))
 const supportedForgeModes = forgeApiModes
-const forgeBatchMaxAttemptsPerImage = 4
+
 const forgeBatchMaxParallelRequests = 4
-const forgeBatchRecoveryPasses = 2
+
 const forgeGenerationTimeoutMs = clampTimeoutMs(
-  Number(process.env.FORGE_GENERATION_TIMEOUT_MS ?? 90000),
-  90000,
+  Number(process.env.FOUNDRY_CODEX_TIMEOUT_MS ?? 600000),
+  600000,
 )
 const textureLabMaxParallelRequests = Math.max(
   1,
   Math.min(Math.round(Number(process.env.TEXTURE_LAB_MAX_PARALLEL_REQUESTS ?? 2)), 2),
 )
 const textureLabGenerationTimeoutMs = clampTimeoutMs(
-  Number(process.env.TEXTURE_LAB_GENERATION_TIMEOUT_MS ?? 30000),
-  30000,
+  Number(process.env.FOUNDRY_CODEX_TIMEOUT_MS ?? 600000),
+  600000,
 )
 const textureLabBatchStartStaggerMs = clampNonNegativeInteger(
   Number(process.env.TEXTURE_LAB_BATCH_START_STAGGER_MS ?? 1500),
@@ -221,56 +126,49 @@ const textureLabRetryJitterMs = clampNonNegativeInteger(
   Number(process.env.TEXTURE_LAB_RETRY_JITTER_MS ?? 800),
   800,
 )
-const variantForgeGenerationTimeoutMs = clampTimeoutMs(
-  Number(process.env.VARIANT_FORGE_GENERATION_TIMEOUT_MS ?? 45000),
-  45000,
-)
-const variantForgeMaxAttemptsPerImage = 2
-const textureLabMaxAttemptsPerImage = Math.max(
-  1,
-  Math.min(Math.round(Number(process.env.TEXTURE_LAB_MAX_ATTEMPTS ?? 1)), 2),
-)
-const forgeBatchInterRequestDelayMs = 250
+
 const forgeBatchRetryDelayMs = 1200
 const maxPromptOrchestrationWordCount = 24
 const maxPromptEnhancerWordCount = 9
-const actionAnimatorTimeoutMs = 5 * 60 * 1000
-const minActionAnimatorDurationSeconds = 4
-const maxActionAnimatorDurationSeconds = 8
-const actionAnimatorDurationSeconds = clampActionAnimatorDurationSeconds(
-  Number(
-    process.env.GEMINI_OMNI_DURATION_SECONDS ??
-    process.env.GEMINI_VEO_DURATION_SECONDS ??
-    minActionAnimatorDurationSeconds,
-  ),
-)
-const actionAnimatorKeyColorHexById = {
-  blue: '0x0000FF',
-  green: '0x00FF00',
-}
-const actionAnimatorKeyColorCssById = {
-  blue: '#0000FF',
-  green: '#00FF00',
-}
+
 const defaultActionAnimatorFrameSizePx = 512
 const coreSystemRules = [
   'Always render assets on a neutral gray #808080 background.',
   'Never include text, logos, or watermarks in the image.',
   'Ensure all assets are centered and fit entirely within the frame.',
 ]
-const uvLabModelId = 'browser-uv-engine'
 
+function redactErrorDetails(value) {
+  if (typeof value === 'string') {
+    let result = value
+    for (const secret of [generationApiToken, process.env.OPENAI_API_KEY, process.env.CODEX_API_KEY].filter(Boolean)) result = result.split(secret).join('[redacted]')
+    return result.replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+  }
+  if (Array.isArray(value)) return value.map(redactErrorDetails)
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactErrorDetails(entry)]))
+  return value
+}
+const generationContext = new AsyncLocalStorage()
 const app = express()
+const imageLibrary = createImageLibrary()
+
+async function archiveGeneratedImages(response, mode, images, prompt) {
+  try {
+    await imageLibrary.save({ mode, images, prompt })
+    if (!response.headersSent) response.set('X-Foundry-Library', 'saved')
+  } catch (error) {
+    console.error('Could not archive all generated images.', error.code || error.message)
+    if (!response.headersSent) response.set('X-Foundry-Library', 'failed')
+  }
+}
+app.use((_request, response, next) => {
+  const json = response.json.bind(response)
+  response.json = body => json(body?.error ? { ...body, error: redactErrorDetails(body.error) } : body)
+  next()
+})
 const parseForgeBody = express.json({ limit: forgeJsonLimit })
 const parseCharacterSheetBody = express.json({ limit: characterSheetJsonLimit })
 const parseActionAnimatorBody = express.json({ limit: actionAnimatorJsonLimit })
-const usageAuth = createTokenAuthMiddleware({
-  allowLoopback: true,
-  envToken: internalApiToken,
-  headerName: 'x-internal-api-token',
-  message:
-    'Usage telemetry is restricted. Provide a valid internal API token or access the service from the local machine.',
-})
 const optionalGenerationAuth = createTokenAuthMiddleware({
   allowLoopback: false,
   envToken: generationApiToken,
@@ -305,32 +203,26 @@ const actionAnimatorConcurrencyLimit = createConcurrencyLimiter({
 app.use(createSecurityHeadersMiddleware())
 app.use(createCorsMiddleware({ allowedOrigin: allowedCorsOrigin }))
 
-app.get('/api/health', (_request, response) => {
-  response.json({
-    ok: true,
-  })
-})
-
-app.get('/api/usage', usageAuth, async (request, response) => {
+app.get('/api/health', async (_request, response) => {
   try {
-    const requestedModel =
-      typeof request.query?.model === 'string' ? request.query.model : undefined
-    const usageSummary = await getUsageSummary({
-      model: requestedModel,
-    })
-    response.json(usageSummary)
-  } catch (error) {
-    response.status(500).json({
-      error: {
-        code: 'usage_unavailable',
-        message:
-          error instanceof Error
-            ? error.message
-            : 'Usage telemetry is unavailable right now.',
-      },
-    })
+    const runtime = await getCodexStatus()
+    response.json({ ok: true, generationConfigured: runtime.ready, provider: 'codex', runtime })
+  } catch {
+    response.json({ ok: true, generationConfigured: false, provider: 'codex', runtime: { available: false, authenticated: false, ready: false, message: 'Codex is not available. Open Codex and sign in with ChatGPT, then check again.' } })
   }
 })
+
+app.use('/api', (request, response, next) => {
+  if (request.method !== 'POST') return next()
+  if (request.get('X-Foundry-Request') !== '1') {
+    return response.status(403).json({ error: { code: 'request_forbidden', title: 'Request Forbidden', message: 'Use the local Foundry page to submit this request.' } })
+  }
+  const controller = new AbortController()
+  response.on('close', () => { if (!response.writableEnded) controller.abort() })
+  generationContext.run({ signal: controller.signal }, next)
+})
+
+app.use('/api/library', createImageLibraryRouter(imageLibrary))
 
 app.post(
   '/api/action-animator',
@@ -365,17 +257,7 @@ app.post(
       return
     }
 
-    if (!hasApiKeyForProvider(modelSelection.provider)) {
-      response.status(500).json({
-        error: buildMissingApiKeyMessage(modelSelection.provider),
-      })
-      return
-    }
-
-    const ai =
-      modelSelection.provider === 'google' && apiKey
-        ? new GoogleGenAI({ apiKey })
-        : null
+    const ai = createTextAi()
 
     try {
       const animatorResult = await generateAnimatorArtifacts({
@@ -394,14 +276,11 @@ app.post(
         quality: validatedRequest.quality,
       })
 
-      await recordUsageEvent({
-        model: modelSelection.modelId,
-        route: '/api/action-animator',
-        telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
-        tokenCount: animatorResult.tokenCount,
-      }).catch((logError) => {
-        console.warn('Telemetry logging failed for /api/action-animator:', logError)
-      })
+      const { spriteSheet, frames } = animatorResult.artifacts
+      await archiveGeneratedImages(response, 'action-animator', [
+        { ...spriteSheet, title: 'Sprite sheet' },
+        ...frames.map((frame, index) => ({ ...frame, title: `Frame ${index + 1} of ${frames.length}` })),
+      ], animatorResult.prompt)
 
       response.json({
         artifacts: animatorResult.artifacts,
@@ -428,13 +307,6 @@ app.post(
   forgeConcurrencyLimit,
   parseForgeBody,
   async (request, response) => {
-    if (!apiKey) {
-      response.status(500).json({
-        error:
-          'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.',
-      })
-      return
-    }
 
     let validatedRequest
 
@@ -459,7 +331,7 @@ app.post(
       return
     }
 
-    const ai = new GoogleGenAI({ apiKey })
+    const ai = createTextAi()
 
     try {
       const generation = await ai.models.generateContent({
@@ -479,13 +351,6 @@ app.post(
             'Avoid repeating preset names verbatim unless that wording materially improves the idea.',
         },
       })
-
-      await recordUsageEvent({
-        model: modelSelection.modelId,
-        route: '/api/variant-forge-ideas',
-        telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
-        tokenCount: extractTotalTokenCount(generation),
-      }).catch(() => {})
 
       response.json(
         normalizeVariantForgeIdeaResponse(
@@ -536,10 +401,8 @@ app.post(
     seamRepair,
     seamlessMode,
     textureKind,
-    textureOutputs,
     textureSize,
     textureExpansion,
-    unityPipeline,
     variantFamily,
     variantIntensity,
     variantOptions,
@@ -609,7 +472,7 @@ app.post(
       )
     : []
 
-  const ai = apiKey ? new GoogleGenAI({ apiKey }) : null
+  const ai = createTextAi()
 
   try {
     const providedStyleText =
@@ -702,19 +565,10 @@ app.post(
               textureSize: normalizedTextureSize,
             })
         : resolveSystemInstruction(systemInstruction)
-    const textureGenerationImageConfig =
-      requestedWorkflow === 'generate' && mode === 'texture-lab'
-        ? {
-            aspectRatio: '1:1',
-            imageSize: '1K',
-          }
-        : null
-
     if (requestedWorkflow === 'expand-texture') {
       try {
-        // Verified against the Images edit reference; unknown models use reference guidance.
-        const maskSupported = modelSelection.provider === 'openai' &&
-          /^gpt-image-2(?:-2026-04-21)?$/.test(modelSelection.providerModel)
+        // Codex native imagegen takes visual guides, not the Images API mask contract.
+        const maskSupported = false
         const image = await processTexture(textureExpansion, {
           maskSupported,
           notes: [normalizedPrompt, providedStyleText].filter(Boolean).join(' '),
@@ -727,13 +581,13 @@ app.post(
               systemInstruction: systemInstruction || 'Follow the material edit instructions. Preserve context and feature scale.',
               timeoutMs: textureLabGenerationTimeoutMs,
             })
-            await recordUsageEvent({ model: modelSelection.modelId, route: '/api/forge',
-              telemetryModel: telemetryModelIdByAlias[modelSelection.modelId], tokenCount: extractTotalTokenCount(generation.raw),
-            }).catch(error => console.warn('Texture usage logging failed:', error))
             if (!generation.images.length) throw new Error('The provider returned no texture image.')
-            return { ...generation.images[0], usage: { model: modelSelection.providerModel, tokenCount: extractTotalTokenCount(generation.raw) ?? null } }
+            return generation.images[0]
           },
         })
+        if (image.texture.status !== 'intermediate') {
+          await archiveGeneratedImages(response, mode, [image], normalizedPrompt)
+        }
         response.json({ images: [image], model: textureExpansion.technique === 'faithful' ? 'local-quilting' : modelSelection.modelId, prompt: normalizedPrompt })
       } catch (error) {
         response.status(422).json({ error: { code: 'texture_processing_failed', message: error.message, title: 'Texture operation failed' } })
@@ -763,7 +617,7 @@ app.post(
         systemInstruction: resolvedSystemInstruction,
         timeoutMs: textureLabGenerationTimeoutMs,
       })
-      const images = generation.images
+      const images = await Promise.all(generation.images.map(image => normalizeTextureProviderImage(image, normalizedTextureSize, { matchEdges: true })))
 
       if (images.length === 0) {
         response
@@ -772,15 +626,7 @@ app.post(
         return
       }
 
-      await recordUsageEvent({
-        model: modelSelection.modelId,
-        route: '/api/forge',
-        telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
-        tokenCount: extractTotalTokenCount(generation.raw),
-      }).catch((logError) => {
-        console.warn('Telemetry logging failed for /api/forge seam repair:', logError)
-      })
-
+      await archiveGeneratedImages(response, mode, images, normalizedPrompt)
       response.json({
         images,
         model: modelSelection.modelId,
@@ -791,444 +637,37 @@ app.post(
       return
     }
 
-    const baseContents = [
-      { text: finalPrompt },
-      ...validReferences.map((reference) => ({
-        inlineData: {
-          mimeType: reference.mimeType,
-          data: reference.data,
-        },
-      })),
-    ]
-
-    if (modelSelection.provider === 'openai') {
-      const generation = await generateImagesWithModel({
-        candidateCount,
-        modelSelection,
-        prompt: finalPrompt,
-        quality,
-        references: validReferences,
-        routeKey: '/api/forge',
-        size: resolveOpenAiForgeImageSize(mode),
-        systemInstruction: resolvedSystemInstruction,
-        timeoutMs:
-          mode === 'texture-lab' ? textureLabGenerationTimeoutMs : forgeGenerationTimeoutMs,
-      })
-
-      if (generation.images.length === 0) {
-        response
-          .status(422)
-          .json(buildNoImageResponseError('/api/forge', modelSelection, generation.text))
-        return
-      }
-
-      await recordUsageEvent({
-        model: modelSelection.modelId,
-        route: '/api/forge',
-        telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
-        tokenCount: extractTotalTokenCount(generation.raw),
-      }).catch((logError) => {
-        console.warn('Telemetry logging failed for /api/forge:', logError)
-      })
-
-      response.json({
-        images: generation.images,
-        model: modelSelection.modelId,
-        providerModel: modelSelection.providerModel,
-        prompt: finalPrompt,
-        styleId: providedStyleText || null,
-      })
-      return
-    }
-
-    const batchRequestId = buildRequestId('forge-batch')
-    const batchStartedAt = Date.now()
-    logServerEvent(batchRequestId, 'batch started', {
-      candidateCount,
-      mode,
-      model: modelSelection.modelId,
-      providerModel: modelSelection.providerModel,
-      referenceCount: validReferences.length,
+    const generation = await generateImagesWithModel({
+      candidateCount, modelSelection, prompt: finalPrompt, quality,
+      references: validReferences, routeKey: '/api/forge',
+      size: mode === 'texture-lab' ? `${normalizedTextureSize}x${normalizedTextureSize}` : mode === 'portrait-studio' ? '1536x1024' : '1024x1024',
+      systemInstruction: resolvedSystemInstruction,
+      timeoutMs: mode === 'texture-lab' ? textureLabGenerationTimeoutMs : forgeGenerationTimeoutMs,
     })
-    const successfulRuns = []
-    const normalizedErrors = []
-    const noImageTexts = []
-    const batchWorkerCount = resolveForgeBatchWorkerCount(
-      mode,
-      requestedWorkflow,
-      candidateCount,
-    )
-    const attemptPolicy = resolveForgeAttemptPolicy(mode, requestedWorkflow)
-    const attemptBatchSlotGeneration = async ({
-      phase,
-      slotIndex,
-      workerStartDelayMs = 0,
-      workerLabel,
-    }) => {
-      const slotErrors = []
-      const slotNoImageTexts = []
-      const slotSuccessfulRuns = []
-
-      for (
-        let attempt = 1;
-        attempt <= attemptPolicy.maxAttemptsPerImage;
-        attempt += 1
-      ) {
-        try {
-          const attemptStartedAt = Date.now()
-          const useModalities = attempt % 2 === 1
-          logServerEvent(batchRequestId, 'slot attempt started', {
-            attempt,
-            phase,
-            slot: slotIndex + 1,
-            startupDelayMs: workerStartDelayMs,
-            useModalities,
-            worker: workerLabel,
-          })
-          const generation = await withTimeout(
-            ai.models.generateContent({
-              model: modelSelection.providerModel,
-              contents: baseContents,
-              config: useModalities
-                ? {
-                    candidateCount: 1,
-                    ...(textureGenerationImageConfig
-                      ? {
-                          imageConfig: textureGenerationImageConfig,
-                        }
-                      : {}),
-                    responseModalities: ['IMAGE', 'TEXT'],
-                    systemInstruction: resolvedSystemInstruction,
-                  }
-                : {
-                    candidateCount: 1,
-                    ...(textureGenerationImageConfig
-                      ? {
-                          imageConfig: textureGenerationImageConfig,
-                        }
-                      : {}),
-                    systemInstruction: resolvedSystemInstruction,
-                  },
-            }),
-            attemptPolicy.timeoutMs,
-            `Gemini image generation timed out after ${Math.round(
-              attemptPolicy.timeoutMs / 1000,
-            )} seconds.`,
-          )
-
-          slotSuccessfulRuns.push(generation)
-
-          const image = extractImages(generation).at(0)
-
-          if (image) {
-            logServerEvent(batchRequestId, 'slot attempt succeeded', {
-              attempt,
-              durationMs: Date.now() - attemptStartedAt,
-              phase,
-              slot: slotIndex + 1,
-              worker: workerLabel,
-            })
-            return {
-              fatalError: null,
-              image: {
-                image: {
-                  ...image,
-                  id: `batch-${slotIndex + 1}-${image.id}`,
-                },
-                slotIndex,
-              },
-              noImageTexts: slotNoImageTexts,
-              normalizedErrors: slotErrors,
-              successfulRuns: slotSuccessfulRuns,
-            }
-          }
-
-          if (generation.text) {
-            slotNoImageTexts.push(generation.text)
-          }
-          logServerEvent(batchRequestId, 'slot returned no image', {
-            attempt,
-            durationMs: Date.now() - attemptStartedAt,
-            phase,
-            slot: slotIndex + 1,
-            textPreview: generation.text?.slice(0, 120) ?? null,
-            worker: workerLabel,
-          })
-
-          if (attempt < attemptPolicy.maxAttemptsPerImage) {
-            await sleep(forgeBatchInterRequestDelayMs)
-          }
-        } catch (requestError) {
-          const normalizedError = normalizeGenerationError(
-            requestError,
-            modelSelection.modelId,
-            modelSelection.provider,
-          )
-          slotErrors.push(normalizedError)
-          const isRetryable =
-            normalizedError.status === 429 || normalizedError.status >= 500
-
-          if (!isRetryable) {
-            logServerEvent(batchRequestId, 'slot failed with fatal error', {
-              attempt,
-              code: normalizedError.body?.error?.code ?? null,
-              message: normalizedError.body?.error?.message ?? null,
-              phase,
-              slot: slotIndex + 1,
-              status: normalizedError.status,
-              worker: workerLabel,
-            })
-            return {
-              fatalError: normalizedError,
-              image: null,
-              noImageTexts: slotNoImageTexts,
-              normalizedErrors: slotErrors,
-              successfulRuns: slotSuccessfulRuns,
-            }
-          }
-
-          const retryAfterSeconds = normalizedError.body?.error?.retryAfterSeconds
-          const retryDelay = resolveForgeRetryDelay({
-            mode,
-            retryAfterSeconds,
-            workflow: requestedWorkflow,
-          })
-          logServerEvent(batchRequestId, 'slot attempt retrying', {
-            attempt,
-            baseDelayMs: retryDelay.baseDelayMs,
-            code: normalizedError.body?.error?.code ?? null,
-            delayMs: retryDelay.effectiveDelayMs,
-            jitterMs: retryDelay.jitterMs,
-            message: normalizedError.body?.error?.message ?? null,
-            phase,
-            slot: slotIndex + 1,
-            status: normalizedError.status,
-            worker: workerLabel,
-          })
-          await sleep(retryDelay.effectiveDelayMs)
-        }
-      }
-
-      return {
-        fatalError: null,
-        image: null,
-        noImageTexts: slotNoImageTexts,
-        normalizedErrors: slotErrors,
-        successfulRuns: slotSuccessfulRuns,
+    const images = []
+    const geometryErrors = []
+    for (const image of generation.images) {
+      try {
+        images.push(mode === 'texture-lab' ? await normalizeTextureProviderImage(image, normalizedTextureSize, { matchEdges: seamlessMode }) : image)
+      } catch (error) {
+        geometryErrors.push(error.message)
       }
     }
-    const batchResults = await Promise.all(
-      Array.from(
-        {
-          length: batchWorkerCount,
-        },
-        async (_, workerIndex) => {
-          const workerStartDelayMs = resolveForgeWorkerStartDelayMs(
-            mode,
-            requestedWorkflow,
-            workerIndex,
-          )
-          const workerImages = []
-          const workerSuccessfulRuns = []
-          const workerErrors = []
-          const workerNoImageTexts = []
-          let fatalError = null
-
-          if (workerStartDelayMs > 0) {
-            await sleep(workerStartDelayMs)
-          }
-
-          for (
-            let slotIndex = workerIndex;
-            slotIndex < candidateCount;
-            slotIndex += batchWorkerCount
-          ) {
-            const slotResult = await attemptBatchSlotGeneration({
-              phase: 'initial',
-              slotIndex,
-              workerStartDelayMs,
-              workerLabel: workerIndex + 1,
-            })
-
-            workerSuccessfulRuns.push(...slotResult.successfulRuns)
-            workerErrors.push(...slotResult.normalizedErrors)
-            workerNoImageTexts.push(...slotResult.noImageTexts)
-
-            if (slotResult.image) {
-              workerImages.push(slotResult.image)
-            }
-
-            if (slotResult.fatalError) {
-              fatalError = slotResult.fatalError
-            }
-
-            if (fatalError) {
-              break
-            }
-          }
-
-          return {
-            fatalError,
-            normalizedErrors: workerErrors,
-            noImageTexts: workerNoImageTexts,
-            successfulRuns: workerSuccessfulRuns,
-            workerImages,
-          }
-        },
-      ),
-    )
-    batchResults.forEach((result) => {
-      successfulRuns.push(...result.successfulRuns)
-      normalizedErrors.push(...result.normalizedErrors)
-      noImageTexts.push(...result.noImageTexts)
-    })
-    const imagesBySlot = new Map(
-      batchResults
-        .flatMap((result) => result.workerImages)
-        .map((entry) => [entry.slotIndex, entry.image]),
-    )
-    const fatalErrors = batchResults
-      .map((result) => result.fatalError)
-      .filter(Boolean)
-
-    if (fatalErrors.length === 0 && imagesBySlot.size < candidateCount) {
-      let missingSlotIndexes = Array.from(
-        { length: candidateCount },
-        (_, slotIndex) => slotIndex,
-      ).filter((slotIndex) => !imagesBySlot.has(slotIndex))
-
-      for (
-        let recoveryPass = 1;
-        recoveryPass <= forgeBatchRecoveryPasses && missingSlotIndexes.length > 0;
-        recoveryPass += 1
-      ) {
-        logServerEvent(batchRequestId, 'batch recovery pass started', {
-          missingSlots: missingSlotIndexes.map((slotIndex) => slotIndex + 1),
-          recoveryPass,
-        })
-
-        for (const slotIndex of missingSlotIndexes) {
-          const slotResult = await attemptBatchSlotGeneration({
-            phase: `recovery-${recoveryPass}`,
-            slotIndex,
-            workerStartDelayMs: 0,
-            workerLabel: `recovery-${recoveryPass}`,
-          })
-
-          successfulRuns.push(...slotResult.successfulRuns)
-          normalizedErrors.push(...slotResult.normalizedErrors)
-          noImageTexts.push(...slotResult.noImageTexts)
-
-          if (slotResult.image) {
-            imagesBySlot.set(slotIndex, slotResult.image.image)
-          }
-
-          if (slotResult.fatalError) {
-            fatalErrors.push(slotResult.fatalError)
-            break
-          }
-        }
-
-        if (fatalErrors.length > 0) {
-          break
-        }
-
-        missingSlotIndexes = Array.from(
-          { length: candidateCount },
-          (_, slotIndex) => slotIndex,
-        ).filter((slotIndex) => !imagesBySlot.has(slotIndex))
-      }
-    }
-
-    const images = Array.from(imagesBySlot.entries())
-      .sort((left, right) => left[0] - right[0])
-      .map((entry) => entry[1])
-
     if (images.length === 0) {
-      if (fatalErrors.length > 0) {
-        const preferredError =
-          fatalErrors.find((error) => error.status === 429) ?? fatalErrors[0]
-        logServerEvent(batchRequestId, 'batch finished with fatal error', {
-          durationMs: Date.now() - batchStartedAt,
-          errorCode: preferredError.body?.error?.code ?? null,
-          status: preferredError.status,
-        })
-        response.status(preferredError.status).json(preferredError.body)
-        return
-      }
-
-      if (successfulRuns.length === 0 && normalizedErrors.length > 0) {
-        const preferredError =
-          normalizedErrors.find((error) => error.status === 429) ??
-          normalizedErrors[0]
-        logServerEvent(batchRequestId, 'batch finished with retryable failure', {
-          durationMs: Date.now() - batchStartedAt,
-          errorCode: preferredError.body?.error?.code ?? null,
-          status: preferredError.status,
-        })
-        response.status(preferredError.status).json(preferredError.body)
-        return
-      }
-
-      const fallbackText = noImageTexts[0] ?? successfulRuns[0]?.text
-      logServerEvent(batchRequestId, 'batch finished with no images', {
-        durationMs: Date.now() - batchStartedAt,
-        textPreview: fallbackText?.slice(0, 120) ?? null,
-      })
-      response
-        .status(422)
-        .json(buildNoImageResponseError('/api/forge', modelSelection, fallbackText))
+      if (geometryErrors.length) response.status(422).json({ error: { code: 'texture_geometry_invalid', title: 'Texture Shape Needs Attention', message: geometryErrors[0] } })
+      else response.status(422).json(buildNoImageResponseError('/api/forge', modelSelection, generation.text))
       return
     }
-
-    if (images.length < candidateCount) {
-      const preferredError =
-        fatalErrors.find((error) => error.status === 429) ?? fatalErrors[0] ?? null
-      const fallbackText = noImageTexts[0] ?? successfulRuns[0]?.text
-      logServerEvent(batchRequestId, 'batch finished incomplete', {
-        durationMs: Date.now() - batchStartedAt,
-        imageCount: images.length,
-        requestedCount: candidateCount,
-        status: preferredError?.status ?? null,
-        textPreview: fallbackText?.slice(0, 120) ?? null,
-      })
-      response
-        .status(preferredError?.status ?? 502)
-        .json(
-          buildIncompleteBatchResponseError({
-            candidateCount,
-            imageCount: images.length,
-            modelSelection,
-            preferredError,
-          }),
-        )
-      return
-    }
-
-    await Promise.all(
-      successfulRuns.map((generation) =>
-        recordUsageEvent({
-          model: modelSelection.modelId,
-          route: '/api/forge',
-          telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
-          tokenCount: extractTotalTokenCount(generation),
-        }).catch((logError) => {
-          console.warn('Telemetry logging failed for /api/forge:', logError)
-        }),
-      ),
-    )
-
+    const libraryImages = mode === 'vfx-forge'
+      ? images.map(image => ({ ...image, title: `${resolveVfxEffectLabel(effectLabel)} · ${getVfxTextureLabel(textureKind)}` }))
+      : images
+    await archiveGeneratedImages(response, mode, libraryImages, normalizedPrompt)
     response.json({
-      images: images.slice(0, candidateCount),
-      model: modelSelection.modelId,
-      providerModel: modelSelection.providerModel,
-      prompt: finalPrompt,
-      styleId: providedStyleText || null,
-    })
-    logServerEvent(batchRequestId, 'batch finished successfully', {
-      durationMs: Date.now() - batchStartedAt,
-      imageCount: Math.min(images.length, candidateCount),
-      retryCount: normalizedErrors.length,
+      images, requestedCount: candidateCount, completedCount: images.length,
+      partial: images.length < candidateCount,
+      warning: images.length < candidateCount ? 'Only ' + images.length + ' of ' + candidateCount + ' requested images were returned. Successful outputs are preserved; no automatic retry was made.' + (geometryErrors.length ? ' ' + geometryErrors.join(' ') : '') : undefined,
+      model: modelSelection.modelId, providerModel: modelSelection.providerModel,
+      prompt: finalPrompt, styleId: providedStyleText || null,
     })
   } catch (error) {
     const normalizedError = normalizeGenerationError(
@@ -1280,7 +719,8 @@ app.post(
       return
     }
 
-    const bundle = await buildVfxExportBundle(validatedRequest)
+    let bundle
+    try { bundle = await buildVfxExportBundle(validatedRequest) } catch (error) { response.status(400).json({ error: { code: 'invalid_vfx_texture', title: 'Invalid VFX texture', message: error.message } }); return }
     const normalizedEffectLabel = resolveVfxEffectLabel(validatedRequest.effectLabel)
     const fileName = [
       'kizer-forge',
@@ -1351,13 +791,6 @@ app.post(
     return
   }
 
-  if (!hasApiKeyForProvider(modelSelection.provider)) {
-    response.status(500).json({
-      error: buildMissingApiKeyMessage(modelSelection.provider),
-    })
-    return
-  }
-
   const validReferences = Array.isArray(references)
     ? references.filter(
         (reference) =>
@@ -1376,7 +809,7 @@ app.post(
     return
   }
 
-  const ai = apiKey ? new GoogleGenAI({ apiKey }) : null
+  const ai = createTextAi()
 
   try {
     const trimmedPrompt = prompt.trim()
@@ -1403,7 +836,7 @@ app.post(
         ...validReferences,
       ],
       routeKey: '/api/character-sheet',
-      size: resolveOpenAiCharacterSheetSize(aspectRatio),
+      size: (aspectRatio === '2:3' ? '1024x1536' : '1536x1024'),
       systemInstruction: resolveSystemInstruction(
         typeof systemInstruction === 'string' && systemInstruction.trim()
           ? systemInstruction.trim()
@@ -1427,15 +860,7 @@ app.post(
       return
     }
 
-    await recordUsageEvent({
-      model: modelSelection.modelId,
-      route: '/api/character-sheet',
-      telemetryModel: telemetryModelIdByAlias[modelSelection.modelId],
-      tokenCount: extractTotalTokenCount(generation.raw),
-    }).catch((logError) => {
-      console.warn('Telemetry logging failed for /api/character-sheet:', logError)
-    })
-
+    await archiveGeneratedImages(response, 'character-sheet', images, trimmedPrompt)
     response.json({
       images,
       model: modelSelection.modelId,
@@ -1455,171 +880,6 @@ app.post(
   }
   },
 )
-
-app.get('/api/usage/telemetry', usageAuth, async (_request, response) => {
-  try {
-    const localTelemetrySnapshot = await getTelemetrySnapshot()
-    let telemetrySnapshot = {
-      ...localTelemetrySnapshot,
-      source: 'local',
-    }
-    const telemetryErrors = []
-
-    if (isGoogleTelemetryConfigured()) {
-      try {
-        const googleTelemetrySnapshot = await getGoogleTelemetrySnapshot()
-        telemetrySnapshot = mergeTelemetrySnapshots(
-          telemetrySnapshot,
-          googleTelemetrySnapshot,
-        )
-      } catch (error) {
-        console.warn('Google telemetry unavailable:', error)
-        telemetryErrors.push(
-          'Google quota telemetry is unavailable right now. Local telemetry is still active.',
-        )
-      }
-    }
-
-    if (isOpenAiTelemetryConfigured()) {
-      try {
-        const openAiTelemetrySnapshot = await getOpenAiTelemetrySnapshot()
-        telemetrySnapshot = mergeTelemetrySnapshots(
-          telemetrySnapshot,
-          openAiTelemetrySnapshot,
-        )
-      } catch (error) {
-        console.warn('OpenAI telemetry unavailable:', error)
-        telemetryErrors.push(
-          'OpenAI usage telemetry is unavailable right now. Local telemetry is still active.',
-        )
-      }
-    }
-
-    if (telemetryErrors.length > 0) {
-      telemetrySnapshot = {
-        ...telemetrySnapshot,
-        error: {
-          code: 'telemetry_unavailable',
-          message: telemetryErrors.join(' '),
-        },
-      }
-    }
-
-    response.set('Cache-Control', 'no-store')
-    response.json(telemetrySnapshot)
-  } catch (error) {
-    response.status(500).json({
-      error: {
-        code:
-          error && typeof error === 'object' && 'code' in error
-            ? error.code
-            : 'telemetry_unavailable',
-        message:
-          'Telemetry is unavailable right now.',
-      },
-    })
-  }
-})
-
-const googleTelemetryRowIdByLegacyId = {
-  'gemini-2.5-flash-image': 'nano-banana',
-  'gemini-2.5-flash': 'gemini-2.5-flash-text',
-  'gemini-3-pro-image': 'nano-banana-pro',
-  'gemini-3.1-flash': 'gemini-3-flash-text',
-  'gemini-3.1-flash-image': 'nano-banana-2',
-  'gemini-3.1-flash-lite-image': 'nano-banana-2-lite',
-  'gemini-nano-banana-2.1': 'nano-banana-2.1',
-  'veo-3-fast-generate': 'veo-3-fast-generate',
-}
-
-function mergeTelemetrySnapshots(localSnapshot, externalSnapshot) {
-  const externalRowsById = new Map(
-    externalSnapshot.rows.map((row) => [normalizeTelemetryRowId(row.id), row]),
-  )
-
-  return {
-    ...localSnapshot,
-    generatedAt: localSnapshot.generatedAt,
-    source: 'hybrid',
-    timeZone: localSnapshot.timeZone,
-    rows: localSnapshot.rows.map((localRow) =>
-      mergeTelemetryRow(localRow, externalRowsById.get(localRow.id)),
-    ),
-  }
-}
-
-function mergeTelemetryRow(localRow, googleRow) {
-  if (!googleRow) {
-    return localRow
-  }
-
-  const localChartHasActivity = localRow.chartPoints.some((value) => value > 0)
-
-  return {
-    ...localRow,
-    chartPoints: localChartHasActivity ? localRow.chartPoints : googleRow.chartPoints,
-    lastRequestAt: resolveLatestTelemetryTimestamp(localRow.lastRequestAt, googleRow.lastRequestAt),
-    metrics: {
-      rpm: mergeTelemetryMetric(localRow.metrics.rpm, googleRow.metrics.rpm),
-      rpd: mergeTelemetryMetric(localRow.metrics.rpd, googleRow.metrics.rpd),
-      tpm: mergeTelemetryMetric(localRow.metrics.tpm, googleRow.metrics.tpm),
-    },
-  }
-}
-
-function mergeTelemetryMetric(localMetric, googleMetric) {
-  if (!localMetric && !googleMetric) {
-    return null
-  }
-
-  const current = Math.max(
-    normalizeTelemetryMetricValue(localMetric?.current),
-    normalizeTelemetryMetricValue(googleMetric?.current),
-  )
-  // Keep the local limit table as the canonical max for each model. Google quota
-  // telemetry is still useful for live usage/current counts, but its reported
-  // limits can be broader than the per-model caps shown in the product UI.
-  const limitCandidate = firstFiniteTelemetryValue(localMetric?.limit, googleMetric?.limit)
-
-  return {
-    current: Number.isFinite(current) ? current : null,
-    limit: limitCandidate,
-    ratio:
-      typeof limitCandidate === 'number' && limitCandidate > 0 && Number.isFinite(current)
-        ? Math.max(0, Math.min(current / limitCandidate, 1))
-        : firstFiniteTelemetryValue(localMetric?.ratio, googleMetric?.ratio),
-  }
-}
-
-function normalizeTelemetryRowId(rowId) {
-  return googleTelemetryRowIdByLegacyId[rowId] ?? rowId
-}
-
-function normalizeTelemetryMetricValue(value) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
-}
-
-function firstFiniteTelemetryValue(...values) {
-  for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return value
-    }
-  }
-
-  return null
-}
-
-function resolveLatestTelemetryTimestamp(...timestamps) {
-  const validTimestamps = timestamps.filter(
-    (value) => typeof value === 'string' && Number.isFinite(Date.parse(value)),
-  )
-
-  if (validTimestamps.length === 0) {
-    return null
-  }
-
-  return validTimestamps.sort((left, right) => Date.parse(right) - Date.parse(left))[0]
-}
 
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(distDir))
@@ -1667,13 +927,14 @@ export function startServer() {
     JSON.stringify({
       allowCorsOrigin: allowedCorsOrigin || 'same-origin only',
       generationAuth: generationApiToken ? 'token-required' : 'disabled',
-      internalAuth: internalApiToken ? 'token-or-loopback' : 'loopback-only',
       promptOrchestration: enablePromptOrchestration,
-      trustBoundary: 'client requests only; Gemini credentials remain server-side',
+      trustBoundary: 'Managed Codex ChatGPT sign-in; loopback-only; no API-key fallback',
       type: 'server-security-config',
     }),
   )
-  return app.listen(port, () => {
+  const host = process.env.HOST ?? '127.0.0.1'
+  if (!['127.0.0.1', '::1', 'localhost'].includes(host)) throw new Error('Codex generation is loopback-only. HOST must be 127.0.0.1, localhost, or ::1.')
+  return app.listen(port, host, () => {
     console.log(`Kizer Forge API listening on http://localhost:${port}`)
   })
 }
@@ -1739,7 +1000,7 @@ async function buildForgePromptWithBestPractices({
     })
   }
 
-  const orchestratorModel = modelRegistry['gemini-3.5-flash-lite']
+  const orchestratorModel = modelRegistry.codex
 
   if (!orchestratorModel) {
     return buildForgePromptFallback({
@@ -1806,13 +1067,6 @@ async function buildForgePromptWithBestPractices({
           'Return exactly one concise production prompt paragraph with no markdown and no bullets.',
       },
     })
-
-    await recordUsageEvent({
-      model: 'gemini-3.5-flash-lite',
-      route: '/internal/prompt-orchestrator',
-      telemetryModel: telemetryModelIdByAlias['gemini-3.5-flash-lite'],
-      tokenCount: extractTotalTokenCount(promptGeneration),
-    }).catch(() => {})
 
     const generatedPrompt =
       typeof promptGeneration.text === 'string' ? promptGeneration.text.trim() : ''
@@ -2127,27 +1381,6 @@ function buildPortraitStudioPrompt({ prompt, styleText }) {
     .join(' ')
 }
 
-function resolveForgeAttemptPolicy(mode, workflow = 'generate') {
-  if (mode === 'texture-lab' && workflow === 'generate') {
-    return {
-      maxAttemptsPerImage: textureLabMaxAttemptsPerImage,
-      timeoutMs: textureLabGenerationTimeoutMs,
-    }
-  }
-
-  if (mode === 'variant-forge') {
-    return {
-      maxAttemptsPerImage: variantForgeMaxAttemptsPerImage,
-      timeoutMs: variantForgeGenerationTimeoutMs,
-    }
-  }
-
-  return {
-    maxAttemptsPerImage: forgeBatchMaxAttemptsPerImage,
-    timeoutMs: forgeGenerationTimeoutMs,
-  }
-}
-
 export function resolveForgeBatchWorkerCount(
   mode,
   workflow = 'generate',
@@ -2196,28 +1429,6 @@ export function resolveForgeRetryDelay({
     effectiveDelayMs: baseDelayMs + jitterMs,
     jitterMs,
   }
-}
-
-function buildVfxForgePrompt({ frameCount, intensity, prompt, projectileType, styleText }) {
-  const normalizedProjectileType =
-    typeof projectileType === 'string' && projectileType.trim().length > 0
-      ? projectileType.trim()
-      : 'Fireball'
-  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
-  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
-  const normalizedIntensity = clampPercentage(intensity, 60)
-
-  return [
-    'Generate a 2D projectile spritesheet.',
-    `Projectile type: ${normalizedProjectileType}.`,
-    `Layout: exactly ${normalizedFrameCount} frames in a single horizontal row.`,
-    'Show the effect from birth through peak energy to dissipation.',
-    `Intensity target: ${normalizedIntensity} out of 100.`,
-    normalizedPrompt ? `Additional direction: ${normalizedPrompt}.` : null,
-    styleText ? `Style guidance: ${styleText}.` : null,
-  ]
-    .filter(Boolean)
-    .join(' ')
 }
 
 function resolveSystemInstruction(customInstruction) {
@@ -2341,20 +1552,6 @@ function resolvePortraitStudioSystemInstruction(customInstruction) {
     .join('\n')
 }
 
-function resolveVfxForgeSystemInstruction(customInstruction, { frameCount }) {
-  const normalizedFrameCount = clampAnimatorFrameCount(frameCount)
-  const vfxRules = [
-    'Generate a 2D projectile spritesheet on a pure #000000 black background.',
-    `Layout: ${normalizedFrameCount} frames in a single horizontal row.`,
-    'Use soft glowing edges and no outlines for additive blending compatibility.',
-    'Keep the background fully black with no floor, props, or character silhouettes.',
-  ]
-
-  return [coreSystemRules.slice(1).join('\n'), vfxRules.join('\n'), customInstruction]
-    .filter((value) => typeof value === 'string' && value.trim())
-    .join('\n')
-}
-
 function resolveSeamRepairSystemInstruction(customInstruction) {
   const seamRepairRules = [
     'This request is a texture seam repair task.',
@@ -2454,7 +1651,7 @@ async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
     return normalizedPrompt
   }
 
-  const enhancerModel = modelRegistry['gemini-3.5-flash-lite']
+  const enhancerModel = modelRegistry.codex
 
   if (!enhancerModel) {
     return normalizedPrompt
@@ -2477,13 +1674,6 @@ async function maybeEnhancePrompt({ ai, prompt, styleLabel }) {
       },
     })
 
-    await recordUsageEvent({
-      model: 'gemini-3.5-flash-lite',
-      route: '/internal/prompt-enhancer',
-      telemetryModel: telemetryModelIdByAlias['gemini-3.5-flash-lite'],
-      tokenCount: extractTotalTokenCount(enhancement),
-    }).catch(() => {})
-
     const enhancedPrompt =
       typeof enhancement.text === 'string' ? enhancement.text.trim() : ''
     return enhancedPrompt || normalizedPrompt
@@ -2497,34 +1687,6 @@ function countWords(value) {
     .trim()
     .split(/\s+/)
     .filter(Boolean).length
-}
-
-function extractImages(generation) {
-  return (
-    generation.candidates?.flatMap((candidate, candidateIndex) => {
-      const text = candidate.content?.parts
-        ?.filter((part) => typeof part.text === 'string' && part.text.trim().length > 0)
-        .map((part) => part.text.trim())
-        .join('\n\n')
-
-      return (
-        candidate.content?.parts?.flatMap((part, partIndex) => {
-          if (!part.inlineData?.data) {
-            return []
-          }
-
-          return [
-            {
-              id: `candidate-${candidateIndex + 1}-part-${partIndex + 1}`,
-              mimeType: part.inlineData.mimeType ?? 'image/png',
-              data: part.inlineData.data,
-              text: text || undefined,
-            },
-          ]
-        }) ?? []
-      )
-    }) ?? []
-  )
 }
 
 function normalizeSeamRepair(seamRepair) {
@@ -2556,7 +1718,6 @@ function normalizeSeamRepair(seamRepair) {
 
 async function generateAnimatorArtifacts({
   actionType,
-  ai,
   fps,
   firstFrame,
   frameCount,
@@ -2587,7 +1748,7 @@ async function generateAnimatorArtifacts({
     const generation = await generateImagesWithModel({
       candidateCount: 1,
       googleConfig: {
-        aspectRatio: '16:9',
+        aspectRatio: '3:2',
       },
       modelSelection,
       prompt: normalizedPrompt,
@@ -2618,9 +1779,9 @@ async function generateAnimatorArtifacts({
           : []),
       ],
       routeKey: '/api/action-animator',
-      size: '1536x1024',
+      size: animatorCanvas.width + 'x' + animatorCanvas.height,
       systemInstruction:
-        'Return exactly one polished horizontal sprite strip image. ' +
+        'Return exactly one landscape sprite grid image following the specified rows and columns. ' +
         'Do not add text, labels, borders, UI, or extra panels outside the requested animation frames.',
       timeoutMs: forgeGenerationTimeoutMs,
     })
@@ -2657,702 +1818,22 @@ async function generateAnimatorArtifacts({
     }
   }
 
-  const interaction = await ai.interactions.create({
-    model: modelSelection.providerModel,
-    input: [
-      { type: 'image', data: image.data, mime_type: image.mimeType },
-      { type: 'text', text: normalizedPrompt },
-    ],
-    response_format: {
-      type: 'video',
-      duration: `${actionAnimatorDurationSeconds}s`,
-      resolution: '720p',
-    },
-  }, {
-    timeout: actionAnimatorTimeoutMs,
-    maxRetries: 0,
+  throw new Error('Only image-strip animation is supported in the web edition.')
+}
+
+async function generateImagesWithModel({ candidateCount = 1, modelSelection, prompt, quality, references = [], size = 'auto', systemInstruction }) {
+  if (modelSelection.provider !== 'codex') throw new Error('Only the local Codex runtime is supported.')
+  const signal = generationContext.getStore()?.signal
+  const result = await generateCodexImages({
+    prompt: [systemInstruction, prompt, references.length ? 'Attached reference images, in order: ' + references.map((reference, index) => 'Image ' + (index + 1) + ': ' + (reference.role || reference.slot || reference.name || 'visual reference')).join('; ') + '.' : '', size !== 'auto' ? 'Desired canvas: ' + size + ' pixels. Match this layout and aspect ratio as closely as supported.' : '', quality ? 'Requested visual detail level: ' + quality + '.' : ''].filter(Boolean).join('\n\n'),
+    count: candidateCount,
+    references: references.map(reference => Buffer.from(reference.data, 'base64')),
+    signal,
   })
-
-  if (!interaction.output_video?.data) {
-    throw new Error('Gemini Omni Flash returned no video for the animation request.')
-  }
-
-  const videoBuffer = Buffer.from(interaction.output_video.data, 'base64')
-  const artifactPayload = await createActionAnimatorArtifactsFromVideo({
-    frameCount: normalizedFrameCount,
-    frameSize: normalizedFrameSize,
-    fps: normalizedFps,
-    keyColor: normalizedKeyColor,
-    prompt: normalizedPrompt,
-    sourceModel: modelSelection.modelId,
-    videoBuffer,
-  })
-
   return {
-    artifacts: artifactPayload,
-    prompt: normalizedPrompt,
-    tokenCount: 0,
+    images: result.images.map((image, index) => ({ data: image.buffer.toString('base64'), id: 'codex-image-' + (index + 1), mimeType: image.mimeType, text: image.revisedPrompt })),
+    text: '', raw: null, warning: result.warning,
   }
-}
-
-async function createActionAnimatorArtifactsFromVideo({
-  frameCount,
-  frameSize,
-  fps,
-  keyColor,
-  prompt,
-  sourceModel,
-  videoBuffer,
-}) {
-  if (!ffmpegPath) {
-    throw new Error('ffmpeg-static is unavailable, so sprite extraction cannot run.')
-  }
-
-  const safeFrameCount = clampAnimatorFrameCount(frameCount)
-  const safeFrameSize = normalizeActionAnimatorFrameSize(frameSize)
-  const normalizedKeyColor = resolveActionAnimatorKeyColor(keyColor)
-  const sampleFps = resolveActionAnimatorSampleFps({
-    durationSeconds: actionAnimatorDurationSeconds,
-    frameCount: safeFrameCount,
-  })
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forger-action-animator-'))
-  const videoPath = path.join(tempDir, 'source.mp4')
-  const framePattern = path.join(tempDir, 'frame-%03d.png')
-
-  try {
-    await fs.writeFile(videoPath, videoBuffer)
-    await runFfmpeg([
-      '-y',
-      '-i',
-      videoPath,
-      '-filter_complex',
-      buildAnimatorMatteFilter({
-        frameSizePx: safeFrameSize,
-        keyColor: normalizedKeyColor,
-        sampleFps,
-      }),
-      '-map',
-      '[out]',
-      '-frames:v',
-      String(safeFrameCount),
-      '-start_number',
-      '1',
-      framePattern,
-    ])
-
-    const extractedFrameNames = (await fs.readdir(tempDir))
-      .filter((fileName) => /^frame-\d{3}\.png$/i.test(fileName))
-      .sort((left, right) => left.localeCompare(right))
-    const extractedFrames = await Promise.all(
-      extractedFrameNames.map((fileName) => fs.readFile(path.join(tempDir, fileName))),
-    )
-
-    if (extractedFrames.length === 0) {
-      throw new Error('Sprite extraction completed without any decoded frames.')
-    }
-
-    const rawFrames = extractedFrames.slice(0, safeFrameCount)
-
-    while (rawFrames.length < safeFrameCount) {
-      rawFrames.push(rawFrames.at(-1))
-    }
-
-    const normalizedFrames = await normalizeAnimatorFrameBuffers(rawFrames, {
-      keyColor: normalizedKeyColor,
-      targetSize: safeFrameSize,
-    })
-    const spriteSheetBuffer = await composeHorizontalSpriteSheet(normalizedFrames, safeFrameSize, normalizedKeyColor)
-
-    return {
-      frames: normalizedFrames.map((frameBuffer, index) => ({
-        data: frameBuffer.toString('base64'),
-        id: `action-animator-frame-${String(index + 1).padStart(2, '0')}`,
-        mimeType: 'image/png',
-        text: `Frame ${index + 1} of ${safeFrameCount}.`,
-      })),
-      metadata: {
-        fps,
-        frameCount: safeFrameCount,
-        keyColor: normalizedKeyColor,
-        normalizedSize: safeFrameSize,
-        pipeline: 'veo-video',
-        prompt,
-        sampleStrategy: 'even',
-        sourceModel,
-      },
-      spriteSheet: {
-        data: spriteSheetBuffer.toString('base64'),
-        id: 'action-animator-sprite-sheet',
-        mimeType: 'image/png',
-        text:
-          `Generated ${safeFrameCount} keyed sprite frames from Gemini Omni Flash at ${safeFrameSize} x ${safeFrameSize}. ` +
-          'Frames were sampled evenly across the full clip and normalized onto a flat chroma background.',
-      },
-      video: {
-        data: videoBuffer.toString('base64'),
-        mimeType: 'video/mp4',
-      },
-    }
-  } finally {
-    await fs.rm(tempDir, { force: true, recursive: true }).catch(() => {})
-  }
-}
-
-async function createActionAnimatorArtifactsFromImageStrip({
-  frameCount,
-  frameSize,
-  fps,
-  keyColor,
-  prompt,
-  sourceImageBuffer,
-  sourceModel,
-}) {
-  const safeFrameCount = clampAnimatorFrameCount(frameCount)
-  const safeFrameSize = normalizeActionAnimatorFrameSize(frameSize)
-  const normalizedKeyColor = resolveActionAnimatorKeyColor(keyColor)
-  const background = actionAnimatorKeyColorCssById[normalizedKeyColor]
-  const targetSpriteWidth = safeFrameCount * safeFrameSize
-  const fittedSpriteSheet = await sharp(sourceImageBuffer)
-    .resize(targetSpriteWidth, safeFrameSize, {
-      background,
-      fit: 'contain',
-      kernel: sharp.kernel.nearest,
-      position: 'center',
-    })
-    .png()
-    .toBuffer()
-
-  const rawFrames = await Promise.all(
-    Array.from({ length: safeFrameCount }, (_, index) =>
-      sharp(fittedSpriteSheet)
-        .extract({
-          height: safeFrameSize,
-          left: index * safeFrameSize,
-          top: 0,
-          width: safeFrameSize,
-        })
-        .png()
-        .toBuffer(),
-    ),
-  )
-  const normalizedFrames = await normalizeAnimatorFrameBuffers(rawFrames, {
-    keyColor: normalizedKeyColor,
-    targetSize: safeFrameSize,
-  })
-  const spriteSheetBuffer = await composeHorizontalSpriteSheet(
-    normalizedFrames,
-    safeFrameSize,
-    normalizedKeyColor,
-  )
-
-  return {
-    frames: normalizedFrames.map((frameBuffer, index) => ({
-      data: frameBuffer.toString('base64'),
-      id: `action-animator-frame-${String(index + 1).padStart(2, '0')}`,
-      mimeType: 'image/png',
-      text: `Frame ${index + 1} of ${safeFrameCount}.`,
-    })),
-    metadata: {
-      fps,
-      frameCount: safeFrameCount,
-      keyColor: normalizedKeyColor,
-      normalizedSize: safeFrameSize,
-      pipeline: 'image-strip',
-      prompt,
-      sampleStrategy: 'strip',
-      sourceModel,
-    },
-    spriteSheet: {
-      data: spriteSheetBuffer.toString('base64'),
-      id: 'action-animator-sprite-sheet',
-      mimeType: 'image/png',
-      text:
-        `Generated ${safeFrameCount} sprite frames from an image-model strip at ${safeFrameSize} x ${safeFrameSize}. ` +
-        'Frames were split from the returned strip and normalized onto a flat chroma background.',
-    },
-    video: null,
-  }
-}
-
-async function normalizeAnimatorFrameBuffers(
-  frameBuffers,
-  {
-    keyColor,
-    targetSize,
-  },
-) {
-  const background = actionAnimatorKeyColorCssById[resolveActionAnimatorKeyColor(keyColor)]
-  const padding = Math.max(16, Math.round(targetSize * 0.0625))
-  const measuredFrames = await Promise.all(
-    frameBuffers.map(async (frameBuffer) => {
-      const trimmed = await sharp(frameBuffer)
-        .trim({ background })
-        .png()
-        .toBuffer({ resolveWithObject: true })
-
-      return {
-        buffer: trimmed.data,
-        height: trimmed.info.height,
-        width: trimmed.info.width,
-      }
-    }),
-  )
-  const maxWidth = Math.max(...measuredFrames.map((frame) => Math.max(1, frame.width)))
-  const maxHeight = Math.max(...measuredFrames.map((frame) => Math.max(1, frame.height)))
-  const scale = Math.min(
-    1,
-    (targetSize - padding * 2) / maxWidth,
-    (targetSize - padding * 2) / maxHeight,
-  )
-
-  return Promise.all(
-    measuredFrames.map(async (frame) => {
-      const outputWidth = Math.max(1, Math.round(frame.width * scale))
-      const outputHeight = Math.max(1, Math.round(frame.height * scale))
-      const resizedBuffer = await sharp(frame.buffer)
-        .resize(outputWidth, outputHeight, {
-          fit: 'fill',
-          kernel: sharp.kernel.nearest,
-        })
-        .png()
-        .toBuffer()
-
-      return sharp({
-        create: {
-          background,
-          channels: 4,
-          height: targetSize,
-          width: targetSize,
-        },
-      })
-        .composite([
-          {
-            input: resizedBuffer,
-            left: Math.round((targetSize - outputWidth) / 2),
-            top: targetSize - padding - outputHeight,
-          },
-        ])
-        .png()
-        .toBuffer()
-    }),
-  )
-}
-
-function extractOpenAiImages(payload) {
-  return (payload?.data ?? []).flatMap((entry, index) => {
-    if (typeof entry?.b64_json !== 'string' || !entry.b64_json.trim()) {
-      return []
-    }
-
-    return [
-      {
-        data: entry.b64_json,
-        id: `openai-image-${index + 1}`,
-        mimeType: 'image/png',
-        text:
-          typeof entry?.revised_prompt === 'string' && entry.revised_prompt.trim()
-            ? entry.revised_prompt.trim()
-            : undefined,
-      },
-    ]
-  })
-}
-
-async function generateImagesWithModel({
-  mask,
-  candidateCount = 1,
-  googleConfig = {},
-  modelSelection,
-  prompt,
-  quality,
-  references = [],
-  routeKey,
-  size = 'auto',
-  systemInstruction,
-  timeoutMs,
-}) {
-  if (modelSelection.provider === 'openai') {
-    return generateImagesWithOpenAiModel({
-      mask,
-      candidateCount,
-      modelSelection,
-      prompt,
-      quality,
-      references,
-      routeKey,
-      size,
-      systemInstruction,
-      timeoutMs,
-    })
-  }
-
-  return generateImagesWithGoogleModel({
-    candidateCount,
-    googleConfig,
-    modelSelection,
-    prompt,
-    references,
-    systemInstruction,
-    timeoutMs,
-  })
-}
-
-async function generateImagesWithGoogleModel({
-  candidateCount,
-  googleConfig,
-  modelSelection,
-  prompt,
-  references,
-  systemInstruction,
-  timeoutMs,
-}) {
-  const ai = apiKey ? new GoogleGenAI({ apiKey }) : null
-  const generation = await withTimeout(
-    ai.models.generateContent({
-      model: modelSelection.providerModel,
-      contents: [
-        { text: prompt },
-        ...references.map((reference) => ({
-          inlineData: {
-            mimeType: reference.mimeType,
-            data: reference.data,
-          },
-        })),
-      ],
-      config: {
-        ...googleConfig,
-        candidateCount,
-        responseModalities: ['IMAGE', 'TEXT'],
-        systemInstruction,
-      },
-    }),
-    timeoutMs,
-    `${resolveProviderLabel('google')} image generation timed out after ${Math.round(
-      timeoutMs / 1000,
-    )} seconds.`,
-  )
-
-  return {
-    images: extractImages(generation).slice(0, candidateCount),
-    raw: generation,
-    text: generation.text,
-  }
-}
-
-async function generateImagesWithOpenAiModel({
-  mask,
-  candidateCount,
-  modelSelection,
-  prompt,
-  quality,
-  references,
-  routeKey,
-  size,
-  systemInstruction,
-  timeoutMs,
-}) {
-  const controller = new AbortController()
-  const timeoutHandle = setTimeout(() => {
-    controller.abort()
-  }, timeoutMs)
-  const telemetryModel = telemetryModelIdByAlias[modelSelection.modelId]
-  const combinedPrompt = buildOpenAiImagePrompt(prompt, systemInstruction)
-  const resolvedQuality = quality ?? resolveOpenAiImageQuality(routeKey)
-  const preparedReferences = await prepareOpenAiReferencesForRoute({
-    references,
-    routeKey,
-  })
-  const editHeaders = buildOpenAiRequestHeaders({
-    requestId: buildRequestId('openai-edit'),
-  })
-  const generationHeaders = buildOpenAiRequestHeaders({
-    contentType: 'application/json',
-    requestId: buildRequestId('openai-generate'),
-  })
-
-  try {
-    const response =
-      preparedReferences.length > 0
-        ? await fetch('https://api.openai.com/v1/images/edits', {
-            method: 'POST',
-            headers: editHeaders,
-            body: buildOpenAiImageEditFormData({
-              mask,
-              candidateCount,
-              model: modelSelection.providerModel,
-              prompt: combinedPrompt,
-              quality: resolvedQuality,
-              references: preparedReferences,
-              size,
-            }),
-            signal: controller.signal,
-          })
-        : await fetch('https://api.openai.com/v1/images/generations', {
-            method: 'POST',
-            headers: generationHeaders,
-            body: JSON.stringify({
-              model: modelSelection.providerModel,
-              moderation: 'auto',
-              n: candidateCount,
-              output_format: 'png',
-              prompt: combinedPrompt,
-              quality: resolvedQuality,
-              size,
-            }),
-            signal: controller.signal,
-          })
-
-    recordOpenAiRateLimitSnapshot({
-      headers: response.headers,
-      telemetryModel,
-    })
-
-    const payload = await response.json().catch(() => null)
-
-    if (!response.ok) {
-      throw buildProviderHttpError('openai', response.status, payload)
-    }
-
-    return {
-      images: extractOpenAiImages(payload).slice(0, candidateCount),
-      raw: payload,
-      text:
-        typeof payload?.data?.[0]?.revised_prompt === 'string'
-          ? payload.data[0].revised_prompt
-          : '',
-    }
-  } catch (error) {
-    if (error && typeof error === 'object' && error.name === 'AbortError') {
-      throw buildProviderHttpError('openai', 504, {
-        error: {
-          message:
-            `${resolveProviderLabel('openai')} image generation timed out after ${Math.round(
-              timeoutMs / 1000,
-            )} seconds.`,
-        },
-      })
-    }
-
-    throw error
-  } finally {
-    clearTimeout(timeoutHandle)
-  }
-}
-
-function buildOpenAiImagePrompt(prompt, systemInstruction) {
-  const normalizedPrompt = typeof prompt === 'string' ? prompt.trim() : ''
-  const normalizedInstruction =
-    typeof systemInstruction === 'string' ? systemInstruction.trim() : ''
-
-  return [normalizedInstruction, normalizedPrompt].filter(Boolean).join('\n\n')
-}
-
-function buildOpenAiRequestHeaders({ contentType, requestId }) {
-  const headers = {
-    Authorization: `Bearer ${openAiApiKey}`,
-    'X-Client-Request-Id': requestId,
-  }
-  const normalizedOrganizationId =
-    typeof openAiOrganizationId === 'string' ? openAiOrganizationId.trim() : ''
-  const normalizedProjectId =
-    typeof openAiProjectId === 'string' ? openAiProjectId.trim() : ''
-
-  if (contentType) {
-    headers['Content-Type'] = contentType
-  }
-
-  if (normalizedOrganizationId) {
-    headers['OpenAI-Organization'] = normalizedOrganizationId
-  }
-
-  if (normalizedProjectId) {
-    headers['OpenAI-Project'] = normalizedProjectId
-  }
-
-  return headers
-}
-
-function resolveOpenAiForgeImageSize(mode) {
-  if (mode === 'visualizer') {
-    return '1536x1024'
-  }
-
-  return '1024x1024'
-}
-
-function resolveOpenAiCharacterSheetSize(aspectRatio) {
-  return aspectRatio === '16:9' ? '1536x1024' : '1024x1024'
-}
-
-function resolveOpenAiImageQuality(routeKey) {
-  return routeKey === '/api/character-sheet'
-    ? openAiCharacterSheetQuality
-    : openAiImageQuality
-}
-
-function normalizeOpenAiImageQuality(value, fallback) {
-  const normalizedValue = typeof value === 'string' ? value.trim().toLowerCase() : ''
-  return ['auto', 'low', 'medium', 'high'].includes(normalizedValue)
-    ? normalizedValue
-    : fallback
-}
-
-function clampOpenAiReferenceMaxEdgePx(value, fallback) {
-  const normalized = Math.round(Number(value))
-  if (!Number.isFinite(normalized)) {
-    return fallback
-  }
-
-  return Math.max(256, Math.min(normalized, 2048))
-}
-
-function resolveOpenAiReferenceMaxEdgePx(routeKey) {
-  return routeKey === '/api/character-sheet'
-    ? openAiCharacterSheetReferenceMaxEdgePx
-    : null
-}
-
-async function prepareOpenAiReferencesForRoute({ references, routeKey }) {
-  const maxEdgePx = resolveOpenAiReferenceMaxEdgePx(routeKey)
-
-  if (!Array.isArray(references) || references.length === 0 || maxEdgePx === null) {
-    return references
-  }
-
-  return Promise.all(
-    references.map((reference) => downscaleOpenAiReferenceImage(reference, maxEdgePx)),
-  )
-}
-
-async function downscaleOpenAiReferenceImage(reference, maxEdgePx) {
-  if (
-    !reference ||
-    typeof reference.data !== 'string' ||
-    typeof reference.mimeType !== 'string' ||
-    !reference.data ||
-    !reference.mimeType
-  ) {
-    return reference
-  }
-
-  try {
-    const inputBuffer = Buffer.from(reference.data, 'base64')
-    const metadata = await sharp(inputBuffer).metadata()
-    const width = Number(metadata.width)
-    const height = Number(metadata.height)
-
-    if (!Number.isFinite(width) || !Number.isFinite(height)) {
-      return reference
-    }
-
-    if (Math.max(width, height) <= maxEdgePx) {
-      return reference
-    }
-
-    const resized = sharp(inputBuffer).rotate().resize({
-      fit: 'inside',
-      height: maxEdgePx,
-      width: maxEdgePx,
-      withoutEnlargement: true,
-    })
-
-    const normalizedMimeType =
-      reference.mimeType === 'image/jpeg' || reference.mimeType === 'image/jpg'
-        ? 'image/jpeg'
-        : reference.mimeType === 'image/webp'
-          ? 'image/webp'
-          : 'image/png'
-    const resizedBuffer =
-      normalizedMimeType === 'image/jpeg'
-        ? await resized.jpeg({ mozjpeg: true, quality: 90 }).toBuffer()
-        : normalizedMimeType === 'image/webp'
-          ? await resized.webp({ quality: 90 }).toBuffer()
-          : await resized.png().toBuffer()
-
-    return {
-      ...reference,
-      data: resizedBuffer.toString('base64'),
-      mimeType: normalizedMimeType,
-    }
-  } catch {
-    return reference
-  }
-}
-
-function buildOpenAiImageEditFormData({
-  mask,
-  candidateCount,
-  model,
-  prompt,
-  quality,
-  references,
-  size,
-}) {
-  const formData = new FormData()
-  if (mask) formData.set('mask', new Blob([mask], { type: 'image/png' }), 'edit-mask.png')
-  formData.set('model', model)
-  formData.set('prompt', prompt)
-  formData.set('n', String(candidateCount))
-  formData.set('output_format', 'png')
-  formData.set('quality', quality)
-  formData.set('size', size)
-
-  references.forEach((reference, index) => {
-    formData.append(
-      'image[]',
-      new Blob([Buffer.from(reference.data, 'base64')], {
-        type: reference.mimeType,
-      }),
-      reference.name || `reference-${index + 1}.${inferImageExtension(reference.mimeType)}`,
-    )
-  })
-
-  return formData
-}
-
-function inferImageExtension(mimeType) {
-  switch (mimeType) {
-    case 'image/jpeg':
-      return 'jpg'
-    case 'image/webp':
-      return 'webp'
-    default:
-      return 'png'
-  }
-}
-
-function buildProviderHttpError(provider, status, payload) {
-  const message =
-    typeof payload?.error?.message === 'string' && payload.error.message.trim()
-      ? payload.error.message.trim()
-      : `${resolveProviderLabel(provider)} request failed unexpectedly.`
-  const error = new Error(message)
-  error.provider = provider
-  error.status = status
-  error.payload = payload
-  return error
-}
-
-async function composeHorizontalSpriteSheet(frameBuffers, targetSize, keyColor) {
-  const background = actionAnimatorKeyColorCssById[resolveActionAnimatorKeyColor(keyColor)]
-
-  return sharp({
-    create: {
-      background,
-      channels: 4,
-      height: targetSize,
-      width: targetSize * frameBuffers.length,
-    },
-  })
-    .composite(
-      frameBuffers.map((frameBuffer, index) => ({
-        input: frameBuffer,
-        left: index * targetSize,
-        top: 0,
-      })),
-    )
-    .png()
-    .toBuffer()
 }
 
 function buildAnimatorPrompt({
@@ -3362,7 +1843,7 @@ function buildAnimatorPrompt({
   hasFirstFrameGuide = false,
   hasLastFrameGuide = false,
   keyColor,
-  pipeline = 'veo-video',
+  pipeline = 'image-strip',
   prompt,
 }) {
   const keyColorLabel = resolveActionAnimatorKeyColor(keyColor) === 'blue'
@@ -3372,18 +1853,18 @@ function buildAnimatorPrompt({
     typeof prompt === 'string' && prompt.trim().length > 0
       ? prompt.trim()
       : [
-          `Create a 2D side-profile ${actionType || 'idle'} cycle from the supplied character image.`,
+          `Create a 2D ${actionType || 'idle'} cycle from the supplied character image.`,
           `Target playback: ${frameCount} frames at ${fps} fps.`,
         ].join(' ')
 
   return [
     basePrompt,
-    'Keep the camera locked in side view with no pans, zooms, or rotation.',
+    'Match the view of the source image, unless the user explicitly requests another view. Lock that camera in every pose, with no pans, zooms or rotation.',
     'Preserve the exact character identity, proportions, colors, clothing shapes, and silhouette from the reference image.',
     'Keep the full body visible at a consistent scale with no floor plane, scenery, props, or extra characters.',
     `Use a solid ${keyColorLabel} background that stays flat and consistent in every frame.`,
     pipeline === 'image-strip'
-      ? `Return a single horizontal sprite strip with exactly ${frameCount} equal square frames in one row.`
+      ? describeActionAnimatorGrid(frameCount)
       : null,
     hasFirstFrameGuide
       ? 'The second attached image is a first-frame guide. Match that opening pose closely.'
@@ -3397,66 +1878,12 @@ function buildAnimatorPrompt({
     .join(' ')
 }
 
-export function buildAnimatorMatteFilter(options = {}) {
-  const frameSizePx = normalizeActionAnimatorFrameSize(options.frameSizePx)
-  const keyColor = resolveActionAnimatorKeyColor(options.keyColor)
-  const keyColorHex = actionAnimatorKeyColorHexById[keyColor]
-  const filterSteps = []
-
-  if (typeof options.sampleFps === 'number' && Number.isFinite(options.sampleFps)) {
-    filterSteps.push(`fps=${Math.max(0.25, options.sampleFps)}`)
-  }
-
-  filterSteps.push(
-    `scale=${frameSizePx}:${frameSizePx}:force_original_aspect_ratio=decrease:flags=lanczos`,
-    `pad=${frameSizePx}:${frameSizePx}:(ow-iw)/2:(oh-ih)/2:color=${keyColorHex}`,
-    `chromakey=${keyColorHex}:0.22:0.06`,
-    'colorkey=0xFFFFFF:0.18:0.05',
-    'format=rgba',
-  )
-
-  return `[0:v]${filterSteps.join(',')}[out]`
-}
-
 export function normalizeActionAnimatorFrameSize(value) {
   return Number(value) === 1080 ? 1080 : defaultActionAnimatorFrameSizePx
 }
 
 export function resolveActionAnimatorKeyColor(value) {
   return value === 'blue' ? 'blue' : 'green'
-}
-
-export function resolveActionAnimatorSampleFps(options = {}) {
-  const durationSeconds = clampActionAnimatorDurationSeconds(options.durationSeconds)
-  const frameCount = clampAnimatorFrameCount(options.frameCount)
-
-  return Math.max(0.25, frameCount / durationSeconds)
-}
-
-function runFfmpeg(args) {
-  return new Promise((resolve, reject) => {
-    const process = spawn(ffmpegPath, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stderr = ''
-
-    process.stderr.on('data', (chunk) => {
-      stderr += chunk.toString()
-    })
-
-    process.on('error', (error) => {
-      reject(error)
-    })
-
-    process.on('close', (code) => {
-      if (code === 0) {
-        resolve()
-        return
-      }
-
-      reject(new Error(stderr || `ffmpeg exited with code ${code}.`))
-    })
-  })
 }
 
 function clampAnimatorFrameCount(frameCount) {
@@ -3479,19 +1906,6 @@ function clampActionAnimatorFps(fps) {
   return Math.max(1, Math.min(30, Math.round(numericValue)))
 }
 
-function clampActionAnimatorDurationSeconds(durationSeconds) {
-  const numericValue = Number(durationSeconds)
-
-  if (!Number.isFinite(numericValue)) {
-    return minActionAnimatorDurationSeconds
-  }
-
-  return Math.max(
-    minActionAnimatorDurationSeconds,
-    Math.min(maxActionAnimatorDurationSeconds, Math.round(numericValue)),
-  )
-}
-
 function describeAnimatorMotion(actionType) {
   switch (actionType) {
     case 'attack':
@@ -3503,7 +1917,7 @@ function describeAnimatorMotion(actionType) {
     case 'walk':
       return 'Emphasize alternating contact, passing, and recoil poses so the walk cycle has clear readable spacing.'
     case 'idle':
-      return 'Keep the idle subtle but still readable, with weight shift, cloth drag, and arm movement that changes the silhouette.'
+      return 'Keep both feet planted and the head, equipment and outfit recognizable. Use a subtle cyclic weight shift or breathing motion. The last pose should lead smoothly into the first without repeating it or creating a pause.'
     default:
       return 'Show one complete readable action arc with strong silhouette changes and no duplicate adjacent poses.'
   }
@@ -3552,19 +1966,17 @@ function resolveModelForRoute(routeKey, requestedModelId) {
 }
 
 function normalizeImageModelAlias(modelId) {
-  return modelId === 'gemini-2.5-flash-image'
-    ? 'gemini-3-flash-lite'
-    : modelId
+  return ['openai-gpt-image-2', 'openai-text', 'gemini-2.5-flash-image', 'gemini-3-flash-lite', 'gemini-3.1-flash-image-preview', 'veo-3.1-fast'].includes(modelId) ? 'codex' : modelId
 }
 
-function getActionAnimatorAllowedModelIds(pipeline = 'veo-video') {
+function getActionAnimatorAllowedModelIds(pipeline = 'image-strip') {
   return pipeline === 'image-strip'
     ? actionAnimatorImageModels
     : [routeModelDefaults['/api/action-animator']]
 }
 
-function getActionAnimatorDefaultModelId(pipeline = 'veo-video') {
-  return pipeline === 'image-strip' ? 'openai-gpt-image-2' : routeModelDefaults['/api/action-animator']
+function getActionAnimatorDefaultModelId(pipeline = 'image-strip') {
+  return pipeline === 'image-strip' ? 'codex' : routeModelDefaults['/api/action-animator']
 }
 
 function resolveActionAnimatorModelSelection({ modelId, pipeline }) {
@@ -3591,15 +2003,6 @@ function resolveActionAnimatorModelSelection({ modelId, pipeline }) {
   return resolveModelForRoute('/api/action-animator', normalizedRequestedModel)
 }
 
-function buildRouteModelFallbackSequence(routeKey, preferredModelId) {
-  const allowedModels = routeModelAllowlist[routeKey] ?? []
-
-  return [
-    preferredModelId,
-    ...allowedModels.filter((modelId) => modelId !== preferredModelId),
-  ]
-}
-
 function extractTotalTokenCount(result) {
   const directCount = result?.usageMetadata?.totalTokenCount
   const nestedCount = result?.response?.usageMetadata?.totalTokenCount
@@ -3610,20 +2013,6 @@ function extractTotalTokenCount(result) {
   const tokenCount = Number(directCount ?? nestedCount ?? openAiTotal)
 
   return Number.isFinite(tokenCount) && tokenCount > 0 ? Math.round(tokenCount) : 0
-}
-
-function resolveProviderLabel(provider) {
-  return provider === 'openai' ? 'OpenAI' : 'Gemini'
-}
-
-function hasApiKeyForProvider(provider) {
-  return provider === 'openai' ? Boolean(openAiApiKey) : Boolean(apiKey)
-}
-
-function buildMissingApiKeyMessage(provider) {
-  return provider === 'openai'
-    ? 'OpenAI API key is missing. Set OPENAI_API_KEY in .env on the server.'
-    : 'Gemini API key is missing. Set GEMINI_API_KEY in .env or use GOOGLE_API_KEY on the server.'
 }
 
 function buildNoImageResponseError(
@@ -3668,35 +2057,6 @@ function buildNoImageResponseError(
   }
 }
 
-function buildIncompleteBatchResponseError({
-  candidateCount,
-  imageCount,
-  modelSelection,
-  preferredError,
-}) {
-  const details = [
-    `Requested images: ${candidateCount}`,
-    `Completed images: ${imageCount}`,
-    `Selected model alias: ${modelSelection.modelId}`,
-    `Provider model: ${modelSelection.providerModel}`,
-    'Try the request again. If this keeps happening, reduce the batch count.',
-  ]
-
-  if (preferredError?.body?.error?.message) {
-    details.push(`Last upstream error: ${preferredError.body.error.message}`)
-  }
-
-  return {
-    error: {
-      code: 'batch_incomplete',
-      details,
-      message:
-        `${resolveProviderLabel(modelSelection.provider)} did not return the full requested image batch for this forge run. Try again or reduce the batch count.`,
-      title: `${resolveProviderLabel(modelSelection.provider)} Batch Incomplete`,
-    },
-  }
-}
-
 function looksLikeToolDelegation(generationText) {
   if (typeof generationText !== 'string' || !generationText.trim()) {
     return false
@@ -3710,144 +2070,14 @@ function looksLikeToolDelegation(generationText) {
   )
 }
 
-function normalizeGenerationError(
-  error,
-  modelName = routeModelDefaults['/api/forge'],
-  provider = 'google',
-) {
-  const providerLabel = resolveProviderLabel(provider)
-  const modelLabel = MODEL_LABELS[modelName] ?? modelName
-  const payloadFromError =
-    error && typeof error === 'object' && 'payload' in error ? error.payload : null
-  const statusFromError =
-    error && typeof error === 'object' && 'status' in error ? Number(error.status) : null
-
-  if (
-    payloadFromError?.error &&
-    typeof payloadFromError.error.title === 'string' &&
-    typeof payloadFromError.error.message === 'string'
-  ) {
-    return {
-      status: Number.isFinite(statusFromError) && statusFromError > 0 ? statusFromError : 500,
-      body: payloadFromError,
-    }
-  }
-
-  const fallbackMessage =
-    error instanceof Error ? error.message : `${providerLabel} request failed unexpectedly.`
-  const parsedPayload = tryParseErrorPayload(fallbackMessage)
-  const payload = payloadFromError?.error ?? payloadFromError ?? parsedPayload?.error ?? parsedPayload
-  const statusCode = Number(statusFromError ?? payload?.code) || 500
-  const statusText = String(payload?.status ?? '').toUpperCase()
-  const message = String(payload?.message || fallbackMessage)
-  const retryAfterSeconds = extractRetryAfterSeconds(payload)
-
-  if (
-    statusCode === 429 ||
-    statusText === 'RESOURCE_EXHAUSTED' ||
-    message.toLowerCase().includes('quota exceeded') ||
-    message.toLowerCase().includes('rate limit')
-  ) {
-    return {
-      status: 429,
-      body: {
-        error: {
-          code: provider === 'openai' ? 'rate_limit_exceeded' : 'quota_exceeded',
-          details:
-            provider === 'openai'
-              ? buildOpenAiRateLimitDetails(payload, retryAfterSeconds)
-              : buildQuotaDetails(payload, retryAfterSeconds),
-          message:
-            provider === 'openai'
-              ? `This OpenAI key or project does not currently have usable rate limit capacity for ${modelLabel}. Check your usage tier, project limits, and billing status.`
-              : `This Gemini key or project does not currently have usable quota for ${modelLabel}. ` +
-                'That can be caused by free-tier limits, missing billing, or model-specific quota restrictions.',
-          retryAfterSeconds,
-          title:
-            provider === 'openai' ? 'OpenAI Rate Limit Unavailable' : 'Gemini Quota Unavailable',
-        },
-      },
-    }
-  }
-
-  if (statusCode === 401 || statusCode === 403) {
-    return {
-      status: statusCode,
-      body: {
-        error: {
-          code: 'auth_failed',
-          details:
-            provider === 'openai'
-              ? buildOpenAiAuthDetails(payload)
-              : [
-                  'Verify that the API key belongs to the intended Google AI Studio project.',
-                  'Check that the project has access to Gemini image generation.',
-                ],
-          message:
-            `${providerLabel} rejected the request because the API key or project permissions are not valid for this model.`,
-          title: `${providerLabel} Authentication Failed`,
-        },
-      },
-    }
-  }
-
-  if (statusCode === 504 || statusText === 'DEADLINE_EXCEEDED') {
-    return {
-      status: 504,
-      body: {
-        error: {
-          code: 'request_timeout',
-          details: message ? [message] : undefined,
-          message:
-            `${providerLabel} did not finish this image request before the server timeout. Try again or reduce the batch count.`,
-          title: `${providerLabel} Request Timed Out`,
-        },
-      },
-    }
-  }
-
-  return {
-    status: statusCode,
-    body: {
-      error: {
-        code: 'request_failed',
-        details: message ? [message] : undefined,
-        message: `${providerLabel} returned an unexpected error while processing this forge request.`,
-        title: `${providerLabel} Request Failed`,
-      },
-    },
-  }
-}
-
-function tryParseErrorPayload(message) {
-  const trimmedMessage = String(message).trim()
-
-  if (!trimmedMessage.startsWith('{')) {
-    return null
-  }
-
-  try {
-    return JSON.parse(trimmedMessage)
-  } catch {
-    return null
-  }
-}
-
-function extractRetryAfterSeconds(payload) {
-  const retryDelay = payload?.details?.find?.(
-    (detail) => detail?.['@type'] === 'type.googleapis.com/google.rpc.RetryInfo',
-  )?.retryDelay
-
-  if (typeof retryDelay !== 'string') {
-    return undefined
-  }
-
-  const numericValue = Number.parseInt(retryDelay, 10)
-  return Number.isFinite(numericValue) ? numericValue : undefined
-}
-
-function buildRequestId(prefix) {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+function normalizeGenerationError(error) {
+  const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 502
+  const message = typeof error?.message === 'string' ? error.message : 'Codex did not complete this request.'
+  return { status, body: { error: {
+    code: error?.code || 'codex_request_failed',
+    title: error?.code === 'animation_grid_invalid' ? 'Animation Grid Needs Correction' : status === 409 ? 'Codex Is Busy' : status === 401 ? 'Codex Sign-in Required' : 'Codex Generation Stopped',
+    message, details: ['No API-key fallback or automatic retry was made.'],
+  } } }
 }
 
 function clampTimeoutMs(value, fallback) {
@@ -3864,129 +2094,6 @@ function clampNonNegativeInteger(value, fallback) {
   }
 
   return Math.round(value)
-}
-
-function logServerEvent(requestId, message, details) {
-  const serializedDetails =
-    details && Object.keys(details).length > 0
-      ? ` ${JSON.stringify(sanitizeLogDetails(details))}`
-      : ''
-  console.log(`[${new Date().toISOString()}] [${requestId}] ${message}${serializedDetails}`)
-}
-
-function sanitizeLogDetails(value) {
-  if (Array.isArray(value)) {
-    return value.map((entry) => sanitizeLogDetails(entry))
-  }
-
-  if (!value || typeof value !== 'object') {
-    return typeof value === 'string' && value.length > 160
-      ? `${value.slice(0, 157)}...`
-      : value
-  }
-
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => {
-      if (
-        key === 'data' ||
-        key === 'inlineData' ||
-        key === 'prompt' ||
-        key === 'systemInstruction' ||
-        key === 'contents'
-      ) {
-        return [key, '[redacted]']
-      }
-
-      return [key, sanitizeLogDetails(entry)]
-    }),
-  )
-}
-
-async function withTimeout(promise, timeoutMs, timeoutMessage) {
-  let timeoutHandle
-
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timeoutHandle = setTimeout(() => {
-          reject(
-            new Error(
-              JSON.stringify({
-                error: {
-                  code: 504,
-                  message: timeoutMessage,
-                  status: 'DEADLINE_EXCEEDED',
-                },
-              }),
-            ),
-          )
-        }, timeoutMs)
-      }),
-    ])
-  } finally {
-    clearTimeout(timeoutHandle)
-  }
-}
-
-function buildQuotaDetails(payload, retryAfterSeconds) {
-  const details = []
-  const model = payload?.details
-    ?.find?.((detail) => detail?.['@type'] === 'type.googleapis.com/google.rpc.QuotaFailure')
-    ?.violations?.[0]?.quotaDimensions?.model
-
-  if (model) {
-    details.push(`Model affected: ${model}`)
-  }
-
-  details.push('Usage counters in AI Studio can be non-zero while a specific model still has zero available quota.')
-  details.push('Check billing, project selection, and model-specific quota access for this API key.')
-
-  if (retryAfterSeconds) {
-    details.push(`Retry hint from Gemini: wait about ${retryAfterSeconds} seconds before testing again.`)
-  }
-
-  return details
-}
-
-function buildOpenAiRateLimitDetails(payload, retryAfterSeconds) {
-  const details = []
-
-  if (typeof payload?.type === 'string' && payload.type) {
-    details.push(`OpenAI error type: ${payload.type}`)
-  }
-
-  details.push('Check your project limits, usage tier, and billing status in the OpenAI dashboard.')
-
-  if (retryAfterSeconds) {
-    details.push(`Retry hint from OpenAI: wait about ${retryAfterSeconds} seconds before testing again.`)
-  }
-
-  return details
-}
-
-function buildOpenAiAuthDetails(payload) {
-  const details = [
-    'Verify that the API key belongs to the intended OpenAI project or organization.',
-    'If this key is tied to a specific project, set OPENAI_PROJECT_ID so requests are scoped to the same project.',
-    'If your account spans multiple organizations and you use a legacy user key, set OPENAI_ORGANIZATION_ID too.',
-    'Check that the project has access to GPT Image generation.',
-    'Some OpenAI projects require API Organization Verification before GPT Image requests will succeed.',
-  ]
-
-  if (typeof payload?.type === 'string' && payload.type) {
-    details.push(`OpenAI error type: ${payload.type}`)
-  }
-
-  if (typeof payload?.code === 'string' && payload.code) {
-    details.push(`OpenAI error code: ${payload.code}`)
-  }
-
-  if (typeof payload?.message === 'string' && payload.message.trim()) {
-    details.push(`OpenAI response: ${payload.message.trim()}`)
-  }
-
-  return details
 }
 
 function normalizeLootRarity(rarity) {
@@ -4039,8 +2146,12 @@ function clampPercentage(value, fallback) {
   return Math.max(0, Math.min(100, Math.round(numericValue)))
 }
 
-function sleep(durationMs) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, durationMs)
-  })
+function createTextAi() {
+  return { models: { async generateContent({ contents, config = {} }) {
+    return { text: await generateCodexText({
+      prompt: contents.map(part => part.text ?? '').join('\n'),
+      systemInstruction: config.systemInstruction,
+      signal: generationContext.getStore()?.signal,
+    }) }
+  } } }
 }

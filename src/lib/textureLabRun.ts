@@ -150,7 +150,7 @@ export function useTextureLabRun(onCandidate: (result: ForgeResult) => void) {
           })
           if (!region) current = { ...current, id: result.id }
           if (region && result.texture?.status === 'finished') {
-            const b = result.texture.sourceRect.seamBand / 2,
+            const b = Math.ceil(result.texture.sourceRect.seamBand / 2),
               n = result.texture.exportSize
             if (
               region.x >= b &&

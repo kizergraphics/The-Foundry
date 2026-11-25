@@ -122,6 +122,7 @@ export type TextureLabState = {
   settings: TextureSettings
   expansionSource: ReferenceAsset | null
   expansionTargetSize: TextureExpansionTargetSize
+  sourceSeamlessMode: boolean
   seamlessMode: boolean
   workflow: TextureLabWorkflow
 }
@@ -200,6 +201,7 @@ export type ForgeAction =
   | { type: 'set-character-sheet-parent-id'; parentId: string | null }
   | { type: 'set-texture-settings'; settings: Partial<TextureSettings> }
   | { type: 'set-texture-expansion-source'; asset: ReferenceAsset | null }
+  | { type: 'set-texture-source-seamless-mode'; enabled: boolean }
   | { type: 'set-texture-lab-seamless-mode'; enabled: boolean }
   | {
       type: 'set-texture-expansion-target-size'
@@ -318,12 +320,12 @@ export const modeDefinitions: Record<ForgeMode, ModeDefinition> = {
     label: 'Action Animator',
     eyebrow: 'Motion',
     description:
-      'Turns a locked character image into a video-based motion strip for quick animation blocking.',
+      'Turns a locked character image into looping 2D sprites and a transparent atlas. No 3D rig or clip is generated.',
     instruction:
-      '2D side-view animation strip, locked camera, consistent scale, readable motion spacing',
+      '2D sprite grid, match source view, locked camera, consistent scale, readable motion spacing',
     surfaceClassName:
       'from-cyan-400/18 via-slate-950/80 to-slate-950/95 ring-cyan-300/20',
-    previewAspectClassName: 'aspect-[8/1]',
+    previewAspectClassName: 'aspect-square',
     previewImageClassName: 'object-contain',
     icon: Clapperboard,
     focus: 'Motion strips, animation loops, frame timing',
@@ -463,13 +465,13 @@ export const initialState: ForgeState = {
     actionType: 'idle',
     characterImage: null,
     customActionPrompt: '',
-    frameCount: 8,
+    frameCount: 16,
     firstFrameGuide: null,
-    fps: 8,
+    fps: 12,
     keyColor: 'green',
     lastFrameGuide: null,
     normalizedSize: 512,
-    pipeline: 'veo-video',
+    pipeline: 'image-strip',
   },
   generationCount: 3,
   portraitStudio: {
@@ -485,6 +487,7 @@ export const initialState: ForgeState = {
     settings: { ...textureDefaults },
     expansionSource: null,
     expansionTargetSize: 1024,
+    sourceSeamlessMode: true,
     seamlessMode: false,
     workflow: 'expand',
   },
@@ -646,6 +649,8 @@ export function forgeReducer(state: ForgeState, action: ForgeAction): ForgeState
           expansionSource: action.asset,
         },
       }
+    case 'set-texture-source-seamless-mode':
+      return { ...state, textureLab: { ...state.textureLab, sourceSeamlessMode: action.enabled } }
     case 'set-texture-lab-seamless-mode':
       return {
         ...state,

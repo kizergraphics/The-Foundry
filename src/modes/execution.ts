@@ -1,4 +1,5 @@
 import type { TextureMetadata } from '../../shared/textureLab.js'
+import { reportLibrarySave } from '../lib/imageLibrary'
 import {
   createDataUrl,
   dataUrlToBlob,
@@ -18,6 +19,10 @@ import type {
 } from '../../shared/vfxForgeCatalog.js'
 
 export type ForgeApiResponse = {
+  partial?: boolean
+  requestedCount?: number
+  completedCount?: number
+  warning?: string
   error?:
     | string
     | {
@@ -61,6 +66,25 @@ export type ForgeRequestOptions = {
   timeoutMs?: number
 }
 
+export async function runForgeBatch<T>(
+  mode: ForgeMode,
+  totalCount: number,
+  runSlot: (slotIndex: number) => Promise<T>,
+): Promise<T[]> {
+  // The Codex runtime permits only one active image generation, across all modes.
+  void mode
+  const workerCount = Math.min(totalCount, 1)
+  const results = new Array<T>(totalCount)
+  let nextSlot = 0
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextSlot < totalCount) {
+      const slotIndex = nextSlot++
+      results[slotIndex] = await runSlot(slotIndex)
+    }
+  }))
+  return results
+}
+
 function buildForgeRequestTimeoutError(timeoutMs: number) {
   return {
     code: 'request_timeout',
@@ -69,7 +93,7 @@ function buildForgeRequestTimeoutError(timeoutMs: number) {
       'The stalled slot was stopped so the forge pass can finish with completed outputs visible.',
     ],
     message:
-      'One output slot did not finish before the client timeout. The app will retry it when possible.',
+      'One output slot did not finish before the client timeout. It was not automatically retried. Check the local Codex job before starting another run.',
     title: 'Output Slot Timed Out',
   }
 }
@@ -85,7 +109,7 @@ export async function postForgeRequest(
   const request = fetch('/api/forge', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json', 'X-Foundry-Request': '1',
     },
     body: JSON.stringify(body),
     signal: controller?.signal,
@@ -121,6 +145,7 @@ export async function postForgeRequest(
   }
 
   const payload = (await response.json()) as ForgeApiResponse | undefined
+  reportLibrarySave(response)
 
   return {
     ok: response.ok,
@@ -132,7 +157,7 @@ export async function postVfxRecipeRequest(body: Record<string, unknown>) {
   const response = await fetch('/api/vfx-recipe', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json', 'X-Foundry-Request': '1',
     },
     body: JSON.stringify(body),
   })
@@ -148,7 +173,7 @@ export async function postVfxExportRequest(body: Record<string, unknown>) {
   const response = await fetch('/api/vfx-export', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json', 'X-Foundry-Request': '1',
     },
     body: JSON.stringify(body),
   })

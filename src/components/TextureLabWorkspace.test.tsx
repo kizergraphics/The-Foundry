@@ -32,9 +32,10 @@ describe('Texture Lab workspace', () => {
     expect(seam).toHaveBeenCalledWith(false)
     expect(screen.getByText(/6 planned provider calls/)).toBeInTheDocument()
   })
-  it('selects, previews, edits and exports the explicitly selected candidate', () => {
+  it('previews, edits, exports and sends the selected candidate to PBR', () => {
     const options = validateTextureRequest({ targetSize: 512 }),
       download = vi.fn(),
+      useForPbr = vi.fn(),
       edit = vi.fn()
     const results: ForgeResult[] = ['a', 'b'].map((id) => ({
       id,
@@ -66,6 +67,7 @@ describe('Texture Lab workspace', () => {
         results={results}
         runner={runner}
         onDownload={download}
+        onUseForPbr={useForPbr}
       />,
     )
     fireEvent.change(screen.getByLabelText('Selected candidate'), {
@@ -75,6 +77,8 @@ describe('Texture Lab workspace', () => {
     expect(screen.getByText('5×5')).toHaveAttribute('aria-pressed', 'true')
     fireEvent.click(screen.getByText('Export selected candidate'))
     expect(download).toHaveBeenCalledWith(results[0], 0)
+    fireEvent.click(screen.getByRole('button', { name: 'Use selected texture for PBR' }))
+    expect(useForPbr).toHaveBeenCalledWith(results[0])
     fireEvent.click(screen.getByText('1×1'))
     fireEvent.click(screen.getByText('Select corner region'))
     fireEvent.click(screen.getByText('Regenerate selected region'))

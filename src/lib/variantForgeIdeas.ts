@@ -96,7 +96,7 @@ export async function postVariantForgeIdeaRequest(body: VariantForgeIdeaRequest)
   const response = await fetch('/api/variant-forge-ideas', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json', 'X-Foundry-Request': '1',
     },
     body: JSON.stringify(body),
   })

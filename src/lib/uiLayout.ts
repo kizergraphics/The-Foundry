@@ -19,7 +19,7 @@ export const layoutShellItemIds = [
 ] as const
 
 export const layoutPanelItemIds = [
-  'model-selector',
+  'image-quality',
   'style-input',
   'prompt-panel',
   'style-reference',
@@ -77,7 +77,7 @@ const defaultModePanelLayouts: Record<ForgeMode, ModePanelLayout> = {
   armory: {
     control: {
       primary: [
-        'model-selector',
+        'image-quality',
         'style-input',
         'prompt-panel',
         'style-reference',
@@ -94,7 +94,7 @@ const defaultModePanelLayouts: Record<ForgeMode, ModePanelLayout> = {
   },
   'action-animator': {
     control: {
-      primary: ['model-selector', 'action-animator-panel'],
+      primary: ['image-quality', 'action-animator-panel'],
       secondary: ['forge-action'],
     },
     workspace: {
@@ -105,7 +105,7 @@ const defaultModePanelLayouts: Record<ForgeMode, ModePanelLayout> = {
   },
   'character-sheet': {
     control: {
-      primary: ['model-selector', 'character-sheet-panel'],
+      primary: ['image-quality', 'character-sheet-panel'],
       secondary: ['forge-action'],
     },
     workspace: {
@@ -116,7 +116,7 @@ const defaultModePanelLayouts: Record<ForgeMode, ModePanelLayout> = {
   },
   'portrait-studio': {
     control: {
-      primary: ['model-selector', 'portrait-studio-panel', 'portrait-direction'],
+      primary: ['image-quality', 'portrait-studio-panel', 'portrait-direction'],
       secondary: ['forge-action'],
     },
     workspace: {
@@ -128,7 +128,7 @@ const defaultModePanelLayouts: Record<ForgeMode, ModePanelLayout> = {
   'texture-lab': {
     control: {
       primary: [
-        'model-selector',
+        'image-quality',
         'texture-workflow',
         'style-input',
         'prompt-panel',
@@ -158,7 +158,7 @@ const defaultModePanelLayouts: Record<ForgeMode, ModePanelLayout> = {
   },
   'variant-forge': {
     control: {
-      primary: ['model-selector', 'variant-forge-panel'],
+      primary: ['image-quality', 'variant-forge-panel', 'batch-panel'],
       secondary: ['forge-action'],
     },
     workspace: {
@@ -169,7 +169,7 @@ const defaultModePanelLayouts: Record<ForgeMode, ModePanelLayout> = {
   },
   'vfx-forge': {
     control: {
-      primary: ['model-selector', 'vfx-forge-panel', 'style-reference'],
+      primary: ['image-quality', 'vfx-forge-panel', 'style-reference'],
       secondary: ['forge-action'],
     },
     workspace: {
@@ -181,7 +181,7 @@ const defaultModePanelLayouts: Record<ForgeMode, ModePanelLayout> = {
   visualizer: {
     control: {
       primary: [
-        'model-selector',
+        'image-quality',
         'style-input',
         'prompt-panel',
         'style-reference',
@@ -204,7 +204,7 @@ const panelAreaByItem: Record<LayoutPanelItemId, LayoutArea> = {
   'character-sheet-panel': 'control',
   'forge-action': 'control',
   'forge-brief': 'workspace',
-  'model-selector': 'control',
+  'image-quality': 'control',
   'portrait-direction': 'control',
   'portrait-studio-panel': 'control',
   'prompt-panel': 'control',

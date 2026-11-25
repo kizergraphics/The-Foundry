@@ -3,6 +3,7 @@ import { Worker } from 'node:worker_threads'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { matchTextureEdges, smoothFalloff, softenSourceJoin } from './textureEdges.js'
 import {
   validateTextureRequest,
   textureGeometry,
@@ -24,6 +25,31 @@ export async function decodeTexture(image) {
     data: result.data,
     width: result.info.width,
     height: result.info.height,
+  }
+}
+// Native tools choose their own resolution. Square resampling preserves the
+// reference coordinate system; cropping/stretching a different aspect does not.
+export async function normalizeTextureProviderImage(image, targetSize, { matchEdges = false } = {}) {
+  if (!Number.isInteger(targetSize) || targetSize < 1 || targetSize > 4096)
+    throw new Error('Invalid texture normalization size.')
+  const decoded = await decodeTexture(image)
+  if (decoded.width !== decoded.height)
+    throw new Error(
+      `Provider returned ${decoded.width}x${decoded.height}; expected a square (1:1) image matching the reference canvas. Non-square output cannot be safely aligned with protected source pixels. Retry with square output.`,
+    )
+  let resized = sharp(decoded.data, rawOptions(decoded.width))
+    .resize(targetSize, targetSize, { kernel: 'lanczos3' })
+  if (matchEdges) {
+    const pixels = await resized.raw().toBuffer()
+    matchTextureEdges(pixels, targetSize, Math.min(Math.floor(targetSize / 2), Math.ceil(targetSize * 0.03)))
+    resized = sharp(pixels, rawOptions(targetSize))
+  }
+  const data = await resized.png().toBuffer()
+  return {
+    ...image,
+    data: data.toString('base64'),
+    mimeType: 'image/png',
+    providerDimensions: { width: decoded.width, height: decoded.height },
   }
 }
 export function wrapPixels(data, size, offset) {
@@ -148,6 +174,7 @@ export async function processTexture(
   const intermediate =
     o.operation === 'expand' && o.factor === 4 && o.stage === 1
   const size = intermediate ? viewport.size : n
+  const finishWidth = Math.ceil(g.seamBand / 2)
   const local = {
     ...g,
     x: g.x - (intermediate ? viewport.x : 0),
@@ -220,16 +247,11 @@ export async function processTexture(
         )
   }
   if (o.operation === 'finish') {
-    mask.fill(0)
     for (let y = 0; y < n; y++)
-      for (let x = 0; x < n; x++)
-        if (
-          x < g.seamBand / 2 ||
-          x >= n - g.seamBand / 2 ||
-          y < g.seamBand / 2 ||
-          y >= n - g.seamBand / 2
-        )
-          mask[y * n + x] = 255
+      for (let x = 0; x < n; x++) {
+        const distance = Math.min(x, y, n - 1 - x, n - 1 - y)
+        mask[y * n + x] = Math.round(255 * smoothFalloff(distance, finishWidth))
+      }
   }
   sourceProtection(mask, size, local)
   if (!mask.some((v) => v > 0))
@@ -244,8 +266,8 @@ export async function processTexture(
     mask = Uint8Array.from(mask, (_, i) => wrapped[i * 4])
   }
   let generated,
-    generationSize = size,
-    usage = null
+    providerDimensions,
+    generationSize = size
   if (o.technique === 'faithful') {
     generated = await runQuilt({
       source: scaled,
@@ -284,19 +306,19 @@ export async function processTexture(
         ].join(' '),
       ),
     })
-    usage = image.usage ?? null
-    const decoded = await decodeTexture(image)
-    if (decoded.width !== generationSize || decoded.height !== generationSize)
-      throw new Error(
-        `Provider returned ${decoded.width}×${decoded.height}; expected ${generationSize}×${generationSize}.`,
-      )
-    generated = await sharp(decoded.data, rawOptions(generationSize))
-      .resize(size, size)
-      .raw()
-      .toBuffer()
+    // Normalize generated pixels before compositing; never resize protected pixels afterward.
+    const normalized = await normalizeTextureProviderImage(image, size)
+    providerDimensions = normalized.providerDimensions
+    generated = (await decodeTexture(normalized)).data
   }
   let output = blendPixels(base, generated, mask)
-  if (o.operation === 'finish') output = wrapPixels(output, n, n / 2)
+  if (o.operation === 'expand' && o.seamlessMode && o.preservation === 'preserve') {
+    softenSourceJoin(output, size, local, finishWidth)
+  }
+  if (o.operation === 'finish') {
+    output = wrapPixels(output, n, n / 2)
+    if (o.seamlessMode) matchTextureEdges(output, n, Math.ceil(finishWidth / 2))
+  }
   const png = await sharp(output, rawOptions(size)).png().toBuffer()
   return {
     id: `texture-${randomUUID()}`,
@@ -306,6 +328,7 @@ export async function processTexture(
       options: o,
       sourceRect: g,
       generationSize,
+      ...(providerDimensions ? { providerDimensions } : {}),
       exportSize: size,
       status: intermediate
         ? 'intermediate'
@@ -320,7 +343,6 @@ export async function processTexture(
           : maskSupported
             ? 'native mask + protected composite'
             : 'reference guidance + protected composite',
-      usage,
       elapsedMs: Date.now() - started,
     },
   }

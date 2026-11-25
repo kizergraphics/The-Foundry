@@ -243,14 +243,15 @@ export async function sliceSpriteSheetFrames(
     throw new Error('Canvas rendering is not available in this browser.')
   }
 
-  const safeFrameCount = Math.max(1, Math.round(frameCount))
+  const safeFrameCount = validateSpriteCount(frameCount)
   const frameWidth = image.naturalWidth / safeFrameCount
   const outputWidth = Math.max(1, Math.round(frameWidth))
   const frameHeight = image.naturalHeight
   canvas.width = outputWidth
   canvas.height = frameHeight
 
-  return Promise.all(Array.from({ length: safeFrameCount }, async (_, index) => {
+  const results: string[] = []
+  for (let index = 0; index < safeFrameCount; index += 1) {
     context.clearRect(0, 0, outputWidth, frameHeight)
     context.drawImage(
       image,
@@ -264,8 +265,9 @@ export async function sliceSpriteSheetFrames(
       frameHeight,
     )
 
-    return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
-  }))
+    results.push(await blobToDataUrl(await canvasToBlob(canvas, 'image/png')))
+  }
+  return results
 }
 
 export async function sliceAnimatorStripSlots(
@@ -274,7 +276,7 @@ export async function sliceAnimatorStripSlots(
 ): Promise<string[]> {
   const blob = typeof source === 'string' ? await dataUrlToBlob(source) : source
   const image = await loadImage(blob)
-  const safeSlotCount = Math.max(1, Math.round(slotCount))
+  const safeSlotCount = validateSpriteCount(slotCount)
   const slotWidth = image.naturalWidth / safeSlotCount
   const outputWidth = Math.max(1, Math.round(slotWidth))
   const slotHeight = image.naturalHeight
@@ -287,7 +289,8 @@ export async function sliceAnimatorStripSlots(
     throw new Error('Canvas rendering is not available in this browser.')
   }
 
-  return Promise.all(Array.from({ length: safeSlotCount }, async (_, index) => {
+  const results: string[] = []
+  for (let index = 0; index < safeSlotCount; index += 1) {
     outputContext.clearRect(0, 0, outputWidth, slotHeight)
     outputContext.drawImage(
       image,
@@ -301,8 +304,9 @@ export async function sliceAnimatorStripSlots(
       slotHeight,
     )
 
-    return blobToDataUrl(await canvasToBlob(outputCanvas, 'image/png'))
-  }))
+    results.push(await blobToDataUrl(await canvasToBlob(outputCanvas, 'image/png')))
+  }
+  return results
 }
 
 export async function normalizeAnimatorSpriteFrames(
@@ -312,19 +316,12 @@ export async function normalizeAnimatorSpriteFrames(
     targetSize: number
   },
 ): Promise<NormalizeAnimatorFramesResult> {
-  const targetSize = Math.max(16, Math.round(options.targetSize))
-  const padding = Math.max(2, Math.round(targetSize * 0.0625))
-  const seedBlob =
-    typeof options.seedFrame === 'string'
-      ? await dataUrlToBlob(options.seedFrame)
-      : options.seedFrame
-  const seedImage = await loadImage(seedBlob)
-  const seedBounds = await measureImageBounds(seedImage)
-
-  if (!seedBounds) {
-    throw new Error('The seed frame did not contain readable sprite pixels.')
+  if (!frames.length) throw new Error('No animation frames were supplied.')
+  if (!Number.isFinite(options.targetSize) || options.targetSize < 16 || options.targetSize > 4096) {
+    throw new Error('Animation target size must be between 16 and 4096 pixels.')
   }
-
+  const targetSize = Math.round(options.targetSize)
+  const padding = Math.max(2, Math.round(targetSize * 0.0625))
   const frameImages = await Promise.all(
     frames.map(async (frame) => {
       const blob = typeof frame === 'string' ? await dataUrlToBlob(frame) : frame
@@ -337,38 +334,20 @@ export async function normalizeAnimatorSpriteFrames(
       }
     }),
   )
-  const globalBounds = [
-    seedBounds,
-    ...frameImages
-      .map((frame) => frame.bounds)
-      .filter((bounds): bounds is SpriteSheetBounds => bounds !== null),
-  ]
-  const maxWidth = Math.max(...globalBounds.map((bounds) => bounds.right - bounds.left + 1))
-  const maxHeight = Math.max(...globalBounds.map((bounds) => bounds.bottom - bounds.top + 1))
+  if (frameImages.some(frame => !frame.bounds)) throw new Error('An animation frame contains no readable sprite pixels.')
+  const first = frameImages[0].image
+  if (frameImages.some(frame => frame.image.naturalWidth !== first.naturalWidth || frame.image.naturalHeight !== first.naturalHeight)) {
+    throw new Error('Animation frames must have matching canvas dimensions before normalization.')
+  }
+  const sharedBounds = unionAnimatorBounds(frameImages.map(frame => frame.bounds!))
   const scale = Math.min(
-    (targetSize - padding * 2) / maxWidth,
-    (targetSize - padding * 2) / maxHeight,
+    (targetSize - padding * 2) / (sharedBounds.right - sharedBounds.left + 1),
+    (targetSize - padding * 2) / (sharedBounds.bottom - sharedBounds.top + 1),
   )
-  const frameDataUrls = [
-    await renderNormalizedAnimatorFrame(seedImage, seedBounds, {
-      padding,
-      scale,
-      targetSize,
-    }),
-    ...(await Promise.all(
-      frameImages.slice(1).map(async (frame) => {
-        if (!frame.bounds) {
-          return createAnimatorBackgroundFrameDataUrl(targetSize)
-        }
-
-        return renderNormalizedAnimatorFrame(frame.image, frame.bounds, {
-          padding,
-          scale,
-          targetSize,
-        })
-      }),
-    )),
-  ].slice(0, frames.length)
+  // Preserve every generated frame, including frame one; the reference is not a replacement pose.
+  const frameDataUrls = await Promise.all(frameImages.map(frame =>
+    renderNormalizedAnimatorFrame(frame.image, sharedBounds, { padding, scale, targetSize }),
+  ))
   const spriteSheetDataUrl = await composeHorizontalSpriteSheet(frameDataUrls, targetSize)
 
   return {
@@ -625,10 +604,10 @@ export async function sliceImageGrid(
     throw new Error('Canvas rendering is not available in this browser.')
   }
 
-  const safeColumns = Math.max(1, Math.round(options.columns))
-  const safeRows = Math.max(1, Math.round(options.rows))
+  const safeColumns = validateSpriteCount(options.columns)
+  const safeRows = validateSpriteCount(options.rows)
   const safeCount = Math.min(
-    Math.max(1, Math.round(options.count ?? safeColumns * safeRows)),
+    validateSpriteCount(options.count ?? safeColumns * safeRows),
     safeColumns * safeRows,
   )
   const sliceWidth = image.naturalWidth / safeColumns
@@ -638,7 +617,8 @@ export async function sliceImageGrid(
   canvas.width = outputWidth
   canvas.height = outputHeight
 
-  return Promise.all(Array.from({ length: safeCount }, async (_, index) => {
+  const results: string[] = []
+  for (let index = 0; index < safeCount; index += 1) {
     const column = index % safeColumns
     const row = Math.floor(index / safeColumns)
 
@@ -655,8 +635,9 @@ export async function sliceImageGrid(
       outputHeight,
     )
 
-    return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
-  }))
+    results.push(await blobToDataUrl(await canvasToBlob(canvas, 'image/png')))
+  }
+  return results
 }
 
 export function slicePortraitStudioFaces(source: string | Blob): Promise<string[]> {
@@ -765,21 +746,6 @@ async function renderNormalizedAnimatorFrame(
     drawHeight,
   )
 
-  return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
-}
-
-async function createAnimatorBackgroundFrameDataUrl(targetSize: number): Promise<string> {
-  const canvas = document.createElement('canvas')
-  canvas.width = targetSize
-  canvas.height = targetSize
-  const context = canvas.getContext('2d')
-
-  if (!context) {
-    throw new Error('Canvas rendering is not available in this browser.')
-  }
-
-  context.fillStyle = actionAnimatorBackgroundColor
-  context.fillRect(0, 0, targetSize, targetSize)
   return blobToDataUrl(await canvasToBlob(canvas, 'image/png'))
 }
 
@@ -1042,4 +1008,21 @@ function yieldToMainThread() {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, 0)
   })
+}
+
+function validateSpriteCount(value: number) {
+  if (!Number.isInteger(value) || value < 1 || value > 256) {
+    throw new Error('Sprite count must be a whole number from 1 to 256.')
+  }
+  return value
+}
+
+export function unionAnimatorBounds(bounds: SpriteSheetBounds[]): SpriteSheetBounds {
+  if (!bounds.length) throw new Error('No sprite bounds supplied.')
+  return {
+    left: Math.min(...bounds.map(bound => bound.left)),
+    top: Math.min(...bounds.map(bound => bound.top)),
+    right: Math.max(...bounds.map(bound => bound.right)),
+    bottom: Math.max(...bounds.map(bound => bound.bottom)),
+  }
 }

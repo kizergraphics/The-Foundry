@@ -45,6 +45,7 @@ export type VfxParticleSystemConfig = {
   }
   looping: boolean
   rendererMode: 'billboard' | 'stretched-billboard'
+  textureSheetAnimation?: { columns: number; rows: number; cycles: number } | null
   size: {
     max: number
     min: number
@@ -82,6 +83,9 @@ export type VfxRecipeTextureEntry = {
   materialSlots: string[]
   mimeType: string
   previewFileName: string
+  sourceMimeType?: string
+  width?: number
+  height?: number
 }
 
 export type VfxRecipeManifest = {

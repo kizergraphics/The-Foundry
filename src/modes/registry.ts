@@ -77,7 +77,6 @@ export function getModePresentation({
     flags.isPortraitStudioMode ||
     flags.isTextureExpansionMode ||
     flags.isUvLabMode ||
-    flags.isVariantForgeMode ||
     flags.isVfxForgeMode
 
   return {
@@ -124,7 +123,7 @@ export function getModePresentation({
       : flags.isActionAnimatorMode
         ? 'Action Animator sprite sheet'
         : flags.isVariantForgeMode
-          ? 'Variant Forge output slot'
+          ? 'Variant Forge output slots'
           : flags.isPortraitStudioMode
             ? 'Portrait Studio contact sheet'
               : flags.isUvLabMode
